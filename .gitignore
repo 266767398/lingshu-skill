@@ -1,0 +1,20 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时数据（记忆库）——绝不上传
+.brain-memory/
+*.jsonl
+*.corrupt
+*.lock
+dreams/
+verbatim/
+
+# 本地面板 token / 环境
+.env
+LINGSHU_PANEL_TOKEN
+
+# 系统杂项
+Thumbs.db
+.DS_Store

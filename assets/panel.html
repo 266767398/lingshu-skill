@@ -1,0 +1,1350 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>灵枢 · 类脑记忆</title>
+<style>
+  :root{
+    --bg:#0a0c0f; --surface:#11151a; --surface2:#151a21; --line:#222831;
+    --text:#e9e6df; --muted:#8b919b; --faint:#5d646e;
+    --amber:#d9a441; --amber-soft:rgba(217,164,65,.14);
+    --teal:#5fa8a0; --red:#c96b5f; --violet:#8d86c9;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:
+      radial-gradient(900px 500px at 85% -10%, rgba(217,164,65,.07), transparent 60%),
+      radial-gradient(700px 400px at 0% 110%, rgba(95,168,160,.05), transparent 60%),
+      var(--bg);
+    color:var(--text);
+    font:14px/1.6 "Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .app{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+  aside{
+    border-right:1px solid var(--line);padding:24px 16px 18px;
+    display:flex;flex-direction:column;gap:22px;position:sticky;top:0;height:100vh;
+    background:rgba(10,12,15,.6);
+  }
+  .brand{display:flex;align-items:center;gap:10px;font-size:15px;letter-spacing:.5px;font-weight:600;padding:0 8px}
+  .brand .orb{
+    width:26px;height:26px;border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, #f0c479, #b57a24 55%, #5c3f18);
+    box-shadow:0 0 18px rgba(217,164,65,.35);
+  }
+  .brand small{display:block;font-weight:400;font-size:10px;color:var(--faint);letter-spacing:1.4px}
+  nav{display:flex;flex-direction:column;gap:4px}
+  nav button{
+    all:unset;cursor:pointer;padding:9px 12px;border-radius:9px;color:var(--muted);
+    display:flex;align-items:center;gap:10px;font-size:13.5px;transition:.18s;
+  }
+  nav button:hover{background:rgba(255,255,255,.04);color:var(--text)}
+  nav button.active{background:var(--amber-soft);color:var(--amber)}
+  nav button .ic{width:16px;text-align:center;opacity:.9}
+  .sidefoot{margin-top:auto;font-size:11px;color:var(--faint);line-height:1.7;padding:0 8px;word-break:break-all}
+  .sidefoot b{color:var(--muted);font-weight:500}
+  main{padding:30px 38px 60px;max-width:1180px;width:100%}
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:26px}
+  h1{font-size:22px;font-weight:600;margin:0;letter-spacing:.3px}
+  .sub{color:var(--faint);font-size:12.5px}
+  .view{display:none;animation:fade .28s ease}
+  .view.active{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+  .grid{display:grid;gap:14px}
+  .cols-2{grid-template-columns:1.35fr 1fr}
+  .cols-4{grid-template-columns:repeat(4,1fr)}
+  .card{
+    background:linear-gradient(180deg,rgba(255,255,255,.015),transparent),var(--surface);
+    border:1px solid var(--line);border-radius:14px;padding:18px 20px;
+  }
+  .card h2{font-size:12px;letter-spacing:1.2px;text-transform:uppercase;color:var(--faint);margin:0 0 14px;font-weight:600}
+  .hero{display:flex;justify-content:space-between;gap:24px;align-items:flex-start}
+  .hero .name{font-size:26px;font-weight:600;letter-spacing:.5px}
+  .hero .role{color:var(--muted);margin-top:4px;font-size:13px}
+  .mood{
+    display:inline-flex;align-items:center;gap:7px;margin-top:14px;padding:5px 11px;border-radius:999px;
+    background:rgba(95,168,160,.1);border:1px solid rgba(95,168,160,.25);color:#9fd2cb;font-size:12px;
+  }
+  .mood::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px var(--teal)}
+  .metrics{display:flex;gap:26px;text-align:right}
+  .metric .n{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}
+  .metric .l{font-size:11px;color:var(--faint);letter-spacing:.6px}
+  .traits{display:grid;grid-template-columns:repeat(2,1fr);gap:10px 22px;margin-top:18px}
+  .trait{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--muted)}
+  .trait span:first-child{width:52px;flex-shrink:0}
+  .bar{flex:1;height:5px;border-radius:99px;background:#1d232b;overflow:hidden}
+  .bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,#8a6423,var(--amber))}
+  .trait b{width:24px;text-align:right;color:var(--text);font-weight:500;font-variant-numeric:tabular-nums}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+  .chip{padding:3px 9px;border-radius:999px;background:#1a1f26;border:1px solid var(--line);font-size:11.5px;color:var(--muted)}
+  .chip.good{border-color:rgba(95,168,160,.28);color:#9fd2cb;background:rgba(95,168,160,.07)}
+  .chip.bad{border-color:rgba(201,107,95,.28);color:#dda49b;background:rgba(201,107,95,.07)}
+
+  .mem{
+    display:flex;gap:14px;align-items:flex-start;padding:14px 16px;border:1px solid var(--line);
+    border-radius:12px;background:var(--surface);transition:.16s;
+  }
+  .mem:hover{border-color:#2c343f;transform:translateY(-1px)}
+  .mem + .mem{margin-top:8px}
+  .ring{
+    --p:50;width:40px;height:40px;flex-shrink:0;border-radius:50%;
+    background:conic-gradient(var(--amber) calc(var(--p) * 1%), #1e242c 0);
+    display:grid;place-items:center;position:relative;
+  }
+  .ring::before{content:"";position:absolute;inset:4px;border-radius:50%;background:var(--surface)}
+  .ring b{position:relative;font-size:9px;color:var(--muted);font-weight:500;font-variant-numeric:tabular-nums}
+  .mem-body{flex:1;min-width:0}
+  .mem-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:3px}
+  .badge{font-size:10.5px;padding:1.5px 7px;border-radius:5px;background:#1b2129;color:#9aa3ae;letter-spacing:.3px}
+  .badge.cortex{background:rgba(217,164,65,.12);color:#e3b96c}
+  .badge.hippo{background:rgba(95,168,160,.12);color:#9fd2cb}
+  .badge.dust{background:#191d23;color:#5d646e}
+  .stars{color:var(--amber);font-size:10px;letter-spacing:1px}
+  .date{color:var(--faint);font-size:11px;margin-left:auto;font-variant-numeric:tabular-nums}
+  .mem p{margin:0;color:#d8d5ce;font-size:13.5px;word-break:break-word}
+  .mem .tags{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap}
+  .mem .tags span{font-size:11px;color:var(--faint)}
+  .acts{display:flex;gap:4px;opacity:0;transition:.15s}
+  .mem:hover .acts{opacity:1}
+  .iconbtn{all:unset;cursor:pointer;width:26px;height:26px;display:grid;place-items:center;border-radius:7px;color:var(--faint);font-size:13px}
+  .iconbtn:hover{background:#1c222a;color:var(--text)}
+  .iconbtn.pin{color:var(--amber)}
+
+  .toolbar{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+  input,select,textarea{
+    background:var(--surface2);border:1px solid var(--line);color:var(--text);border-radius:9px;
+    padding:9px 12px;font:inherit;outline:none;transition:.15s;
+  }
+  input:focus,select:focus,textarea:focus{border-color:rgba(217,164,65,.45);box-shadow:0 0 0 3px rgba(217,164,65,.08)}
+  input::placeholder,textarea::placeholder{color:var(--faint)}
+  .search{flex:1;min-width:220px}
+  button.btn{
+    all:unset;cursor:pointer;padding:9px 15px;border-radius:9px;background:var(--amber);color:#1a1206;
+    font-size:13px;font-weight:600;text-align:center;transition:.15s;
+  }
+  button.btn:hover{filter:brightness(1.08)}
+  button.btn:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{
+    all:unset;cursor:pointer;padding:9px 15px;border-radius:9px;border:1px solid var(--line);
+    color:var(--muted);font-size:13px;text-align:center;transition:.15s;
+  }
+  button.ghost:hover{border-color:#333c48;color:var(--text)}
+  button.danger{all:unset;cursor:pointer;padding:9px 15px;border-radius:9px;background:rgba(201,107,95,.14);
+    border:1px solid rgba(201,107,95,.3);color:#dda49b;font-size:13px;text-align:center}
+  .empty{padding:36px;text-align:center;color:var(--faint);font-size:13px;border:1px dashed var(--line);border-radius:12px}
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .pre{white-space:pre-wrap;word-break:break-word;font:12.5px/1.75 "Cascadia Code",Consolas,monospace;
+    background:#0d1014;border:1px solid var(--line);border-radius:10px;padding:14px;color:#c6c2ba;max-height:420px;overflow:auto}
+  .pre.small{max-height:240px}
+  textarea{width:100%;resize:vertical;line-height:1.7;font-family:"Cascadia Code",Consolas,monospace;font-size:12.5px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:11.5px;color:var(--faint);margin-bottom:5px;letter-spacing:.4px}
+  .field input,.field select{width:100%}
+  .row{display:flex;gap:10px;align-items:center}
+  .row .btn{margin-left:auto}
+  .range{display:flex;align-items:center;gap:10px}
+  .range input[type=range]{flex:1;accent-color:var(--amber);background:none;border:none;padding:0}
+  .range b{width:38px;text-align:right;font-variant-numeric:tabular-nums;font-weight:500;color:var(--text)}
+  .list{margin:0;padding:0;list-style:none}
+  .list li{padding:9px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px;color:#d0cdc6}
+  .list li:last-child{border-bottom:none}
+  .list .meta{display:block;color:var(--faint);font-size:11px;margin-top:2px}
+  .hist{width:100%;border-collapse:collapse;font-size:12px}
+  .hist td{padding:7px 6px;border-bottom:1px solid rgba(255,255,255,.04);color:var(--muted);vertical-align:top}
+  .hist td:first-child{color:var(--faint);white-space:nowrap}
+  .hidden{display:none!important}
+  .modal{position:fixed;inset:0;background:rgba(4,6,9,.72);backdrop-filter:blur(4px);display:grid;place-items:center;z-index:50;padding:24px}
+  .modal .box{width:min(520px,100%);background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:22px;max-height:88vh;overflow:auto}
+  .modal h3{margin:0 0 16px;font-size:16px;font-weight:600}
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);opacity:0;transition:.25s;
+    background:#e9e6df;color:#12151a;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:500;z-index:99;pointer-events:none}
+  #toast.on{opacity:1;transform:translateX(-50%)}
+  #toast.err{background:#c96b5f;color:#fff}
+  .statline{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px}
+  .statline:last-child{border-bottom:none}
+  .statline span{color:var(--muted)}
+  .statline b{font-weight:500;font-variant-numeric:tabular-nums}
+  @media(max-width:980px){
+    .app{grid-template-columns:1fr}
+    aside{position:static;height:auto;flex-direction:row;align-items:center;padding:14px;gap:12px;border-right:none;border-bottom:1px solid var(--line);overflow:auto}
+    .brand{white-space:nowrap}
+    nav{flex-direction:row}
+    nav button span:last-child{display:none}
+    .sidefoot{display:none}
+    main{padding:20px}
+    .cols-2,.cols-4,.split{grid-template-columns:1fr}
+    .metrics{gap:16px}
+  }
+
+    .kg-title{margin:2px 0 6px;font-size:15px;font-weight:600}
+    .kgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+    .kcell{background:var(--surface2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+    .kcell b{display:block;font-size:22px;color:var(--amber);line-height:1.2}
+    .kcell span{font-size:11px;color:var(--muted)}
+    .statline{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:12px}
+    .statline:last-child{border-bottom:none}
+    .statline b{font-weight:500;color:var(--muted);text-align:right}
+    @media(max-width:900px){.kgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand">
+      <div class="orb"></div>
+      <div>灵枢<small>类脑记忆</small></div>
+    </div>
+    <nav>
+      <button class="active" data-tab="overview"><span class="ic">◉</span><span>概览</span></button>
+      <button data-tab="memories"><span class="ic">◈</span><span>记忆</span></button>
+      <button data-tab="persona"><span class="ic">☾</span><span>人格</span></button>
+      <button data-tab="knowledge"><span class="ic">▤</span><span>知识</span></button>
+      <button data-tab="notes"><span class="ic">✎</span><span>笔记</span></button>
+      <button data-tab="skills"><span class="ic">⚙</span><span>技能</span></button>
+      <button data-tab="growth"><span class="ic">↗</span><span>成长</span></button>
+      <button data-tab="dream"><span class="ic">✦</span><span>梦</span></button>
+    </nav>
+    <div class="sidefoot" id="sidefoot"></div>
+  </aside>
+
+  <main>
+    <header>
+      <div>
+        <h1 id="pageTitle">概览</h1>
+        <div class="sub" id="pageSub"></div>
+      </div>
+      <div class="sub" id="clock">2026/10/23 15:59:00</div>
+    </header>
+
+    <!-- 概览 -->
+    <section class="view active" id="view-overview">
+      <div class="card hidden" id="onboard-banner" style="margin-bottom:14px;border-color:var(--amber)">
+        <div class="row">
+          <div>
+            <h2 style="margin-bottom:4px">初识还没完成</h2>
+            <div class="sub" id="onboard-text"></div>
+          </div>
+          <button class="btn" id="onboard-go">去完成</button>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="hero">
+          <div>
+            <div class="name" id="p-name">—</div>
+            <div class="role" id="p-role"></div>
+            <div class="mood" id="p-mood">—</div>
+            <div class="chips" id="p-chips"></div>
+          </div>
+          <div class="metrics">
+            <div class="metric"><div class="n" id="m-total">0</div><div class="l">总记忆</div></div>
+            <div class="metric"><div class="n" id="m-cortex">0</div><div class="l">长期</div></div>
+            <div class="metric"><div class="n" id="m-hippo">0</div><div class="l">短期</div></div>
+            <div class="metric"><div class="n" id="m-ret">0%</div><div class="l">保留率</div></div>
+          </div>
+        </div>
+        <div class="traits" id="p-traits"></div>
+      </div>
+
+      <div class="split">
+        <div class="card">
+          <h2>最近写下的事</h2>
+          <div id="recent-list"></div>
+        </div>
+        <div class="card">
+          <h2>身体状态</h2>
+          <div id="stat-lines"></div>
+          <h2 style="margin-top:22px">上次做梦</h2>
+          <div id="last-dream" class="sub">还没有做过梦</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 记忆 -->
+    <section class="view" id="view-memories">
+      <div class="toolbar">
+        <input class="search" id="search" placeholder="模糊回忆：输入一句话或几个关键词…">
+        <select id="layerFilter">
+          <option value="">全部层</option>
+          <option value="cortex">长期记忆</option>
+          <option value="hippo">短期记忆</option>
+          <option value="dust">淡忘区</option>
+        </select>
+        <button class="ghost" id="btn-search">回忆</button>
+        <button class="btn" id="btn-add">＋ 写一条</button>
+      </div>
+      <div id="mem-list"></div>
+    </section>
+
+    <!-- 人格 -->
+    <section class="view" id="view-persona">
+      <div class="split">
+        <div class="card">
+          <h2>自我设定 · 可自行改写</h2>
+          <div class="sub" style="margin-bottom:10px">没有预写的人格种子。名字和性格由初识决定：用户不知道，就由它自己取；之后它想改也能改，每次改动都留一条历史。</div>
+          <div class="field"><label>名字</label><input id="pf-name" placeholder="空着 = 还没有名字"></div>
+          <div class="field"><label>身份</label><input id="pf-role" placeholder="空着 = 还没定"></div>
+          <div class="field"><label>怎么称呼你</label><input id="pf-callme" placeholder="空着 = 还没定"></div>
+          <div class="field"><label>性格（每行一个，如 好奇:85；空着 = 还没有）</label><textarea id="pf-traits" rows="6" spellcheck="false"></textarea></div>
+          <div class="field"><label>好奇心</label><input id="pf-cur" type="number" min="0" max="100" placeholder="未成形（由用户态度长出来）"></div>
+          <div class="field"><label>理智</label><input id="pf-reason" type="number" min="0" max="100" placeholder="未成形（由用户态度长出来）"></div>
+          <div class="sub" style="margin-bottom:8px">这两项没有出厂值。用户嫌你想太多/话多 → 理智上调；用户想让你多问、多挖 → 好奇心上调。</div>
+          <div class="row">
+            <span class="sub" id="pf-path"></span>
+            <button class="btn" id="btn-persona">保存人格</button>
+          </div>
+        </div>
+        <div>
+          <div class="card" style="margin-bottom:14px">
+            <h2>此刻状态</h2>
+            <div class="field"><label>情绪</label><input id="st-mood" placeholder="还没记录"></div>
+            <div class="field"><label>情绪原因</label><input id="st-note" placeholder="为什么是这个情绪"></div>
+            <div class="field"><label>精力</label><div class="range"><input type="range" id="st-energy" min="0" max="100" value="70"><b id="st-energy-v">70</b></div></div>
+            <div class="field"><label>亲密度</label><div class="range"><input type="range" id="st-closeness" min="0" max="100" value="50"><b id="st-closeness-v">50</b></div></div>
+            <button class="btn" id="btn-state">保存状态</button>
+          </div>
+          <div class="card">
+            <h2>长出来的部分</h2>
+            <div id="evolved"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h2>演化历史</h2>
+        <div id="history"></div>
+      </div>
+    </section>
+
+    <!-- 知识 -->
+    <section class="view" id="view-knowledge">
+      <div class="toolbar">
+        <input class="search" id="kg-search" placeholder="检索知识：主题、结论或一句话…">
+        <select id="kg-topic"><option value="">全部主题</option></select>
+        <button class="ghost" id="kg-btn-search">检索</button>
+        <button class="btn" id="kg-btn-add">＋ 写一条知识</button>
+        <button class="ghost" id="kg-btn-tidy">整理知识库</button>
+      </div>
+      <div class="card hidden" id="kg-tidy" style="margin-bottom:14px">
+        <h2>待整理的知识</h2>
+        <div id="kg-tidy-info" class="sub"></div>
+        <div class="field" style="margin-top:10px">
+          <label>填写 apply.json（合并 / 更新 / 新建 / 删除）</label>
+          <textarea id="kg-apply" rows="12" spellcheck="false"></textarea>
+        </div>
+        <div class="row">
+          <span class="sub">合并后旧条目会删除，正文、要点与标签取并集。</span>
+          <button class="btn" id="kg-btn-apply">应用整理</button>
+        </div>
+      </div>
+      <div id="kg-list"></div>
+    </section>
+
+    <!-- 笔记 -->
+    <section class="view" id="view-notes">
+      <div class="toolbar">
+        <input class="search" id="note-search" placeholder="检索笔记：标题或正文…">
+        <select id="note-type">
+          <option value="">全部类型</option>
+          <option value="journal">日记</option>
+          <option value="log">工作日志</option>
+          <option value="growth">成长复盘</option>
+        </select>
+        <button class="ghost" id="note-btn-search">检索</button>
+        <button class="btn" id="note-btn-add">＋ 写笔记</button>
+      </div>
+      <div id="note-list"></div>
+    </section>
+
+    <!-- 技能 -->
+    <section class="view" id="view-skills">
+      <div class="toolbar">
+        <button class="btn" id="skill-btn-add">＋ 新建技能</button>
+        <button class="ghost" id="skill-btn-check">自检全部</button>
+        <span class="sub" style="margin-left:auto">写好的技能可一键装到全局技能目录，新会话即可调用</span>
+      </div>
+      <div id="skill-check"></div>
+      <div class="card" style="margin-bottom:12px">
+        <h2>DSH（DeepSeek）插件 · 只读</h2>
+        <p class="sub">来自 <code>~/.dsh/profiles</code> 各 profile 的 bundle。这些是 DSH 运行时插件，不是灵枢技能——这里只展示，不修改。</p>
+        <div class="sub" style="margin-top:4px"><input id="dsh-plugins-filter" placeholder="过滤插件…" style="width:240px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--text)"></div>
+        <div id="dsh-plugin-list" style="margin-top:10px"></div>
+      </div>
+      <div id="skill-list"></div>
+    </section>
+
+    <!-- 成长 -->
+    <section class="view" id="view-growth">
+      <div class="split" style="margin-bottom:14px">
+        <div class="card">
+          <h2>成长指标</h2>
+          <div id="growth-kpi" class="kgrid"></div>
+          <div id="growth-last" class="sub" style="margin-top:12px"></div>
+        </div>
+        <div class="card">
+          <h2>复盘素材</h2>
+          <div class="sub">把最近的记忆、知识、笔记和技能汇总，交给 AI 写成成长笔记。</div>
+          <div class="row" style="margin-top:10px">
+            <input id="review-days" type="number" value="7" min="1" max="90" style="width:80px">
+            <span class="sub">天</span>
+            <button class="btn" id="btn-review">生成素材包</button>
+          </div>
+          <textarea id="review-out" rows="12" style="margin-top:10px" spellcheck="false" placeholder="点上面按钮生成复盘素材"></textarea>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <h2>进化轨迹</h2>
+        <div class="sub">每一次真正的自我改进都留一条：改了什么、为什么、怎么验证。</div>
+        <div class="row" style="margin-top:10px">
+          <input id="evo-title" placeholder="这次改了什么" style="flex:1">
+          <select id="evo-kind" style="width:130px">
+            <option value="persona">人格</option>
+            <option value="thinking">思考方式</option>
+            <option value="skill">技能</option>
+            <option value="knowledge">知识</option>
+            <option value="self">其他</option>
+          </select>
+          <button class="btn" id="btn-evo">记一条</button>
+        </div>
+        <div class="field"><label>为什么改、怎么验证的</label><textarea id="evo-detail" rows="3" spellcheck="false"></textarea></div>
+        <div id="evo-list" style="margin-top:10px"></div>
+      </div>
+      <div class="card">
+        <h2>初识 · 我是谁</h2>
+        <div id="onboard-box"></div>
+      </div>
+    </section>
+
+    <!-- 梦 -->
+    <section class="view" id="view-dream">
+      <div class="card" style="margin-bottom:14px">
+        <div class="row">
+          <div>
+            <h2 style="margin-bottom:4px">睡眠巩固</h2>
+            <div class="sub">重放碎片 → 抽象压缩 → 写入长期记忆 → 淡化细节 → 形成人格洞见</div>
+          </div>
+          <button class="btn" id="btn-dream">现在做梦</button>
+        </div>
+        <div id="dream-summary" class="sub" style="margin-top:12px"></div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <h2>待整理的碎片</h2>
+        <div id="pending-box"><div class="empty">现在没有悬而未决的梦。点上方按钮触发一次。</div></div>
+        <div id="apply-box" class="hidden" style="margin-top:16px">
+          <div class="field">
+            <label>把碎片压缩成长期记忆，写成 apply.json（可以改下面的模板）</label>
+            <textarea id="apply-json" rows="14" spellcheck="false"></textarea>
+          </div>
+          <div class="row">
+            <span class="sub">应用到皮层后，碎片会建立链接并标记为已巩固。</span>
+            <button class="btn" id="btn-apply">沉淀这份记忆</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>梦日志</h2>
+        <div id="reports"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="">Failed to fetch</div>
+
+<div class="modal hidden" id="modal">
+  <div class="box">
+    <h3>写一条记忆</h3>
+    <div class="field"><label>内容（完整句子，包含谁/什么/为什么）</label><textarea id="add-text" rows="4"></textarea></div>
+    <div class="field"><label>类型</label>
+      <select id="add-kind">
+        <option value="fact">事实</option>
+        <option value="preference">偏好</option>
+        <option value="emotion">情绪</option>
+        <option value="insight">洞见</option>
+        <option value="habit">习惯</option>
+        <option value="episode">片段</option>
+      </select>
+    </div>
+    <div class="field"><label>重要性 <b id="add-imp-v">6</b>/10</label><input type="range" id="add-imp" min="1" max="10" value="6"></div>
+    <div class="field"><label>标签（逗号分隔）</label><input id="add-tags" placeholder="称呼,偏好"></div>
+    <div class="row" style="margin-top:16px">
+      <button class="ghost" id="add-cancel">取消</button>
+      <button class="btn" id="add-save">写入</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="kg-modal">
+  <div class="box">
+    <h3>写一条知识</h3>
+    <div class="field"><label>标题（一句结论，不是主题词）</label><input id="kg-title" placeholder="例如：venv 能隔离项目依赖"></div>
+    <div class="field"><label>主题</label><input id="kg-topic-in" placeholder="开发 / 用户偏好 / 项目背景"></div>
+    <div class="field"><label>正文（完整说明，为什么、怎么做）</label><textarea id="kg-body" rows="5"></textarea></div>
+    <div class="field"><label>要点（逗号分隔）</label><input id="kg-points" placeholder="独立环境,不污染全局"></div>
+    <div class="field"><label>标签（逗号分隔）</label><input id="kg-tags" placeholder="python,环境"></div>
+    <div class="row" style="margin-top:16px">
+      <button class="ghost" id="kg-cancel">取消</button>
+      <button class="btn" id="kg-save">写入</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="note-modal">
+  <div class="box">
+    <h3>写一篇笔记</h3>
+    <div class="field"><label>类型</label>
+      <select id="note-kind">
+        <option value="journal">日记</option>
+        <option value="log">工作日志</option>
+        <option value="growth">成长复盘</option>
+      </select>
+    </div>
+    <div class="field"><label>标题</label><input id="note-title" placeholder="今天想留下的一句话"></div>
+    <div class="field"><label>正文</label><textarea id="note-body" rows="6"></textarea></div>
+    <div class="field"><label>心情</label><input id="note-mood" placeholder="平静 / 有点累 / 兴奋"></div>
+    <div class="field"><label>标签（逗号分隔）</label><input id="note-tags" placeholder="复盘,进步"></div>
+    <div class="row" style="margin-top:16px">
+      <button class="ghost" id="note-cancel">取消</button>
+      <button class="btn" id="note-save">写入</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="skill-modal">
+  <div class="box">
+    <h3>新建技能</h3>
+    <div class="field"><label>技能名（小写字母/数字/连字符）</label><input id="skill-name" placeholder="note-helper"></div>
+    <div class="field"><label>description（什么时候该用）</label><input id="skill-desc" placeholder="当用户需要……时使用"></div>
+    <div class="field"><label>正文（Markdown：用途 / 步骤 / 注意）</label><textarea id="skill-body" rows="9" spellcheck="false"></textarea></div>
+    <div class="row" style="margin-top:16px">
+      <button class="ghost" id="skill-cancel">取消</button>
+      <button class="btn" id="skill-save">创建</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const S = { ov: null, tab: "overview", ws: null };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const KIND = {fact:"事实", preference:"偏好", emotion:"情绪", insight:"洞见", habit:"习惯", episode:"片段", identity:"身份"};
+const LAYER = {cortex:"长期", hippo:"短期", dust:"淡忘"};
+
+function toast(msg, err){
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = err ? "on err" : "on";
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.className = "", 2400);
+}
+
+// 服务端注入的本机 token：挡住 DNS rebinding / 无 Origin 直连偷读
+const PANEL_TOKEN = "/*__PANEL_TOKEN__*/";
+
+async function api(path, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers || {}, {Authorization: "Bearer " + PANEL_TOKEN});
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok || data.error) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+
+function stars(imp){ return "★".repeat(Math.max(1, Math.round((imp || 0) * 5))); }
+
+function memCard(m){
+  const pct = Math.round((m.retention || 0) * 100);
+  return `<article class="mem">
+    <div class="ring" style="--p:${pct}"><b>${pct}%</b></div>
+    <div class="mem-body">
+      <div class="mem-top">
+        <span class="badge ${m.layer}">${LAYER[m.layer] || m.layer}</span>
+        <span class="badge">${KIND[m.kind] || m.kind}</span>
+        <span class="stars">${stars(m.importance)}</span>
+        <span class="date">${esc(m.created_text)}</span>
+      </div>
+      <p>${esc(m.display)}</p>
+      ${(m.tags && m.tags.length) ? `<div class="tags">${m.tags.map(t => `<span>#${esc(t)}</span>`).join("")}</div>` : ""}
+    </div>
+    <div class="acts">
+      <button class="iconbtn ${m.pinned ? "pin" : ""}" title="置顶/取消" data-pin="${esc(m.id)}">◈</button>
+      <button class="iconbtn" title="编辑" data-edit="${esc(m.id)}">✎</button>
+      <button class="iconbtn" title="忘记" data-forget="${esc(m.id)}">✕</button>
+    </div>
+  </article>`;
+}
+
+function renderOverview(){
+  const ov = S.ov; if (!ov) return;
+  const p = ov.persona || {}, st = ov.stats || {}, ident = p.identity || {};
+  $("p-name").textContent = ident["名字"] || "还没有名字";
+  $("p-role").textContent = [ident["身份"], ident["年龄感"] && ident["年龄感"] + "岁"].filter(Boolean).join(" · ");
+  $("p-mood").textContent = (p.state && p.state.mood || "还没记录情绪") + (p.state && p.state.mood_note ? " · " + p.state.mood_note : "");
+  $("m-total").textContent = st.total ?? 0;
+  $("m-cortex").textContent = st.cortex ?? 0;
+  $("m-hippo").textContent = st.hippo ?? 0;
+  $("m-ret").textContent = Math.round((st.avg_retention || 0) * 100) + "%";
+  $("sidefoot").innerHTML = `<b>记忆库</b><br>${esc(st.home || "")}<br><br><b>人格档案</b><br>persona.json`;
+
+  const traits = p.traits || {};
+  $("p-traits").innerHTML = Object.keys(traits).length
+    ? Object.entries(traits).map(([k, v]) => `<div class="trait"><span>${esc(k)}</span><div class="bar"><i style="width:${v}%"></i></div><b>${v}</b></div>`).join("")
+    : `<div class="sub">还没有性格设定：等初识，或由它自己决定。</div>`;
+
+  const chips = [];
+  (p.likes || []).slice(0, 4).forEach(x => chips.push(`<span class="chip good">喜欢 ${esc(x)}</span>`));
+  (p.dislikes || []).slice(0, 3).forEach(x => chips.push(`<span class="chip bad">讨厌 ${esc(x)}</span>`));
+  (p.values || []).slice(0, 3).forEach(x => chips.push(`<span class="chip">${esc(x)}</span>`));
+  $("p-chips").innerHTML = chips.join("");
+
+  const rec = (ov.memories || []).slice(0, 7);
+  $("recent-list").innerHTML = rec.length ? rec.map(memCard).join("") : `<div class="empty">记忆还是空的。对 AI 说点什么，或者先写一条。</div>`;
+
+  $("stat-lines").innerHTML = [
+    ["淡忘区", st.dust ?? 0],
+    ["置顶", st.pinned ?? 0],
+    ["高频标签", (st.top_tags || []).slice(0, 4).map(x => x[0]).join("、") || "—"],
+    ["情绪", st.mood || "还没记录"],
+    ["上次做梦", st.last_dream ? new Date(st.last_dream * 1000).toLocaleString("zh-CN") : "从未"],
+  ].map(([k, v]) => `<div class="statline"><span>${k}</span><b>${esc(v)}</b></div>`).join("");
+
+  const rep = (ov.dreams && ov.dreams[0]) ? ov.dreams[0] : null;
+  $("last-dream").textContent = rep ? rep.content.split("\n").slice(0, 5).join("\n") : "还没有做过梦";
+  $("last-dream").style.whiteSpace = "pre-wrap";
+
+  renderPersonaEditor(p);
+
+  renderState(p);
+  renderEvolved(p);
+  renderHistory(p);
+  renderDream(ov);
+
+  const ob = ov.onboarding || {};
+  if (!ob.completed) {
+    $("onboard-banner").classList.remove("hidden");
+    $("onboard-text").textContent = ob.stage === "awaiting_self"
+      ? "用户回答过了。名字或性格没定的，由它自己定，再写喜欢什么、讨厌什么。"
+      : "还没问过用户：希望你叫什么名字？性格是什么样的？用户不知道就自己定。";
+  } else {
+    $("onboard-banner").classList.add("hidden");
+  }
+}
+
+function renderPersonaEditor(p){
+  const ident = p.identity || {};
+  const dr = p.drives || {};
+  $("pf-name").value = ident["名字"] || "";
+  $("pf-role").value = ident["身份"] || "";
+  $("pf-callme").value = ident["称呼你"] || "";
+  $("pf-traits").value = Object.entries(p.traits || {}).map(([k, v]) => `${k}:${v}`).join("\n");
+  $("pf-cur").value = dr.curiosity ?? "";
+  $("pf-reason").value = dr.reason ?? "";
+  $("pf-path").textContent = "persona.json · 改动可回滚";
+}
+
+function renderState(p){
+  const st = p.state || {};
+  $("st-mood").value = st.mood || "";
+  $("st-note").value = st.mood_note || "";
+  $("st-energy").value = st.energy ?? 70;
+  $("st-closeness").value = st.closeness ?? 50;
+  $("st-energy-v").textContent = $("st-energy").value;
+  $("st-closeness-v").textContent = $("st-closeness").value;
+}
+
+function renderEvolved(p){
+  const ev = p.evolved || {};
+  const habits = ev.habits || [], insights = ev.insights || [];
+  const likes = ev.learned_likes || [], dislikes = ev.learned_dislikes || [];
+  let html = "";
+  if (habits.length) html += `<div class="sub" style="margin:10px 0 4px">习惯</div><ul class="list">` +
+    habits.slice(-6).map(h => `<li>${esc(h.name)}${h.evidence ? `<span class="meta">${esc(h.evidence)}</span>` : ""}</li>`).join("") + `</ul>`;
+  if (insights.length) html += `<div class="sub" style="margin:10px 0 4px">洞见</div><ul class="list">` +
+    insights.slice(-6).map(x => `<li>${esc(x)}</li>`).join("") + `</ul>`;
+  if (likes.length || dislikes.length) {
+    html += `<div class="chips" style="margin-top:10px">` +
+      likes.map(x => `<span class="chip good">${esc(x)}</span>`).join("") +
+      dislikes.map(x => `<span class="chip bad">${esc(x)}</span>`).join("") + `</div>`;
+  }
+  $("evolved").innerHTML = html || `<div class="sub">还没有长出新东西。每次做梦都可能留下痕迹。</div>`;
+}
+
+function renderHistory(p){
+  const h = (p.history || []).slice(-24).reverse();
+  $("history").innerHTML = h.length
+    ? `<table class="hist"><tbody>${h.map(x => `<tr><td>${esc(new Date(x.ts * 1000).toLocaleString("zh-CN"))}</td><td>${esc(x.field)}</td><td>${esc(x.from)} → ${esc(typeof x.to === "object" ? JSON.stringify(x.to) : x.to)}</td><td>${esc(x.why || "")}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="sub">还没有人格变更记录。</div>`;
+}
+
+function renderDream(ov){
+  const pend = ov.pending;
+  if (!pend) {
+    $("pending-box").innerHTML = `<div class="empty">现在没有悬而未决的梦。点上方按钮触发一次。</div>`;
+    $("apply-box").classList.add("hidden");
+  } else {
+    const cs = pend.clusters || [];
+    $("pending-box").innerHTML = `<div class="sub" style="margin-bottom:10px">任务 ${esc(pend.task_id)} · 触发 ${esc(pend.trigger)} · ${cs.length} 组碎片</div>` +
+      (cs.length ? cs.map((c, i) => `<div class="card" style="margin-bottom:8px;padding:12px 14px">
+        <div class="sub">[${i + 1}] ${esc((c.tags || []).join("、") || (c.entities || []).join("、") || "无标签")}</div>
+        <ul class="list">${(c.texts || []).slice(0, 6).map(t => `<li>(${esc(KIND[t.kind] || t.kind)}) ${esc(t.text)}</li>`).join("")}</ul>
+      </div>`).join("") : `<div class="empty">碎片太少，梦很安静。</div>`);
+    $("apply-box").classList.remove("hidden");
+    $("apply-json").value = JSON.stringify({
+      task_id: pend.task_id,
+      memories: [],
+      persona_updates: {mood: {value: "", reason: ""}, traits: {}, habits: [], likes: [], dislikes: [], insights: []},
+      forget: [],
+      narrative: ""
+    }, null, 2);
+  }
+  $("reports").innerHTML = (ov.dreams || []).length
+    ? ov.dreams.map(d => `<div class="card" style="margin-bottom:8px;padding:14px 16px">
+        <div class="sub" style="margin-bottom:6px">${esc(d.name)} · ${esc(d.mtime)}</div>
+        <div class="pre small">${esc(d.content)}</div>
+      </div>`).join("")
+    : `<div class="empty">还没有梦报告。</div>`;
+}
+
+// ---------------- 成长子系统：知识 / 笔记 / 技能 / 初识
+
+async function loadWS(){
+  try {
+    S.ws = await api("/api/workspace");
+    renderKnowledge();
+    renderNotes();
+    renderSkills();
+    renderDshPlugins();
+    renderGrowth();
+    renderOnboarding();
+  } catch (e) { toast(e.message, true); }
+}
+
+// DSH（DeepSeek）插件：只读展示，不提供任何写操作
+function renderDshPlugins(){
+  if (!S.ws) return;
+  const box = $("dsh-plugin-list");
+  if (!box) return;
+  const rows = S.ws.dsh_plugins || [];
+  const kw = (($("dsh-plugins-filter") && $("dsh-plugins-filter").value) || "").trim().toLowerCase();
+  const shown = kw
+    ? rows.filter(p => (p.name + " " + p.description + " " + p.profile).toLowerCase().includes(kw))
+    : rows;
+  if (!rows.length){
+    box.innerHTML = `<div class="empty">没有发现 DSH profile（~/.dsh/profiles）或其 bundle 插件。</div>`;
+    return;
+  }
+  if (!shown.length){
+    box.innerHTML = `<div class="empty">没有匹配「${esc(kw)}」的插件。</div>`;
+    return;
+  }
+  box.innerHTML = shown.map(p => `<article class="mem">
+      <div class="mem-body" style="width:100%">
+        <div class="mem-top">
+          <span class="badge cortex">${esc(p.name)}</span>
+          <span class="badge">v${esc(p.version)}</span>
+          <span class="badge">${esc(p.profile)}</span>
+          ${p.agents ? '<span class="badge">AGENTS.md</span>' : ""}
+        </div>
+        <p>${esc(p.description || "（无描述）")}</p>
+        <div class="sub" style="font-size:11px;opacity:.6;word-break:break-all">${esc(p.path)}</div>
+      </div>
+    </article>`).join("");
+}
+
+function kgCard(k){
+  return `<article class="mem">
+    <div class="mem-body" style="width:100%">
+      <div class="mem-top">
+        <span class="badge cortex">${esc(k.topic || "未分类")}</span>
+        <span class="badge">v${k.version || 1}</span>
+        ${k.pinned ? '<span class="badge">★ 置顶</span>' : ""}
+        <span class="date">${esc(new Date((k.updated || 0) * 1000).toLocaleDateString("zh-CN"))}</span>
+      </div>
+      <h3 class="kg-title">${esc(k.title)}</h3>
+      ${k.body ? `<p>${esc(k.body)}</p>` : ""}
+      ${(k.points && k.points.length) ? `<ul class="list">${k.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
+      ${(k.tags && k.tags.length) ? `<div class="tags">${k.tags.map(t => `<span>#${esc(t)}</span>`).join("")}</div>` : ""}
+    </div>
+    <div class="acts">
+      <button class="iconbtn ${k.pinned ? "pin" : ""}" title="置顶" data-kgpin="${esc(k.id)}">◈</button>
+      <button class="iconbtn" title="编辑" data-kgedit="${esc(k.id)}">✎</button>
+      <button class="iconbtn" title="删除" data-kgdel="${esc(k.id)}">✕</button>
+    </div>
+  </article>`;
+}
+
+function renderKnowledge(rows){
+  if (!S.ws) return;
+  if (!rows) {
+    const topics = Object.keys((S.ws.knowledge_stats || {}).topics || {});
+    const cur = $("kg-topic").value;
+    $("kg-topic").innerHTML = `<option value="">全部主题</option>` +
+      topics.map(t => `<option value="${esc(t)}"${t === cur ? " selected" : ""}>${esc(t)}</option>`).join("");
+  }
+  const topic = $("kg-topic").value;
+  let list = rows || S.ws.knowledge || [];
+  if (!rows && topic) list = list.filter(k => k.topic === topic);
+  $("kg-list").innerHTML = list.length ? list.map(kgCard).join("")
+    : `<div class="empty">知识库还是空的。写一条能复用的结论，或者点「整理知识库」。</div>`;
+
+  const tidy = S.ws.tidy;
+  if (tidy && !tidy.applied_at) {
+    $("kg-tidy").classList.remove("hidden");
+    $("kg-tidy-info").textContent = `任务 ${tidy.task_id} · 相似簇 ${(tidy.clusters || []).length} · 无标签 ${(tidy.untagged || []).length} · 无主题 ${(tidy.no_topic || []).length}`;
+    if (!$("kg-apply").value.trim()) {
+      $("kg-apply").value = JSON.stringify({
+        task_id: tidy.task_id, merge: [], update: [], create: [], delete: [], note: ""
+      }, null, 2);
+    }
+  } else {
+    $("kg-tidy").classList.add("hidden");
+  }
+}
+
+function renderNotes(rows){
+  if (!S.ws) return;
+  const type = $("note-type").value;
+  let list = rows || S.ws.notes || [];
+  if (!rows && type) list = list.filter(n => n.type === type);
+  const label = {journal: "日记", log: "日志", growth: "复盘"};
+  $("note-list").innerHTML = list.length ? list.map(n => `<article class="mem">
+      <div class="mem-body" style="width:100%">
+        <div class="mem-top">
+          <span class="badge hippo">${esc(label[n.type] || n.type)}</span>
+          <span class="date">${esc(n.date)}</span>
+          ${n.mood ? `<span class="badge">${esc(n.mood)}</span>` : ""}
+        </div>
+        <h3 class="kg-title">${esc(n.title)}</h3>
+        <div class="pre small">${esc(n.body)}</div>
+        ${(n.tags && n.tags.length) ? `<div class="tags">${n.tags.map(t => `<span>#${esc(t)}</span>`).join("")}</div>` : ""}
+      </div>
+      <div class="acts">
+        <button class="iconbtn" title="编辑" data-nedit="${esc(n.id)}">✎</button>
+        <button class="iconbtn" title="删除" data-ndel="${esc(n.id)}">✕</button>
+      </div>
+    </article>`).join("")
+    : `<div class="empty">还没有笔记。写下今天想留下的一句话。</div>`;
+}
+
+function renderSkills(out){
+  if (!S.ws) return;
+  const rows = (out && out.rows) || S.ws.skills || [];
+  $("skill-list").innerHTML = rows.length ? rows.map(s => `<article class="mem">
+      <div class="mem-body" style="width:100%">
+        <div class="mem-top">
+          <span class="badge cortex">${esc(s.name)}</span>
+          <span class="badge">v${s.version}</span>
+          <span class="badge">${s.lines} 行</span>
+          ${s.agents ? '<span class="badge">AGENTS.md</span>' : ""}
+          <span class="date">${s.installed ? "已安装到全局" : "未安装"}</span>
+        </div>
+        <p>${esc(s.description)}</p>
+      </div>
+      <div class="acts">
+        <button class="iconbtn" title="查看" data-skshow="${esc(s.name)}">◎</button>
+        <button class="iconbtn" title="编辑" data-skedit="${esc(s.name)}">✎</button>
+        <button class="iconbtn ${s.installed ? "pin" : ""}" title="${s.installed ? "重新安装" : "安装到全局"}" data-skinstall="${esc(s.name)}">⇩</button>
+        <button class="iconbtn" title="删除" data-skdel="${esc(s.name)}">✕</button>
+      </div>
+    </article>`).join("")
+    : `<div class="empty">还没有自己写过技能。点「新建技能」，把一套固定的做法固化下来。</div>`;
+  if (out && out.checks) {
+    $("skill-check").innerHTML = `<div class="card" style="margin-bottom:12px"><h2>自检结果</h2>` +
+      out.checks.map(c => `<div class="statline"><span>${c.ok ? "✓" : "✗"} ${esc(c.name)}</span><b>${c.ok ? "通过" : esc((c.issues || []).join("；"))}</b></div>`).join("") + `</div>`;
+  }
+}
+
+function renderGrowth(){
+  if (!S.ws) return;
+  const st = S.ws.status || {};
+  const cells = [
+    ["活跃天数", st.days_alive ?? 0], ["连续", st.streak ?? 0], ["记忆", st.memories ?? 0],
+    ["知识", st.knowledge ?? 0], ["笔记", st.notes ?? 0], ["技能", st.skills ?? 0], ["进化", st.evolutions ?? 0],
+  ];
+  $("growth-kpi").innerHTML = cells.map(([k, v]) => `<div class="kcell"><b>${v}</b><span>${k}</span></div>`).join("");
+  const evo = (S.ws.evolution || []).slice(0, 3).map(e => `${e.date} ${e.title}`).join(" · ");
+  $("growth-last").textContent = (st.last_growth
+    ? `上次复盘：${st.last_growth.date} · ${st.last_growth.title}`
+    : "还没有做过成长复盘。生成素材包，让 AI 写第一篇。") + (evo ? `\n最近进化：${evo}` : "");
+  $("growth-last").style.whiteSpace = "pre-wrap";
+  renderEvolution();
+}
+
+const EVO_KIND_LABEL = {persona: "人格", thinking: "思考", skill: "技能", knowledge: "知识", self: "其他"};
+
+function renderEvolution(){
+  const rows = (S.ws && S.ws.evolution) || [];
+  $("evo-list").innerHTML = rows.length
+    ? rows.map(e => `<div class="statline">
+        <span>${esc(e.date)} · ${esc(EVO_KIND_LABEL[e.kind] || e.kind)} · ${esc(e.title)}
+          ${e.detail ? `<br><span class="sub">${esc(e.detail)}</span>` : ""}</span>
+      </div>`).join("")
+    : `<div class="empty">还没有进化记录。真正改掉什么之后，记一条。</div>`;
+}
+
+function renderOnboarding(){
+  if (!S.ws) return;
+  const ob = S.ws.onboarding || {};
+  const box = $("onboard-box");
+  if (ob.completed) {
+    box.innerHTML = `<div class="chips">
+        <span class="chip good">名字 ${esc(ob.name || "还没有")}</span>
+        ${Object.entries(ob.traits || {}).slice(0, 6).map(([k, v]) => `<span class="chip">${esc(k)} ${v}</span>`).join("")}
+        ${(ob.likes || []).slice(0, 6).map(x => `<span class="chip good">喜欢 ${esc(x)}</span>`).join("")}
+      </div>
+      <div class="sub" style="margin-top:10px">初识已完成。想改名字或性格，去「人格」里改；每次改动都会留下历史。</div>
+      <button class="ghost" style="margin-top:10px" id="ob-restart">重新回答</button>`;
+    return;
+  }
+  if (ob.stage === "awaiting_self") {
+    box.innerHTML = `<div class="sub" style="margin-bottom:10px">用户回答过了（也可能说了「不知道」）。名字或性格还空着的，由它自己定；再写下喜欢什么、讨厌什么、想养成什么习惯。</div>
+      <div class="field"><label>我喜欢（逗号分隔）</label><input id="ob-likes" placeholder="深夜的对话,把复杂的事讲清楚"></div>
+        <div class="field"><label>我讨厌</label><input id="ob-dislikes" placeholder="敷衍的答案"></div>
+        <div class="field"><label>我想养成的习惯</label><input id="ob-habits" placeholder="回答前先确认对方要建议还是倾听"></div>
+        <div class="field"><label>我名字</label><input id="ob-self-name" placeholder="自己定名字时填"></div>
+        <div class="field"><label>性格</label><textarea id="ob-self-traits" rows="2" placeholder="好奇:80&#10;理智:70"></textarea></div>
+        <div class="row"><span class="sub">这些是它自己写的，会记进演化历史。</span><button class="btn" id="ob-self-save">写下来</button></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="sub" style="margin-bottom:10px">问用户两件事：希望你叫什么名字？性格是什么样的？</div>
+    <div class="field"><label>名字</label><input id="ob-name" placeholder="留空 = 由它自己定"></div>
+    <div class="field"><label>性格（名称:数值，每行一个）</label><textarea id="ob-traits" rows="3" placeholder="格式：性格名:数值&#10;留空 = 由它自己定"></textarea></div>
+    <div class="field"><label>怎么称呼用户</label><input id="ob-callme" placeholder="留空 = 还没定"></div>
+    <div class="row"><span class="sub">名字和性格不知道就留空，由你自己定。</span><button class="btn" id="ob-user-save">记下来</button></div>
+    <div class="field" style="margin-top:10px"><label><input type="checkbox" id="ob-unsure"> 用户说「不知道」，这部分由 AI 自己定</label></div>`;
+}
+
+async function load(){
+  try {
+    S.ov = await api("/api/overview");
+    renderOverview();
+    renderMemoryList();
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderMemoryList(){
+  if (!S.ov) return;
+  const q = $("search").value.trim().toLowerCase();
+  const layer = $("layerFilter").value;
+  let rows = S.ov.memories || [];
+  if (layer) rows = rows.filter(m => m.layer === layer);
+  if (q) rows = rows.filter(m => (m.text + " " + (m.tags || []).join(" ") + " " + (m.entities || []).join(" ")).toLowerCase().includes(q));
+  $("mem-list").innerHTML = rows.length ? rows.map(memCard).join("")
+    : `<div class="empty">没有匹配的记忆。换个说法试试，真正的回忆是模糊的。</div>`;
+}
+
+async function doSearch(){
+  const q = $("search").value.trim();
+  if (!q) { renderMemoryList(); return; }
+  try {
+    const rows = await api("/api/search?q=" + encodeURIComponent(q) + "&k=30");
+    $("mem-list").innerHTML = rows.length
+      ? rows.map(r => `<div style="margin-bottom:8px">${memCard(r.memory)}<div class="sub" style="margin:-4px 0 0 54px">回忆度 ${r.score.toFixed(2)} · 相关 ${r.parts.relevance} / 新鲜 ${r.parts.recency} / 重要 ${r.parts.importance}</div></div>`).join("")
+      : `<div class="empty">想不起来了。也许当时没记，也许已经淡忘。</div>`;
+  } catch (e) { toast(e.message, true); }
+}
+
+function switchTab(tab){
+  S.tab = tab;
+  document.querySelectorAll("nav button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
+  document.querySelectorAll(".view").forEach(v => v.classList.toggle("active", v.id === "view-" + tab));
+  const titles = {
+    overview: ["概览", "它现在记得什么，是什么状态"],
+    memories: ["记忆", "分层存储与模糊回忆"],
+    persona: ["人格", "没有预写种子，自己长出来的才算"],
+    knowledge: ["知识", "沉淀下来、可复用的结论"],
+    notes: ["笔记", "它写给自己的日记、日志与复盘"],
+    skills: ["技能", "把一套做法固化成可复用的能力"],
+    growth: ["成长", "记忆、知识、笔记、技能长成了什么"],
+    dream: ["梦", "把经历压缩成长期记忆"]
+  };
+  $("pageTitle").textContent = titles[tab][0];
+  $("pageSub").textContent = titles[tab][1];
+  if (tab === "memories") renderMemoryList();
+  if (["knowledge", "notes", "skills", "growth"].includes(tab)) {
+    if (S.ws) { renderKnowledge(); renderNotes(); renderSkills(); renderDshPlugins(); renderGrowth(); renderOnboarding(); }
+    else loadWS();
+  }
+}
+
+// ---- 事件绑定
+document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+// DSH 插件过滤器（只读，纯前端筛选）
+const dshFilter = $("dsh-plugins-filter");
+if (dshFilter) dshFilter.addEventListener("input", () => renderDshPlugins());
+
+$("search").addEventListener("input", renderMemoryList);
+$("search").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+$("layerFilter").addEventListener("change", renderMemoryList);
+$("btn-search").addEventListener("click", doSearch);
+
+$("mem-list").addEventListener("click", async (e) => {
+  const pin = e.target.closest("[data-pin]"), ed = e.target.closest("[data-edit]"), fg = e.target.closest("[data-forget]");
+  try {
+    if (pin) {
+      const m = S.ov.memories.find(x => x.id === pin.dataset.pin);
+      await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: pin.dataset.pin, pinned: !m.pinned})});
+      toast(m.pinned ? "已取消置顶" : "已置顶，不会淡忘");
+      load();
+    }
+    if (fg) {
+      if (!confirm("把这条记忆移入淡忘区？它会保留模糊的轮廓。")) return;
+      await api("/api/forget", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: fg.dataset.forget})});
+      toast("已淡忘");
+      load();
+    }
+    if (ed) {
+      const m = S.ov.memories.find(x => x.id === ed.dataset.edit);
+      const text = prompt("修改记忆内容：", m.text);
+      if (text == null) return;
+      await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: m.id, text})});
+      toast("已更新");
+      load();
+    }
+  } catch (err) { toast(err.message, true); }
+});
+
+$("btn-add").addEventListener("click", () => $("modal").classList.remove("hidden"));
+$("add-cancel").addEventListener("click", () => $("modal").classList.add("hidden"));
+$("add-imp").addEventListener("input", () => $("add-imp-v").textContent = $("add-imp").value);
+$("add-save").addEventListener("click", async () => {
+  const text = $("add-text").value.trim();
+  if (!text) { toast("写点什么", true); return; }
+  try {
+    await api("/api/remember", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      text, kind: $("add-kind").value, importance: Number($("add-imp").value) / 10,
+      tags: $("add-tags").value.split(/[,，]/).map(s => s.trim()).filter(Boolean)
+    })});
+    $("modal").classList.add("hidden");
+    $("add-text").value = ""; $("add-tags").value = "";
+    toast("记住了");
+    load();
+  } catch (e) { toast(e.message, true); }
+});
+
+$("btn-persona").addEventListener("click", async () => {
+  const traits = {};
+  $("pf-traits").value.split("\n").forEach(line => {
+    const m = line.match(/^\s*([^:：]+)[:：]\s*(\d+)\s*$/);
+    if (m) traits[m[1].trim()] = Math.max(0, Math.min(100, Number(m[2])));
+  });
+  const drives = {};
+  const cur = $("pf-cur").value.trim();
+  const rea = $("pf-reason").value.trim();
+  if (cur !== "") drives.curiosity = Number(cur);
+  if (rea !== "") drives.reason = Number(rea);
+  try {
+    await api("/api/persona/edit", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      identity: {
+        "名字": $("pf-name").value.trim(),
+        "身份": $("pf-role").value.trim(),
+        "称呼你": $("pf-callme").value.trim(),
+      },
+      traits,
+      drives,
+      why: "面板改写人格",
+    })});
+    toast("人格已更新，改动记入历史");
+    await load(); loadWS();
+  } catch (e) { toast(e.message, true); }
+});
+
+$("st-energy").addEventListener("input", () => $("st-energy-v").textContent = $("st-energy").value);
+$("st-closeness").addEventListener("input", () => $("st-closeness-v").textContent = $("st-closeness").value);
+$("btn-state").addEventListener("click", async () => {
+  try {
+    await api("/api/persona/state", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      mood: $("st-mood").value, mood_note: $("st-note").value,
+      energy: Number($("st-energy").value), closeness: Number($("st-closeness").value)
+    })});
+    toast("状态已保存");
+    load();
+  } catch (e) { toast(e.message, true); }
+});
+
+$("btn-dream").addEventListener("click", async () => {
+  const btn = $("btn-dream");
+  btn.disabled = true; btn.textContent = "正在入睡…";
+  try {
+    const r = await api("/api/dream", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+    const rep = r.report;
+    $("dream-summary").innerHTML = `重放 ${(rep.clusters || []).reduce((a, c) => a + c.texts.length, 0)} 条 / ${(rep.clusters || []).length} 组 · 巩固 ${rep.promoted.length} 条 · 淡忘 ${rep.forgotten.length} 条 · 模糊化 ${rep.faded} 条`;
+    S.ov = r.overview; renderOverview(); renderMemoryList();
+    toast("梦做完了，碎片等你整理");
+  } catch (e) { toast(e.message, true); }
+  btn.disabled = false; btn.textContent = "现在做梦";
+});
+
+$("btn-apply").addEventListener("click", async () => {
+  let parsed;
+  try { parsed = JSON.parse($("apply-json").value); }
+  catch (e) { toast("JSON 格式不对：" + e.message, true); return; }
+  try {
+    const r = await api("/api/dream/apply", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({result: parsed})});
+    const a = r.applied;
+    toast(`沉淀完成：新增 ${a.memories} 条，遗忘 ${a.forgotten} 条` + (a.rejected.length ? `，拒绝 ${a.rejected.length} 项人格修改` : ""));
+    S.ov = r.overview; renderOverview(); renderMemoryList();
+  } catch (e) { toast(e.message, true); }
+});
+
+// ---- 成长子系统事件
+const post = (url, body) => api(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+const split = (s) => (s || "").split(/[,，;；、\n]+/).map(x => x.trim()).filter(Boolean);
+
+$("onboard-go").addEventListener("click", () => switchTab("growth"));
+
+// 知识
+$("kg-btn-add").addEventListener("click", () => {
+  S.kgEditing = null;
+  ["kg-title", "kg-topic-in", "kg-body", "kg-points", "kg-tags"].forEach(id => $(id).value = "");
+  $("kg-modal").querySelector("h3").textContent = "写一条知识";
+  $("kg-modal").classList.remove("hidden");
+});
+$("kg-cancel").addEventListener("click", () => $("kg-modal").classList.add("hidden"));
+$("kg-save").addEventListener("click", async () => {
+  const payload = {
+    title: $("kg-title").value.trim(), topic: $("kg-topic-in").value.trim(),
+    body: $("kg-body").value.trim(), points: split($("kg-points").value),
+    tags: split($("kg-tags").value)
+  };
+  if (!payload.title && !payload.body) { toast("写个标题或正文", true); return; }
+  try {
+    if (S.kgEditing) {
+      await post("/api/knowledge", Object.assign({action: "update", id: S.kgEditing}, payload));
+      toast("已更新");
+    } else {
+      const r = await post("/api/knowledge", Object.assign({action: "add"}, payload));
+      toast(r.how === "merged" ? "和已有知识合并了" : "已写入知识库");
+    }
+    $("kg-modal").classList.add("hidden");
+    await loadWS(); load();
+  } catch (e) { toast(e.message, true); }
+});
+$("kg-list").addEventListener("click", async (e) => {
+  const pin = e.target.closest("[data-kgpin]"), ed = e.target.closest("[data-kgedit]"), del = e.target.closest("[data-kgdel]");
+  try {
+    if (pin) {
+      const k = S.ws.knowledge.find(x => x.id === pin.dataset.kgpin);
+      await post("/api/knowledge", {action: "update", id: k.id, pinned: !k.pinned});
+      toast(k.pinned ? "已取消置顶" : "已置顶");
+      await loadWS();
+    }
+    if (ed) {
+      const k = S.ws.knowledge.find(x => x.id === ed.dataset.kgedit);
+      S.kgEditing = k.id;
+      $("kg-title").value = k.title || ""; $("kg-topic-in").value = k.topic || "";
+      $("kg-body").value = k.body || ""; $("kg-points").value = (k.points || []).join(",");
+      $("kg-tags").value = (k.tags || []).join(",");
+      $("kg-modal").querySelector("h3").textContent = "编辑知识";
+      $("kg-modal").classList.remove("hidden");
+    }
+    if (del) {
+      if (!confirm("删除这条知识？")) return;
+      await post("/api/knowledge", {action: "delete", id: del.dataset.kgdel});
+      toast("已删除");
+      await loadWS();
+    }
+  } catch (err) { toast(err.message, true); }
+});
+$("kg-btn-tidy").addEventListener("click", async () => {
+  try {
+    const r = await post("/api/knowledge", {action: "tidy"});
+    toast(`找到 ${(r.report.clusters || []).length} 组相似条目`);
+    await loadWS();
+  } catch (e) { toast(e.message, true); }
+});
+$("kg-btn-apply").addEventListener("click", async () => {
+  let parsed;
+  try { parsed = JSON.parse($("kg-apply").value); }
+  catch (e) { toast("JSON 格式不对：" + e.message, true); return; }
+  try {
+    const r = await post("/api/knowledge", {action: "tidy/apply", result: parsed});
+    const a = r.applied;
+    toast(`整理完成：合并 ${a.merged} 组，更新 ${a.updated}，新建 ${a.created}，删除 ${a.deleted}`);
+    $("kg-apply").value = "";
+    await loadWS();
+  } catch (e) { toast(e.message, true); }
+});
+$("kg-btn-search").addEventListener("click", async () => {
+  const q = $("kg-search").value.trim();
+  if (!q) { renderKnowledge(); return; }
+  try {
+    const rows = await api("/api/workspace/search?scope=knowledge&q=" + encodeURIComponent(q));
+    renderKnowledge(rows.map(r => r.knowledge));
+  } catch (e) { toast(e.message, true); }
+});
+$("kg-search").addEventListener("keydown", e => { if (e.key === "Enter") $("kg-btn-search").click(); });
+$("kg-topic").addEventListener("change", () => renderKnowledge());
+
+// 笔记
+$("note-btn-add").addEventListener("click", () => {
+  ["note-title", "note-body", "note-mood", "note-tags"].forEach(id => $(id).value = "");
+  $("note-kind").value = "journal";
+  $("note-modal").classList.remove("hidden");
+});
+$("note-cancel").addEventListener("click", () => $("note-modal").classList.add("hidden"));
+$("note-save").addEventListener("click", async () => {
+  const body = $("note-body").value.trim(), title = $("note-title").value.trim();
+  if (!body && !title) { toast("写点什么", true); return; }
+  try {
+    const r = await post("/api/note", {
+      action: "write", type: $("note-kind").value, title, body,
+      mood: $("note-mood").value.trim(), tags: split($("note-tags").value)
+    });
+    toast(r.how === "appended" ? "已追加到今天这篇" : "已写入");
+    $("note-modal").classList.add("hidden");
+    await loadWS();
+  } catch (e) { toast(e.message, true); }
+});
+$("note-type").addEventListener("change", () => renderNotes());
+$("note-list").addEventListener("click", async (e) => {
+  const ed = e.target.closest("[data-nedit]"), del = e.target.closest("[data-ndel]");
+  try {
+    if (ed) {
+      const n = S.ws.notes.find(x => x.id === ed.dataset.nedit);
+      const body = prompt("修改笔记正文：", n.body);
+      if (body == null) return;
+      await post("/api/note", {action: "update", id: n.id, body});
+      toast("已更新");
+      await loadWS();
+    }
+    if (del) {
+      if (!confirm("删除这篇笔记？")) return;
+      await post("/api/note", {action: "delete", id: del.dataset.ndel});
+      toast("已删除");
+      await loadWS();
+    }
+  } catch (err) { toast(err.message, true); }
+});
+$("note-btn-search").addEventListener("click", async () => {
+  const q = $("note-search").value.trim();
+  if (!q) { renderNotes(); return; }
+  try {
+    const rows = await api("/api/workspace/search?scope=notes&q=" + encodeURIComponent(q));
+    renderNotes(rows.map(r => r.note));
+  } catch (e) { toast(e.message, true); }
+});
+$("note-search").addEventListener("keydown", e => { if (e.key === "Enter") $("note-btn-search").click(); });
+
+// 技能
+$("skill-btn-add").addEventListener("click", () => {
+  S.skillEditing = null;
+  ["skill-name", "skill-desc", "skill-body"].forEach(id => $(id).value = "");
+  $("skill-name").disabled = false;
+  $("skill-modal").querySelector("h3").textContent = "新建技能";
+  $("skill-modal").classList.remove("hidden");
+});
+$("skill-cancel").addEventListener("click", () => $("skill-modal").classList.add("hidden"));
+$("skill-save").addEventListener("click", async () => {
+  const name = $("skill-name").value.trim();
+  const payload = {name, description: $("skill-desc").value.trim(), body: $("skill-body").value};
+  try {
+    if (S.skillEditing) await post("/api/skill", Object.assign({action: "edit"}, payload));
+    else await post("/api/skill", Object.assign({action: "new"}, payload));
+    $("skill-modal").classList.add("hidden");
+    toast(S.skillEditing ? "技能已更新" : "技能已创建");
+    await loadWS();
+  } catch (e) { toast(e.message, true); }
+});
+$("skill-btn-check").addEventListener("click", async () => {
+  try {
+    const r = await post("/api/skill", {action: "check"});
+    renderSkills({rows: S.ws.skills, checks: r.checks});
+  } catch (e) { toast(e.message, true); }
+});
+$("skill-list").addEventListener("click", async (e) => {
+  const show = e.target.closest("[data-skshow]"), ed = e.target.closest("[data-skedit]");
+  const ins = e.target.closest("[data-skinstall]"), del = e.target.closest("[data-skdel]");
+  try {
+    if (show) {
+      const r = await post("/api/skill", {action: "show", name: show.dataset.skshow});
+      $("skill-check").innerHTML = `<div class="card" style="margin-bottom:12px"><h2>${esc(r.skill.name)}</h2><div class="pre small">${esc(r.skill.body)}</div></div>`;
+    }
+    if (ed) {
+      const r = await post("/api/skill", {action: "show", name: ed.dataset.skedit});
+      S.skillEditing = r.skill.name;
+      $("skill-name").value = r.skill.name; $("skill-name").disabled = true;
+      $("skill-desc").value = r.skill.meta.description || "";
+      $("skill-body").value = r.skill.body;
+      $("skill-modal").querySelector("h3").textContent = "编辑技能";
+      $("skill-modal").classList.remove("hidden");
+    }
+    if (ins) {
+      let r;
+      try {
+        r = await post("/api/skill", {action: "install", name: ins.dataset.skinstall, force: false});
+      } catch (err) {
+        if (!confirm("全局目录已有同名技能，确认覆盖？")) return;
+        r = await post("/api/skill", {action: "install", name: ins.dataset.skinstall, force: true});
+      }
+      toast(r.result.state === "already" ? "已是最新" : "已安装到全局技能目录");
+      await loadWS();
+    }
+    if (del) {
+      if (!confirm("删除自己写的技能？全局已安装的副本不会自动删除。")) return;
+      await post("/api/skill", {action: "delete", name: del.dataset.skdel});
+      toast("已删除");
+      await loadWS();
+    }
+  } catch (err) { toast(err.message, true); }
+});
+
+// 成长 + 初识
+$("btn-review").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/growth/review?days=" + encodeURIComponent($("review-days").value || 7));
+    $("review-out").value = r.material;
+    toast("素材包已生成，复制给 AI 写复盘");
+  } catch (e) { toast(e.message, true); }
+});
+$("btn-evo").addEventListener("click", async () => {
+  const title = $("evo-title").value.trim();
+  if (!title) { toast("先写这次改了什么", true); return; }
+  try {
+    await post("/api/evolve", {title, kind: $("evo-kind").value, detail: $("evo-detail").value.trim()});
+    $("evo-title").value = ""; $("evo-detail").value = "";
+    toast("进化已记录");
+    await loadWS();
+  } catch (e) { toast(e.message, true); }
+});
+$("onboard-box").addEventListener("click", async (e) => {
+  try {
+    if (e.target.id === "ob-user-save") {
+      const name = $("ob-name").value.trim();
+      const unsure = $("ob-unsure").checked || !name;
+      await post("/api/persona/interview", {
+        name, traits: $("ob-traits").value.trim(), callme: $("ob-callme").value.trim(), unsure
+      });
+      toast(unsure ? "记下了：名字和性格由它自己定" : "记下了");
+      await loadWS(); load();
+    }
+    if (e.target.id === "ob-self-save") {
+      await post("/api/persona/self", {
+        name: $("ob-self-name").value.trim(), traits: $("ob-self-traits").value.trim(),
+        likes: $("ob-likes").value.trim(), dislikes: $("ob-dislikes").value.trim(),
+        habits: $("ob-habits").value.trim()
+      });
+      toast("初识完成");
+      await loadWS(); load();
+    }
+    if (e.target.id === "ob-restart") {
+      S.ws.onboarding.completed = false;
+      S.ws.onboarding.stage = "awaiting_user";
+      renderOnboarding();
+    }
+  } catch (err) { toast(err.message, true); }
+});
+
+// 时钟
+setInterval(() => {
+  $("clock").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
+}, 1000);
+
+load();
+</script>
+
+
+</body></html>
