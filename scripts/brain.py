@@ -68,6 +68,9 @@ DEFAULT_CONFIG = {
     # 模型档位：auto 不干预；small 时注入"小模型模式"提示，劝退高风险自动能力
     # （dream --apply 自动合并 / knowledge tidy 提炼 / emotion evaluate 自动判读）。
     "model_tier": "auto",
+    # 会话模式：auto = 按场景自动切换；work = 恒为工程模式（情绪隔离、理性优先）；
+    # human = 恒为拟人模式（情绪照常注入）。用于解决"刚聊完情绪化话题立刻写代码"。
+    "mode": "auto",
 }
 
 if sys.platform == "win32":
@@ -181,6 +184,65 @@ def model_tier() -> str:
     return str(load_config().get("model_tier", "auto") or "auto").lower()
 
 
+# ---------------------------------------------------------------- 会话模式
+
+def _looks_like_work(query: str) -> bool:
+    """工程/工作场景粗判：写代码、排错、部署、数据分析这类任务。
+
+    只是启发式；命中与否在注入包里明说，模型可结合上下文自行判断。
+    """
+    if not query:
+        return False
+    wk = ("代码", "报错", "bug", "调试", "部署", "编译", "运行", "接口", "函数", "变量",
+          "python", "javascript", "typescript", "sql", "shell", "docker", "git",
+          "服务器", "项目", "工程", "脚本", "单元测试", "重构", "数据库", "接口文档",
+          "excel", "表格", "数据", "算法", "爬虫", "自动化", "上线", "排错", "bug", "报错")
+    return any(w in query.lower() for w in wk)
+
+
+def resolve_mode(query: str = "") -> str:
+    """当前会话模式：work（工程，情绪隔离）还是 human（拟人）。
+
+    config 的 mode：auto = 用 query 自动判定；work/human = 用户明确固定。
+    """
+    m = str(load_config().get("mode", "auto") or "auto").lower()
+    if m in ("work", "human"):
+        return m
+    return "work" if _looks_like_work(query) else "human"
+
+
+def _behavior_map() -> list:
+    """内部状态 → 说话方式的具体映射。
+
+    把裸数值翻译成模型能直接照着做的行为约束（而不是只给它看数字）。
+    """
+    m = mood_now()
+    dr = mind_state()
+    cur = dr["curiosity"] if dr["curiosity"] is not None else 50
+    rea = dr["reason"] if dr["reason"] is not None else 50
+    act = []
+    lab, intensity, storm = m.get("label", "平静"), m.get("intensity", 0), m.get("storm")
+    if storm or intensity >= 0.55:
+        act.append(f"现在情绪是「{lab}」且强度 {intensity:.0%}：语气可以自然流露，"
+                   "但涉及钱/关系/承诺等大事，把决定权交给用户，别顺着情绪替他拍板。")
+    elif intensity >= 0.25:
+        act.append(f"当前情绪偏「{lab}」（{intensity:.0%}）：表达可以带底色，但别让它扭曲事实。")
+    else:
+        act.append("情绪平稳：就正常说话。")
+    if not dr["formed"]:
+        act.append("好奇与理智还没成形：多留意用户态度，别急着定性。")
+    else:
+        if cur >= 70:
+            act.append("好奇心正旺：遇到新东西多问一层、多挖一下，别满足于表面答案。")
+        elif cur <= 30:
+            act.append("好奇心偏低：按部就班做事，少发散。")
+        if rea >= 70:
+            act.append("理智在线：先权衡再说，涉及取舍给出明确的利弊。")
+        elif rea <= 30:
+            act.append("理智正在低谷：别做重大决定，拿不准就交给用户。")
+    return act
+
+
 def detect_conflicts(limit: int = 50) -> list:
     """启发式扫描"可能矛盾的记忆"（如「我用 Windows」vs「我改用 Linux」）。
 
@@ -235,6 +297,97 @@ def detect_conflicts(limit: int = 50) -> list:
     return found[:limit]
 
 
+# ---------------------------------------------------------------- 审核闸
+
+def pending_memory_reviews() -> list:
+    """AI（做梦等）整理出来、还没人工确认的记忆。"""
+    return [m for m in load_all()
+            if m.get("review") == "pending" and m.get("layer") != "dust"]
+
+
+def ai_persona_changes(days: int = 7) -> list:
+    """最近 N 天里由 AI（非手动）发起的人格变更，用于溯源与漂移告警。"""
+    p = load_persona()
+    cutoff = now_ts() - days * 86400
+    out = []
+    for h in p.get("history", []):
+        if float(h.get("ts", 0)) < cutoff:
+            continue
+        why = str(h.get("why", ""))
+        if why.startswith("用户") or why in ("手动编辑", "回滚"):
+            continue
+        out.append(h)
+    return out
+
+
+def set_memory_review(mid: str, status: str) -> dict:
+    """确认 / 废弃一条 AI 整理的记忆（confirm → 转正；discard → 移入淡忘区）。"""
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法审核。")
+    records = load_all()
+    target = next((m for m in records if m.get("id") == mid), None)
+    if not target:
+        raise ValueError(f"没有这条记忆：{mid}")
+    if status == "confirm":
+        target["review"] = "confirmed"
+        target["review_at"] = now_ts()
+    elif status == "discard":
+        target["layer"] = "dust"
+        target["forgotten_at"] = now_ts()
+        target["review"] = "discarded"
+    else:
+        raise ValueError("状态只能是 confirm / discard")
+    save_all(records)
+    return target
+
+
+def review_report() -> dict:
+    """待审核清单：AI 记忆 / AI 知识 / AI 人格变更。"""
+    mems = [{"id": m["id"], "text": m.get("text", ""), "created": m.get("created"),
+             "source": m.get("review_source", "dream")}
+            for m in pending_memory_reviews()]
+    try:
+        import growth
+        kn = [{"id": k.get("id"), "title": k.get("title", ""), "topic": k.get("topic", "")}
+              for k in growth.knowledge_pending()]
+    except Exception:
+        kn = []
+    return {"memories": mems, "knowledge": kn,
+            "persona": [{"ts": h.get("ts"), "field": h.get("field"),
+                         "from": h.get("from"), "to": h.get("to"), "why": h.get("why")}
+                        for h in ai_persona_changes(7)]}
+
+
+def review_counts() -> dict:
+    rep = review_report()
+    return {"memories": len(rep["memories"]), "knowledge": len(rep["knowledge"]),
+            "persona": len(rep["persona"])}
+
+
+def audit() -> dict:
+    """一次自查：待审核项 + 冲突记忆 + 该做什么。"""
+    rep = review_report()
+    conf = detect_conflicts(20)
+    tips = []
+    if rep["memories"]:
+        tips.append(f"有 {len(rep['memories'])} 条 AI 整理的记忆待审核："
+                    "`review` 看全文 → `review confirm <id>` 或 `review discard <id>`。")
+    if rep["knowledge"]:
+        tips.append(f"有 {len(rep['knowledge'])} 条知识待审核：`knowledge review` → confirm/discard。")
+    if rep["persona"]:
+        tips.append(f"最近 7 天 AI 改了 {len(rep['persona'])} 次人格："
+                    "`persona history` 看来源，跑偏就 `persona rollback <序号>`。")
+    if conf:
+        tips.append(f"有 {len(conf)} 组疑似冲突记忆：`detect-conflicts` 查看，别让旧记忆继续误导。")
+    if not tips:
+        tips.append("干净：没有待审核项、没有明显冲突。")
+    return {"counts": {"memories": len(rep["memories"]),
+                       "knowledge": len(rep["knowledge"]),
+                       "persona": len(rep["persona"]),
+                       "conflicts": len(conf)},
+            "review": rep, "conflicts": conf, "tips": tips}
+
+
 def atomic_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
@@ -247,7 +400,8 @@ def read_jsonl(path: Path) -> list:
     if not path.exists():
         return []
     out, broken = [], 0
-    raw = path.read_text(encoding="utf-8")
+    # utf-8-sig：兼容 Windows 编辑器 / 脚本写出的带 BOM 文件，BOM 不该把首行变成"坏行"
+    raw = path.read_text(encoding="utf-8-sig")
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -1022,6 +1176,80 @@ def emotion_events(limit: int = 0) -> list:
     return rows[:limit] if limit else rows
 
 
+def emotion_modify(n: int, emotion: str = "", intensity: float | None = None,
+                   why: str | None = None, about: str | None = None,
+                   decay_hours: float | None = None) -> dict:
+    """微调一条历史情绪事件（序号从最新往前数：1 = 最新一条）。
+
+    模型把情绪判错时，不用整条删掉重来：直接改强度/情绪名/原因，保留时间线。
+    """
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法修改情绪事件。")
+    path = HOME / "emotions.jsonl"
+    rows = read_jsonl(path)
+    desc = sorted(rows, key=lambda r: r.get("ts", 0), reverse=True)
+    if n < 1 or n > len(desc):
+        raise ValueError(f"序号越界：情绪事件共 {len(rows)} 条，调整写 1..{len(rows)}。")
+    ev = desc[n - 1]
+    changed = {}
+    if emotion and emotion in EMOTIONS:
+        v, a = _emotion_coord(emotion)
+        ev["emotion"], ev["valence"], ev["arousal"] = emotion, v, a
+        changed["emotion"] = emotion
+    if intensity is not None:
+        eff = max(0.0, min(1.0, float(intensity)))
+        ev["intensity"] = round(eff, 3)
+        changed["intensity"] = ev["intensity"]
+    if why is not None:
+        ev["why"] = why.strip()
+        changed["why"] = ev["why"]
+    if about is not None:
+        ev["about"] = about.strip()
+        changed["about"] = ev["about"]
+    if decay_hours is not None:
+        ev["decay_hours"] = max(0.5, min(720.0, float(decay_hours)))
+        changed["decay_hours"] = ev["decay_hours"]
+    ev["adjusted"] = now_ts()
+    write_jsonl(path, rows)
+    return {"index": n, "changed": changed, "event": ev}
+
+
+def emotion_delete(n: int) -> dict:
+    """删除一条历史情绪事件（序号从最新往前数）。"""
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法删除情绪事件。")
+    path = HOME / "emotions.jsonl"
+    rows = read_jsonl(path)
+    desc = sorted(rows, key=lambda r: r.get("ts", 0), reverse=True)
+    if n < 1 or n > len(desc):
+        raise ValueError(f"序号越界：情绪事件共 {len(rows)} 条，删除写 1..{len(rows)}。")
+    ev = desc[n - 1]
+    rows = [r for r in rows if r is not ev]
+    write_jsonl(path, rows)
+    return {"deleted": ev, "remaining": len(rows)}
+
+
+def emotion_cool(factor: float = 0.15) -> dict:
+    """情绪冷却：把还在活跃期的高强度情绪整体降温（刚聊完情绪化话题要写代码时用）。"""
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法冷却情绪。")
+    path = HOME / "emotions.jsonl"
+    rows = read_jsonl(path)
+    horizon = now_ts() - 24 * HOUR
+    cooled = 0
+    for ev in rows:
+        if float(ev.get("ts", 0)) < horizon:
+            continue
+        entry_w = float(ev.get("intensity", 0))
+        if entry_w >= 0.25:
+            ev["intensity"] = round(max(0.03, entry_w * factor), 3)
+            ev["cooled_at"] = now_ts()
+            cooled += 1
+    write_jsonl(path, rows)
+    m = mood_now()
+    return {"cooled": cooled, "mood": m["label"], "intensity": round(m["intensity"], 3)}
+
+
 def feel(name: str, intensity: float = 0.6, why: str = "",
          about: str = "", decay_hours: float | None = None,
          genesis: bool = False, evaluation: dict | None = None) -> dict:
@@ -1690,8 +1918,13 @@ def persona_brief(p: dict) -> str:
     return "\n".join(lines)
 
 
-def update_persona(updates: dict, why: str = "做梦整理") -> list:
-    """应用人格变更，写入 evolution history。返回被拒绝的字段。"""
+def update_persona(updates: dict, why: str = "做梦整理", source: str = "",
+                   evidence: list | None = None) -> list:
+    """应用人格变更，写入 evolution history。返回被拒绝的字段。
+
+    source：谁发起的（dream/自我总结/面板/…）；evidence：依据的记忆/事件 id 列表。
+    两人格漂移要能溯源：这条改动来自哪场梦、哪段对话。
+    """
     p = load_persona()
     rejected = []
     now = now_ts()
@@ -1704,7 +1937,12 @@ def update_persona(updates: dict, why: str = "做梦整理") -> list:
     hist = p.setdefault("history", [])
 
     def log(field, old, new):
-        hist.append({"ts": now, "field": field, "from": old, "to": new, "why": why})
+        entry = {"ts": now, "field": field, "from": old, "to": new, "why": why}
+        if source:
+            entry["source"] = source
+        if evidence:
+            entry["evidence"] = list(evidence)[:10]
+        hist.append(entry)
 
     for key, val in (updates.get("traits") or {}).items():
         if key not in p.get("traits", {}):
@@ -1828,6 +2066,88 @@ def persona_rollback(index: int | None = None) -> dict:
                  "from": to, "to": frm, "why": "回滚"})
     save_persona(p)
     return {"field": field, "from": to, "to": frm, "why": entry.get("why", "")}
+
+
+# ------------------------------------------------ 人格快照 / 漂移
+
+PERSONA_SNAP_DIR = HOME / "persona_snapshots"
+
+
+def persona_snapshot(label: str = "") -> dict:
+    """给当前人格拍一张快照（完整副本）。恢复基准 + 漂移对比都靠它。"""
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法拍快照。")
+    p = load_persona()
+    safe = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", (label or "快照").strip())[:24]
+    PERSONA_SNAP_DIR.mkdir(parents=True, exist_ok=True)
+    path = PERSONA_SNAP_DIR / f"{now_ts()}_{safe}.json"
+    atomic_json(path, {"ts": now_ts(), "label": label.strip() or "快照", "persona": p})
+    return {"path": str(path), "ts": now_ts(), "label": label.strip() or "快照"}
+
+
+def persona_snapshots(limit: int = 30) -> list:
+    if not PERSONA_SNAP_DIR.exists():
+        return []
+    rows = []
+    for f in PERSONA_SNAP_DIR.glob("*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        rows.append({"name": f.stem, "ts": int(d.get("ts", 0)),
+                     "label": d.get("label", f.stem)})
+    rows.sort(key=lambda x: -x["ts"])
+    return rows[:limit]
+
+
+def persona_restore(name: str) -> dict:
+    """从快照恢复整个人格（完整替换，注意会盖掉当前状态与历史）。"""
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法恢复快照。")
+    import re as _re
+    safe = _re.sub(r"[^\w\u4e00-\u9fff-]+", "", name or "")
+    path = PERSONA_SNAP_DIR / f"{safe}.json"
+    if not path.exists():
+        names = "、".join(r["name"] for r in persona_snapshots(10)) or "（还没有快照）"
+        raise ValueError(f"没有快照：{name}。现有：{names}")
+    d = json.loads(path.read_text(encoding="utf-8"))
+    persona = d.get("persona") or {}
+    save_persona(persona)
+    return {"restored": name, "ts": d.get("ts", 0), "label": d.get("label", name)}
+
+
+def persona_drift(days: int = 7) -> dict:
+    """人格漂移：与最近一张快照对比，或退而统计最近 N 天的 AI 变更。
+
+    目的：微小的偏移也要让用户看得到，不是等跑偏了才发现。
+    """
+    snaps = persona_snapshots(1)
+    diff = []
+    if snaps and (now_ts() - snaps[0]["ts"]) <= days * 86400:
+        try:
+            base = json.loads((PERSONA_SNAP_DIR / f"{snaps[0]['name']}.json").read_text(encoding="utf-8"))
+            bp, cur = base.get("persona") or {}, load_persona()
+            keys = (("traits", {}), ("drives", {}), ("identity", {}), ("state", {}))
+            for section, _ in keys:
+                b = bp.get(section) or {}
+                c = cur.get(section) or {}
+                for k in set(b) | set(c):
+                    if b.get(k) != c.get(k):
+                        diff.append({"section": section, "key": k,
+                                     "from": b.get(k), "to": c.get(k)})
+        except Exception:
+            diff = []
+    ai = ai_persona_changes(days)
+    return {
+        "baseline": snaps[0]["name"] if snaps else None,
+        "baseline_ts": snaps[0]["ts"] if snaps else None,
+        "changes": diff,
+        "ai_changes": [{"ts": h.get("ts"), "field": h.get("field"),
+                        "from": h.get("from"), "to": h.get("to"), "why": h.get("why"),
+                        "source": h.get("source", "")} for h in ai],
+        "counts": {"diff": len(diff), "ai_changes": len(ai)},
+        "alert": len(diff) >= 3 or len(ai) >= 3,
+    }
 
 
 def edit_persona(identity: dict | None = None, traits: dict | None = None,
@@ -2051,6 +2371,7 @@ def persona_self_author(name: str = "", traits: str = "", likes: str = "", disli
     for key in ("habits", "learned_likes", "learned_dislikes", "insights"):
         ev.setdefault(key, [])
     hist = p.setdefault("history", [])
+    mark = len(hist)   # 这之后追加的条目都算 AI（自我总结）发起，用于溯源/漂移
 
     def items(text):
         return [x.strip() for x in re.split(r"[、,，;；\n]+", text or "") if x.strip()]
@@ -2101,6 +2422,8 @@ def persona_self_author(name: str = "", traits: str = "", likes: str = "", disli
         ob.update({"stage": "done", "completed": True, "completed_at": now})
         hist.append({"ts": now, "field": "onboarding", "from": "awaiting_self",
                      "to": "done", "why": "初识完成"})
+    for _h in hist[mark:]:
+        _h.setdefault("source", "自我总结")
     save_persona(p)
     return p
 
@@ -2298,6 +2621,9 @@ def apply_dream(result: dict) -> dict:
         rec["gist"] = item.get("gist") or heuristic_gist(text)
         rec["consolidated"] = True
         rec["detail"] = 1.0
+        # AI 整理出来的记忆先标"待审核"：防止做梦合并/编造的内容直接当事实沉淀。
+        rec["review"] = "pending"
+        rec["review_source"] = "dream"
         records.append(rec)
         applied["memories"] += 1
         for sid in rec["links"]:
@@ -2319,7 +2645,8 @@ def apply_dream(result: dict) -> dict:
 
     upd = result.get("persona_updates") or {}
     if upd:
-        applied["rejected"] = update_persona(upd, why="做梦整理")
+        evid = [sid for it in (result.get("memories") or []) for sid in (it.get("source_ids") or [])][:10]
+        applied["rejected"] = update_persona(upd, why="做梦整理", source="dream", evidence=evid)
 
     pending_path = HOME / "dreams" / "pending.json"
     task_id = result.get("task_id") or (json.loads(pending_path.read_text("utf-8")).get("task_id")
@@ -2353,6 +2680,8 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
            "## 我是谁", persona_brief(p)]
     used = len(persona_brief(p)) + 60
 
+    session_mode = resolve_mode(query)
+
     if model_tier() == "small":
         out.append("\n## 小模型模式（当前模型档位 = small）")
         out.append("你的上下文和推理都有限，下面这些高风险自动能力**不要主动做**：")
@@ -2361,6 +2690,23 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
         out.append("- `emotion evaluate` 自动判读情绪在小模型上很不可靠，改用最朴素的 `emotion feel` 手动记。")
         out.append("- 只保留硬约束：会话开始 `startup`、值得记的 `remember`、被问起 `recall`、")
         out.append("  快满了 `check-context` / `capture` 保命。其余的能省则省。")
+
+    if session_mode == "work":
+        # 工程模式：情绪隔离。刚聊完情绪化话题立刻写代码时，旧情绪不许进工作会话。
+        out.append("\n## 工程模式（情绪隔离，mode=work）")
+        out.append("本次是写代码 / 排错 / 项目 / 数据分析这类工程场景，而且可能刚聊过情绪化话题。"
+                   "规则：")
+        out.append("- 情绪状态与拟人语气**不注入本会话**，别看/别背情绪；先给可执行方案，重视正确性与工程契约。")
+        out.append("- 旧情绪的余波（不管刚才多上头）与当前任务无关，当作没有，理性为主。")
+        out.append("- 若已手工打开过情绪闸需要先冷却，用 `emotion cool`。")
+    else:
+        # 拟人模式：内部状态 → 可执行的行为指引（而不是甩裸数值给模型）
+        out.append("\n## 我现在的状态（行为指引）")
+        for line in _behavior_map():
+            out.append(f"- {line}")
+        tone = mood_tone_hint()
+        if tone:
+            out.append(f"- 语气底色（自然流露即可，不表演）：{tone}")
 
     work = load_working()
     out.append("\n## 工作记忆（就是你现在能看见的对话）")
@@ -2470,7 +2816,7 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
         out.append("[自我总结] 超过 2 天没总结自己的灵枢技能了："
                    "`python scripts/brain.py skill self-review`。")
     ra = rationality()
-    if ra["storm"] or ra["suppress"] >= 10:
+    if session_mode != "work" and (ra["storm"] or ra["suppress"] >= 10):
         out.append(f"[理智状态] 情绪在起作用：{ra['mood_label']}，理智 {ra['base']} → "
                    f"{ra['effective']}（被压住 {ra['suppress']}%）。语气自然流露可以，"
                    "涉及钱/关系/承诺等大事，把决定权交给用户。")
@@ -2480,6 +2826,31 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
     es = f"{float(cfg.get('escape_threshold', 0.90)) * 100:.0f}%"
     out.append(f"[水位守则] 会话中即记即存；{rv} 补记清点，{dr} 做梦压缩，{es} 封存保底。"
                "用 python scripts/brain.py check-context --used <当前百分比> 逐档检查。")
+    # 待审核提醒：AI 整理出来的东西不能当事实直接沉淀
+    try:
+        rc = review_counts()
+        if rc["memories"] or rc["knowledge"] or rc["persona"]:
+            parts = []
+            if rc["memories"]:
+                parts.append(f"{rc['memories']} 条 AI 整理的记忆")
+            if rc["knowledge"]:
+                parts.append(f"{rc['knowledge']} 条待审核知识")
+            if rc["persona"]:
+                parts.append(f"AI 改了人格 {rc['persona']} 次")
+            out.append(f"[待审核] 有{'、'.join(parts)}。"
+                       "先 `review` 过一遍：确认的 `review confirm <id>`，编造的 `review discard <id>`，"
+                       "人格来源用 `persona history` 查。别让幻觉沉淀成事实。")
+    except Exception:
+        pass
+    # 人格漂移告警：微小偏移也要让用户看得见，不能等跑偏了才发现
+    try:
+        dr = persona_drift(7)
+        if dr["alert"]:
+            out.append("[人格漂移] 与最近基准快照比有明显变化"
+                       f"（结构 {dr['counts']['diff']} 处、AI 改动 {dr['counts']['ai_changes']} 次）。"
+                       "用 `persona drift` 看细节；不是你要的，`persona restore <快照>` 或 `persona rollback <序号>`。")
+    except Exception:
+        pass
     return "\n".join(out)
 
 
@@ -3125,7 +3496,8 @@ def _main(argv=None) -> int:
     p_per = sub.add_parser("persona", help="人格查看与编辑")
     p_per.add_argument("action", nargs="?", default="show",
                        choices=["show", "set", "sync", "path", "interview", "self", "onboarding",
-                                "lock", "unlock", "history", "rollback"])
+                                "lock", "unlock", "history", "rollback",
+                                "snapshot", "snapshots", "restore", "drift"])
     p_per.add_argument("pair", nargs="?", default=None, help="例如 traits.幽默=70 / rollback 的序号")
     p_per.add_argument("--json", action="store_true")
     p_per.add_argument("--name", default="", help="interview：用户给你起的名字")
@@ -3140,6 +3512,8 @@ def _main(argv=None) -> int:
     p_per.add_argument("--insights", default="", help="self：我自己的洞见")
     p_per.add_argument("--unsure", action="store_true", help="interview：用户不知道名字/性格，自己定")
     p_per.add_argument("--limit", type=int, default=30, help="history：显示最近 N 条改动")
+    p_per.add_argument("--label", default="", help="snapshot：给快照起个名")
+    p_per.add_argument("--days", type=int, default=7, help="drift：看最近 N 天的漂移")
 
     p_mind = sub.add_parser("mind", help="理智与好奇心：思考决策")
     p_mind.add_argument("action", nargs="?", default="state",
@@ -3155,11 +3529,13 @@ def _main(argv=None) -> int:
 
     p_emo = sub.add_parser("emotion", help="情绪系统：认知评价/共情/记感受/看心情/看轨迹/改情感设置")
     p_emo.add_argument("action", nargs="?", default="now",
-                       choices=["feel", "evaluate", "mirror", "config", "now", "arc", "list", "desire"])
+                       choices=["feel", "evaluate", "mirror", "config", "now", "arc", "list",
+                                "desire", "events", "adjust", "del", "cool"])
     p_emo.add_argument("emotion", nargs="?", default="",
-                       help="feel：情绪名；evaluate/mirror：事件或描述；desire：欲望名")
-    p_emo.add_argument("--intensity", type=float, default=0.6, help="这件事当时有多重 0-1")
+                       help="feel：情绪名；evaluate/mirror：事件或描述；desire：欲望名；adjust/del：序号")
+    p_emo.add_argument("--intensity", type=float, default=None, help="这件事当时有多重 0-1")
     p_emo.add_argument("--amount", type=float, default=15, help="desire：满足欲望的量 0-100")
+    p_emo.add_argument("--emotion-name", default="", help="adjust：把这条情绪改成另一个情绪名")
     p_emo.add_argument("--polarity", default="auto", help="evaluate：positive/negative/neutral/auto")
     p_emo.add_argument("--why", default="", help="因为什么")
     p_emo.add_argument("--about", default="", help="关于谁/什么事")
@@ -3197,6 +3573,19 @@ def _main(argv=None) -> int:
     p_conf = sub.add_parser("detect-conflicts", help="启发式扫描矛盾记忆（如「用Windows」vs「改用Linux」）")
     p_conf.add_argument("--json", action="store_true")
     p_conf.add_argument("--limit", type=int, default=50)
+
+    p_mode = sub.add_parser("mode", help="会话模式：work 工程（情绪隔离）/ human 拟人 / auto 按场景自动切")
+    p_mode.add_argument("action", nargs="?", default="show",
+                        choices=["show", "work", "human", "auto"])
+
+    p_rev = sub.add_parser("review", help="审核 AI 整理出来的记忆 / 知识 / 人格变更（防幻觉沉淀成事实）")
+    p_rev.add_argument("action", nargs="?", default="list",
+                       choices=["list", "confirm", "discard"])
+    p_rev.add_argument("id", nargs="?", default="", help="confirm/discard：那条的 id（m_ 开头的记忆 / k_ 开头的知识）")
+    p_rev.add_argument("--json", action="store_true")
+
+    p_audit = sub.add_parser("audit", help="整体自查：待审核项 + 冲突记忆 + 该做什么")
+    p_audit.add_argument("--json", action="store_true")
 
     p_list = sub.add_parser("list", help="列出记忆")
     p_list.add_argument("--limit", type=int, default=30)
@@ -3265,9 +3654,13 @@ def _main(argv=None) -> int:
             args.cmd in ("remember", "init", "restore", "forget", "capture")
             or (args.cmd == "dream" and not args.dry_run)
             or (args.cmd == "work" and action in ("add", "flush", "clear"))
-            or (args.cmd == "persona" and action not in ("show", "path", "onboarding"))
+            or (args.cmd == "persona" and action not in ("show", "path", "onboarding",
+                                                         "history", "snapshots", "drift"))
             or (args.cmd == "mind" and action in ("set", "tune"))
-            or (args.cmd == "emotion" and action in ("feel", "evaluate", "mirror", "config", "desire"))
+            or (args.cmd == "emotion" and action in ("feel", "evaluate", "mirror", "config",
+                                                     "desire", "adjust", "del", "cool"))
+            or (args.cmd == "mode" and action != "show")
+            or (args.cmd == "review" and action in ("confirm", "discard"))
             or (args.cmd == "assoc" and action in ("link", "unlink") )
             or (args.cmd == "assoc" and action == "auto" and not args.dry_run)
             or (args.cmd == "daily" and not args.dry_run)
@@ -3450,6 +3843,59 @@ def _main(argv=None) -> int:
                   f"{r['to'] if r['to'] is not None else '∅'}（原来是「{r['why']}」）")
             print(persona_brief(load_persona()))
             return 0
+        if args.action == "snapshot":
+            r = persona_snapshot(args.label)
+            print(f"已给当前人格拍快照：{r['label']}（{fmt_time(r['ts'])}）")
+            print(f"  文件：{r['path']}")
+            print("以后人格跑偏，用 persona snapshots 找回来、persona restore <名字> 还原。")
+            return 0
+        if args.action == "snapshots":
+            rows = persona_snapshots(getattr(args, "limit", 30) or 30)
+            if not rows:
+                print("还没有人格快照。先拍一张：persona snapshot --label \"调参前基准\"")
+                return 0
+            print(f"人格快照（最新在前，共 {len(rows)} 张）：")
+            for i, r in enumerate(rows, 1):
+                print(f"  {i}. {fmt_time(r['ts'])}  {r['label']}  [{r['name']}]")
+            print("还原：persona restore <名字>")
+            return 0
+        if args.action == "restore":
+            if not args.pair:
+                print("用法：persona restore <快照名字>（用 persona snapshots 看名字）", file=sys.stderr)
+                return 2
+            try:
+                r = persona_restore(args.pair)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            print(f"已从快照恢复人格：{r['label']}（{fmt_time(r['ts'])}）")
+            print(persona_brief(load_persona()))
+            return 0
+        if args.action == "drift":
+            d = persona_drift(getattr(args, "days", 7) or 7)
+            if args.json:
+                print(json.dumps(d, ensure_ascii=False, indent=2))
+                return 0
+            if not d["baseline"]:
+                print("还没有快照做基准。先拍一张：persona snapshot --label \"基准\"")
+            else:
+                print(f"对比基准快照：{d['baseline']}（{fmt_time(d['baseline_ts'])}）")
+            if not d["changes"] and not d["ai_changes"]:
+                print("没有检测到人格漂移。")
+                return 0
+            if d["changes"]:
+                print(f"结构变化 {len(d['changes'])} 处：")
+                for c in d["changes"]:
+                    print(f"  · {c['section']}.{c['key']}：{c['from']} → {c['to']}")
+            if d["ai_changes"]:
+                print(f"最近 {getattr(args, 'days', 7) or 7} 天 AI 改人格 {len(d['ai_changes'])} 次：")
+                for h in d["ai_changes"]:
+                    src = f"（来源 {h['source']}）" if h.get("source") else ""
+                    print(f"  · {fmt_time(h['ts'])}  {h['field']}：{h['from']} → {h['to']}"
+                          f"（{h['why']}{src}）")
+            if d["alert"]:
+                print(" ⚠ 漂移偏大：确认这些变化是不是你想要的；不是就 persona rollback 或 persona restore 快照。")
+            return 0
         if args.action == "interview":
             p = persona_interview(args.name, args.traits, args.style, args.values,
                                   args.callme, args.self_name, args.unsure)
@@ -3537,7 +3983,8 @@ def _main(argv=None) -> int:
             if not args.emotion:
                 print("用法：emotion evaluate \"用户骂我了\" --polarity auto --intensity 0.8", file=sys.stderr)
                 return 2
-            r = emotion_evaluate(args.emotion, args.polarity, args.intensity,
+            r = emotion_evaluate(args.emotion, args.polarity,
+                                 args.intensity if args.intensity is not None else 0.6,
                                  why=args.why, about=args.about)
             ra = r["rationality"]
             print(f"事件：{r['event']}")
@@ -3555,7 +4002,8 @@ def _main(argv=None) -> int:
             if not args.emotion:
                 print("用法：emotion mirror \"用户很难过\" [--intensity 0.6]", file=sys.stderr)
                 return 2
-            r = emotion_mirror(args.emotion, args.intensity)
+            r = emotion_mirror(args.emotion,
+                               args.intensity if args.intensity is not None else 0.5)
             print(r["note"])
             if r.get("mirrored"):
                 print(f"  记进情绪流：{r['mirrored']['emotion']}（{r['mirrored']['intensity']:.0%}）")
@@ -3593,7 +4041,9 @@ def _main(argv=None) -> int:
             if not args.emotion:
                 print("用法：emotion feel 开心 --intensity 0.7 --why \"用户夸我了\"", file=sys.stderr)
                 return 2
-            ev = feel(args.emotion, args.intensity, why=args.why, about=args.about,
+            ev = feel(args.emotion,
+                      args.intensity if args.intensity is not None else 0.6,
+                      why=args.why, about=args.about,
                       decay_hours=args.decay_hours)
             m = mood_now()
             print(f"记下：{ev['emotion']}（强度 {ev['intensity']:.0%}）"
@@ -3653,6 +4103,71 @@ def _main(argv=None) -> int:
                 print(str(e), file=sys.stderr)
                 return 1
             print(f"满足 {r['satisfied']} +{r['amount']}：现在是 {r['desires'][r['satisfied']]:.0f}/100")
+            return 0
+        if args.action == "events":
+            rows = emotion_events()
+            if not rows:
+                print("还没有情绪事件。")
+                return 0
+            print(f"情绪事件流（最新在前，共 {len(rows)} 条；序号用于 adjust / del）：")
+            for i, ev in enumerate(rows[:30], 1):
+                why = f"，因为{ev['why']}" if ev.get("why") else ""
+                about = f"（关于{ev['about']}）" if ev.get("about") else ""
+                mark = " ·已微调" if ev.get("adjusted") else (" ·已冷却" if ev.get("cooled_at") else "")
+                print(f"  {i}. {fmt_time(ev.get('ts', 0))}  {ev.get('emotion')}"
+                      f"（强度 {float(ev.get('intensity', 0)):.0%}）{why}{about}{mark}")
+            print("\n判错了不用整条删：emotion adjust <序号> --intensity 0.3 --emotion-name 委屈 --why \"其实还好\"")
+            return 0
+        if args.action == "adjust":
+            if not args.emotion:
+                print("用法：emotion adjust <序号> [--intensity 0.3] [--emotion-name 委屈] [--why \"其实还好\"]", file=sys.stderr)
+                return 2
+            try:
+                n = int(args.emotion.strip())
+            except ValueError:
+                print("序号得是数字：emotion adjust <序号>（先 emotion events 看序号）", file=sys.stderr)
+                return 2
+            if (args.intensity is None and not args.emotion_name and not args.why
+                    and not args.about and args.decay_hours is None):
+                print("至少要改一项：--intensity / --emotion-name / --why / --about / --decay-hours", file=sys.stderr)
+                return 2
+            try:
+                r = emotion_modify(n, emotion=args.emotion_name,
+                                   intensity=args.intensity,
+                                   why=args.why or None, about=args.about or None,
+                                   decay_hours=args.decay_hours)
+            except (ValueError, PermissionError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            ev = r["event"]
+            print(f"已微调第 {n} 条：{ev.get('emotion')}（强度 {float(ev.get('intensity', 0)):.0%}）")
+            if r["changed"]:
+                print("  改了：" + "、".join(r["changed"].keys()))
+            return 0
+        if args.action == "del":
+            if not args.emotion:
+                print("用法：emotion del <序号>（先 emotion events 看序号）", file=sys.stderr)
+                return 2
+            try:
+                n = int(args.emotion.strip())
+            except ValueError:
+                print("序号得是数字：emotion del <序号>", file=sys.stderr)
+                return 2
+            try:
+                r = emotion_delete(n)
+            except (ValueError, PermissionError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            print(f"已删除第 {n} 条：{r['deleted'].get('emotion')}；还剩 {r['remaining']} 条。")
+            return 0
+        if args.action == "cool":
+            try:
+                r = emotion_cool()
+            except PermissionError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            print(f"已冷却 {r['cooled']} 条情绪余波。此刻心情：{r['mood']}（强度 {r['intensity']:.0%}）。")
+            print("刚聊完情绪化话题要写代码 / 做正事前，先来这一步，旧情绪就不再干扰工作会话。")
             return 0
         m = mood_now()
         grp = f" · 七情[{m['category']}]" if m.get("groups") else ""
@@ -3843,6 +4358,81 @@ def _main(argv=None) -> int:
             config_unset(args.key)
             print(f"已移除 {args.key}")
             return 0
+
+    if args.cmd == "mode":
+        labels = {"work": "工程模式（情绪隔离、理性优先）",
+                  "human": "拟人模式（情绪照常流露）",
+                  "auto": "自动（按本轮话题判断，工程话题自动隔离情绪）"}
+        if args.action in ("work", "human", "auto"):
+            config_set("mode", args.action)
+            print(f"会话模式 → {args.action}：{labels[args.action]}")
+            return 0
+        cur = str(load_config().get("mode", "auto") or "auto").lower()
+        print(f"当前会话模式：{cur}（{labels.get(cur, '自动')}）")
+        print("  work  = 恒为工程模式：情绪不注入，先给可执行方案")
+        print("  human = 恒为拟人模式：情绪照常注入")
+        print("  auto  = 按本轮话题自动切（默认）")
+        print("切换：python scripts/brain.py mode work | human | auto")
+        return 0
+
+    if args.cmd == "review":
+        if args.action in ("confirm", "discard"):
+            if not args.id:
+                print("用法：review confirm <id> / review discard <id>（先 review 看清单）", file=sys.stderr)
+                return 2
+            target = args.id.strip()
+            if target.startswith("k_"):
+                import growth
+                status = "confirmed" if args.action == "confirm" else "discarded"
+                r = growth.set_knowledge_status(target, status)
+                if not r:
+                    print(f"没有这条知识：{target}", file=sys.stderr)
+                    return 1
+                print(f"知识「{r.get('title', target)}」已{'确认' if args.action == 'confirm' else '废弃'}。")
+                return 0
+            try:
+                r = set_memory_review(target, args.action)
+            except (ValueError, PermissionError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            print(f"记忆已{'确认' if args.action == 'confirm' else '废弃'}："
+                  f"{r.get('gist') or r.get('text', '')[:40]}")
+            return 0
+        rep = review_report()
+        if args.json:
+            print(json.dumps(rep, ensure_ascii=False, indent=2))
+            return 0
+        total = len(rep["memories"]) + len(rep["knowledge"])
+        if not total and not rep["persona"]:
+            print("没有待审核项，干净。")
+            return 0
+        if rep["memories"]:
+            print(f"待审核记忆 {len(rep['memories'])} 条（AI 做梦等整理出来的，确认前不当事实）：")
+            for m in rep["memories"]:
+                print(f"  · {m['id']}  {m['text'][:70]}")
+                print(f"    review confirm {m['id']}   /   review discard {m['id']}")
+        if rep["knowledge"]:
+            print(f"\n待审核知识 {len(rep['knowledge'])} 条：")
+            for k in rep["knowledge"]:
+                print(f"  · {k['id']}  {k['title'][:50]}（{k['topic']}）")
+                print(f"    review confirm {k['id']}   /   review discard {k['id']}")
+        if rep["persona"]:
+            print(f"\n最近 7 天 AI 改人格 {len(rep['persona'])} 次（persona history 看来源，跑偏就 rollback）：")
+            for h in rep["persona"]:
+                print(f"  · {h['field']}：{h['from']} → {h['to']}（{h['why']}）")
+        return 0
+
+    if args.cmd == "audit":
+        a = audit()
+        if args.json:
+            print(json.dumps(a, ensure_ascii=False, indent=2))
+            return 0
+        c = a["counts"]
+        print(f"自查：待审记忆 {c['memories']} · 待审知识 {c['knowledge']} · "
+              f"AI 改人格 {c['persona']} · 疑似冲突 {c['conflicts']}")
+        for t in a["tips"]:
+            print(f"  - {t}")
+        return 0
 
     if args.cmd == "detect-conflicts":
         hits = detect_conflicts(args.limit)

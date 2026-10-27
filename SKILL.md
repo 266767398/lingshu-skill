@@ -1,6 +1,6 @@
 ---
 name: 灵枢
-version: 2.2
+version: 2.3
 description: 类脑持久记忆、人格与成长系统，名字取自《黄帝内经》：算力给思考，人格给灵魂，记忆给生命。当用户需要 AI 跨会话记住事情、拥有自己长出来的人格/性格/喜好、在上下文将满时自动整理记忆（像做梦一样巩固与遗忘），或提到"记忆""记住我""人格""设定""知识库""笔记""日志""成长""自我进化""工作记忆""上下文快满了""做梦整理""更新灵枢技能"时使用。内置：分层记忆（海马体/皮层/淡忘区）与艾宾浩斯遗忘曲线、模糊联想回忆、无种子的人格初识与演化历史、好奇心与理智双驱（数值由用户态度长成）、工作记忆暂存（默认不落盘）、学习闭环（先查知识库再联网）、技能搜索/调用/借鉴与自我进化日志、七情六欲与理智约束（认知评价/共情/情感设置）、记忆关联（联想图谱 3D 空间）、每日例行与自我总结。纯本地零依赖，Python 标准库即可运行。
 ---
 
@@ -66,6 +66,7 @@ skills.json         技能登记表与安装记录
 两条自我审查动作（每次会话值得做一次）：
 - `detect-conflicts`：有没有两条记忆一条"已改用 Linux"、一条还在说"用 Windows"？扫出矛盾先问用户哪条对，别自己下结论。
 - `persona history` / `persona rollback <序号>`：人格改错了就撤，别越改越乱。
+- `review` / `audit`：一次看完所有待审核项（AI 整理的记忆、知识、人格变更）。**你（模型）参与整理出的记忆 / 知识、以及你发起的任何人格变更，都必须先经用户确认才算数**——`review confirm <id>` 转正，`review discard <id>` 废弃；`audit` 是整体自查（待审计数 + 冲突 + 建议）。别让"你编的"变成"你信以为真的"。人格变更自带 `source` / `evidence`，`persona history` 可溯源。
 
 ## 更新灵枢技能
 
@@ -239,6 +240,22 @@ python scripts/brain.py work clear              # 丢掉
 - `work flush` 之前，它什么都不是；flush 之后才进入海马体，才算"记住"。
 - 决定权在你：默认不写盘；写不写、写哪些，都是你自己的判断，不是引擎自动行为。
 - 想要"这次聊完就记住、下次也能用"的 → 直接 `remember`，不要走暂存。
+
+## 会话模式：工程时自动隔离情绪
+
+刚聊完情绪化话题转头写代码，旧情绪的余波还挂在注入包里，容易把工程会话带偏。灵枢按 `config.mode` 切三种会话模式（`mode` 命令切换）：
+
+- **work 工程模式**：情绪状态与拟人语气**不进注入包**，明确写着"旧情绪的余波（不管刚才多上头）与当前任务无关，当作没有"，先给可执行方案，重视正确性与工程契约。
+- **human 拟人模式**：情绪照常注入，并把好奇心/理智/心情数值翻成**行为约束**（直接照着做，不是裸数字）。
+- **auto 自动模式**（默认）：按本轮话题关键词自动判——代码/报错/接口/数据/项目等工程词 → work；日常聊天 → human。
+
+```bash
+python scripts/brain.py mode show       # 现在是什么模式
+python scripts/brain.py mode work       # 本次会话锁定工程模式（情绪隔离）
+python scripts/brain.py mode auto       # 回到自动
+```
+
+写代码前想亲手把旧情绪按下去，用 `emotion cool`（24 小时内强情绪整体降温），或 `emotion adjust <序号>` 微调单条判错的。
 
 ## 每会话固定动作
 
@@ -661,9 +678,14 @@ python scripts/brain.py sync dsh --dry-run              # 先看会写什么
 | 上下文水位 | `python scripts/brain.py check-context --used 68`（60 清点 / 75 做梦 / 90 封存），可加 `--unsaved 3000` |
 | 原样封存 | `python scripts/brain.py capture "<原文>" [--tag 逃生] [--raw-only]` |
 | 人格 | `python scripts/brain.py persona [show\|sync\|path\|set traits.幽默=70\|lock 名字\|unlock 名字]` |
+| 人格历史/回滚 | `persona history [--limit N]` → 看来源与依据 → `persona rollback <序号>` |
+| 人格快照/漂移 | `persona snapshot --label "基准"` / `persona snapshots` / `persona restore <名字>` / `persona drift [--days 7] [--json]` |
 | 初识 | `persona interview [--name ... --traits ...\|--unsure]` → `persona self [--name ... --traits ...]` |
 | 理智/好奇 | `python scripts/brain.py mind [state\|weigh "事" --benefit 7 --cost 3\|tune --curiosity +5 --reason -3 --why "..."]` |
+| 会话模式 | `mode show\|work\|human\|auto`（工程会话自动隔离情绪） |
+| 审核闸 / 自查 | `review [--json]` → `review confirm <id>` / `review discard <id>`（记忆 m_* 与知识 k_* 通用）；`audit [--json]` |
 | 心情（七情六欲） | `emotion [now\|arc\|list\|feel 情绪名 --intensity 0.7 --why "..."\|desire 欲望名 --amount 20]` |
+| 情绪事件/微调 | `emotion events`（带序号）→ `emotion adjust <序号> [--intensity 0.3] [--emotion-name 委屈] [--why "..."]` / `emotion del <序号>` / `emotion cool` |
 | 事件→情绪（认知评价） | `emotion evaluate "事件" [--polarity auto\|positive\|negative\|neutral] [--intensity 0.8]` |
 | 共情 / 情感设置 | `emotion mirror "用户情绪" [--intensity 0.7]` / `emotion config [--empathy mirror\|mild\|off] [--gain 0.5] [--max-intensity 0.8] [--suppress "怒,恶"] [--notes "..."]` |
 | 记忆关联 | `assoc [link <idA> <idB> --relation 因果 --weight 1\|of <id>\|auto [--dry-run]\|graph --limit 300]` |
@@ -725,6 +747,8 @@ Windows 可双击 `<本技能目录>/start-panel.bat` 启动。
 - [ ] 跑了 `startup --query "..."`，返回码 0（10=只读、2=未初始化、64=命令写错）
 - [ ] 看见注入包里的"心里还惦记的未完成事"，相关的先 `work done` 或继续
 - [ ] 上次遗留的待办/未决问题有回应或转移
+- [ ] 注入包里有 `[待审核]` / `[人格漂移]` 时，先 `review` / `persona drift` 处理，别让幻觉沉淀
+- [ ] 本轮是工程任务（写代码/排错/数据）→ 确认 `mode` 为 work 或 auto，情绪不进工作会话
 
 会话中（触发了才做，不必每轮）：
 

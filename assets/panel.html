@@ -754,6 +754,10 @@ function tierLabel(t){
   return t === "small" ? "小模型模式（劝退自动 dreaming / 情绪评估）"
     : t === "large" ? "大模型模式" : "自动档";
 }
+function modeLabel(m){
+  return m === "work" ? "工程模式（情绪隔离）"
+    : m === "human" ? "拟人模式" : "自动（按话题切换）";
+}
 
 function toast(msg, err){
   const t = $("toast");
@@ -795,11 +799,13 @@ function hexA(hex, alpha){
 
 function memCard(m){
   const pct = Math.round((m.retention || 0) * 100);
+  const pending = m.review === "pending";
   return `<article class="mem">
     <div class="ring" style="--p:${pct}"><b>${pct}%</b></div>
     <div class="mem-body">
       <div class="mem-top">
         <span class="badge ${m.layer}">${LAYER[m.layer] || m.layer}</span>
+        ${pending ? `<span class="badge" style="background:rgba(230,100,80,.18);color:#e66450" title="AI 整理出来的，还没人工确认，确认前不算事实">待审核</span>` : ""}
         <span class="badge">${KIND[m.kind] || m.kind}</span>
         ${m.emotion ? `<span class="badge" style="background:rgba(233,196,106,.16);color:var(--amber)" title="情绪增强编码：情绪强烈时记住的事更牢">♡ ${esc(m.emotion)}</span>` : ""}
         <span class="stars">${stars(m.importance)}</span>
@@ -809,6 +815,8 @@ function memCard(m){
       ${(m.tags && m.tags.length) ? `<div class="tags">${m.tags.map(t => `<span>#${esc(t)}</span>`).join("")}</div>` : ""}
     </div>
     <div class="acts">
+      ${pending ? `<button class="iconbtn" title="确认（转正为事实）" data-review="confirm" data-id="${esc(m.id)}">✓</button>`
+                + `<button class="iconbtn" title="废弃（移入淡忘区）" data-review="discard" data-id="${esc(m.id)}">✗</button>` : ""}
       <button class="iconbtn ${m.pinned ? "pin" : ""}" title="置顶/取消" data-pin="${esc(m.id)}">◈</button>
       <button class="iconbtn" title="编辑" data-edit="${esc(m.id)}">✎</button>
       <button class="iconbtn" title="忘记" data-forget="${esc(m.id)}">✕</button>
@@ -851,8 +859,13 @@ function renderOverview(){
   $("m-cortex").textContent = st.cortex ?? 0;
   $("m-hippo").textContent = st.hippo ?? 0;
   $("m-ret").textContent = Math.round((st.avg_retention || 0) * 100) + "%";
+  const rc = ov.review_counts || {};
+  const rcTotal = (rc.memories || 0) + (rc.knowledge || 0) + (rc.persona || 0);
   $("sidefoot").innerHTML = `<b>记忆库</b><br>${esc(ov.home || st.home || "")}<br><br><b>人格档案</b><br>persona.json`
     + `<br><br><b>模型档位</b><br>${esc(tierLabel(ov.model_tier))}`
+    + `<br><br><b>会话模式</b><br>${esc(modeLabel(ov.mode))} <a href="javascript:void 0" data-mode-cycle style="color:var(--amber)">切换</a>`
+    + (rcTotal ? `<br><br><b style="color:#e66450">待审核 ${rcTotal} 项</b><br>记忆 ${rc.memories || 0} · 知识 ${rc.knowledge || 0} · 人格 ${rc.persona || 0}` : "")
+    + ((ov.persona_drift && ov.persona_drift.alert) ? `<br><br><b style="color:#e66450">人格漂移偏大</b><br>用 persona drift 查看或还原快照` : "")
     + (ov.readonly ? `<br><b style="color:var(--red)">只读模式</b>` : "");
 
   const roBanner = $("ro-banner");
@@ -1759,10 +1772,29 @@ $("btn-conflicts").addEventListener("click", loadConflicts);
 $("inject-run").addEventListener("click", runInject);
 $("inject-close").addEventListener("click", () => $("inject-modal").classList.add("hidden"));
 
+$("sidefoot").addEventListener("click", async (e) => {
+  const cyc = e.target.closest("[data-mode-cycle]");
+  if (!cyc) return;
+  const order = ["auto", "work", "human"];
+  try {
+    const cur = (S.ov && S.ov.mode) || "auto";
+    const next = order[(order.indexOf(cur) + 1) % order.length];
+    await api("/api/mode", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({mode: next})});
+    toast(`会话模式 → ${modeLabel(next)}`);
+    load();
+  } catch (err) { toast(err.message, true); }
+});
+
 $("mem-list").addEventListener("click", async (e) => {
   const pin = e.target.closest("[data-pin]"), ed = e.target.closest("[data-edit]"), fg = e.target.closest("[data-forget]");
+  const rv = e.target.closest("[data-review]");
   const findMem = id => (S.memIndex && S.memIndex[id]) || (S.ov && S.ov.memories.find(x => x.id === id));
   try {
+    if (rv) {
+      await api("/api/memory/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: rv.dataset.id, action: rv.dataset.review})});
+      toast(rv.dataset.review === "confirm" ? "已确认，这条记忆转正为事实" : "已废弃，移入淡忘区");
+      load();
+    }
     if (pin) {
       const m = findMem(pin.dataset.pin);
       await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: pin.dataset.pin, pinned: !m.pinned})});

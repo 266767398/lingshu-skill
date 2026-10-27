@@ -78,6 +78,9 @@ def overview() -> dict:
         "onboarding": brain.onboarding_state(),
         "readonly": bool(brain.READONLY),
         "model_tier": brain.model_tier(),
+        "mode": str(brain.load_config().get("mode", "auto") or "auto").lower(),
+        "review_counts": brain.review_counts(),
+        "persona_drift": brain.persona_drift(7),
         "home": str(brain.HOME),
     }
 
@@ -619,6 +622,28 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": str(exc)}, 400)
                     return
                 self._json({"ok": True, "persona": p})
+                return
+
+            if path == "/api/memory/review":
+                mid, act = data.get("id", ""), data.get("action", "")
+                if act not in ("confirm", "discard"):
+                    self._json({"error": "action 只能是 confirm / discard"}, 400)
+                    return
+                try:
+                    r = brain.set_memory_review(mid, act)
+                except (ValueError, PermissionError) as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                self._json({"ok": True, "memory": r, "review_counts": brain.review_counts()})
+                return
+
+            if path == "/api/mode":
+                mode = str(data.get("mode", "") or "").lower()
+                if mode not in ("work", "human", "auto"):
+                    self._json({"error": "mode 只能是 work / human / auto"}, 400)
+                    return
+                brain.config_set("mode", mode)
+                self._json({"ok": True, "mode": mode})
                 return
 
             self._json({"error": "not found"}, 404)

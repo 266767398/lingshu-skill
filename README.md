@@ -4,7 +4,7 @@
 
 > ⚠️ **能力天花板（先读）**：灵枢是「提示词 + 脚本」的机制，**不能从底层强制约束模型**。当模型发生强幻觉时依然会无视全部规则；效果上限取决于底层大模型本身的推理、记忆与指令遵循能力。中强模型（7B+、云端）可完整遵守；**3B 以下本地小模型会出现大量规则漏执行**（忘走 startup、跳过写盘、纪律打折）——请据此降低预期，或改用 `SKILL-lite.md`（精简版）/ `SKILL-tiny.md`（最小试用版）。
 
-> 🚨 **风险警告：幻觉会被固化落盘**。本地保存 ≠ 内容真实。`dream`、`knowledge tidy`、`emotion evaluate` 都要大模型产出结构化结果；模型若把无关记忆强行合并、编造内容、误判情绪，这些错误会被**持久写进本地记忆库 / 知识库**，不会自动消失。防护措施：AI 动过的知识条目一律先标为**待审核**（`knowledge review` → `confirm` / `discard`），小模型请用 `config set model_tier small` 关掉高风险自动能力。**落盘前请人工过目。**
+> 🚨 **风险警告：幻觉会被固化落盘**。本地保存 ≠ 内容真实。`dream`、`knowledge tidy`、`emotion evaluate` 都要大模型产出结构化结果；模型若把无关记忆强行合并、编造内容、误判情绪，这些错误会被**持久写进本地记忆库 / 知识库**，不会自动消失。防护措施：AI 动过的记忆 / 知识一律先标为**待审核**（`review` → `confirm` / `discard`；知识也可 `knowledge review`），人格变更带**来源与依据**（`persona history`），另有全局自查 `audit`。小模型请用 `config set model_tier small` 关掉高风险自动能力。**落盘前请人工过目。**
 
 一套纯本地、零依赖（只用 Python 标准库）的 AI 记忆系统。它把"上下文窗口"变成"会生长的记忆"——短期记忆像海马体一样快速写入、自然衰减；上下文将满时像人做梦一样重放、压缩、巩固到长期皮层；想不起来时靠模糊联想而不是精确匹配。
 
@@ -15,6 +15,8 @@
   - [做梦：上下文将满时的整理](#做梦上下文将满时的整理)
   - [上下文水位三级防线](#上下文水位三级防线)
   - [工作记忆](#工作记忆)
+  - [会话模式与情绪隔离](#会话模式与情绪隔离)
+  - [审核闸：AI 产物先过目](#审核闸ai-产物先过目)
 - [情绪与类人机制](#情绪与类人机制)
 - [模糊联想回忆](#模糊联想回忆)
 - [人格](#人格)
@@ -73,12 +75,34 @@
 
 当前上下文本身就是工作记忆，默认不落盘。只有需要留一手时才 `work add`（会话级暂存，最多 9 条，12 小时后自动丢）。每件带"未完成/已完成"状态（蔡格尼克效应）：没做完的事会在注入包里被点名"还惦记着"，做完用 `work done <序号>` 标记就放下；`work flush` 把值得留的转成真正记忆（`--skip-done` 只转没完成的，已 done 的直接丢），`work clear` 丢掉。
 
+### 会话模式与情绪隔离
+
+工程会话和日常聊天的需要是打架的：刚聊完情绪化话题转头写代码，旧情绪的余波还在注入包里，模型容易被带着走偏。灵枢用 `mode` 切三种会话模式（`config.mode`，默认 `auto`）：
+
+- **work 工程模式**：情绪状态与拟人语气**不注入本会话**，注入包明确说"旧情绪与当前任务无关，当作没有"，先给可执行方案，重视正确性与工程契约。
+- **human 拟人模式**：情绪照常注入，并把数值得翻成**可直接照着做的行为约束**（`emotion now` 不再只有裸数字）。
+- **auto 自动模式**（默认）：按本轮话题关键词自动判——工程话题（代码/报错/接口/数据……）走 work，其余走 human。
+
+切换：`mode work | human | auto`。写代码前想手动清掉余波，用 `emotion cool` 把 24 小时内的强情绪整体降温，或 `emotion adjust <序号>` 微调单条。
+
+### 审核闸：AI 产物先过目
+
+记忆→做梦→知识库→进化日志→人格，这条链路里 AI 既是整理者又可能编造者，幻觉会逐层沉淀污染人格。灵枢给每个 AI 动手的环节都加了审核闸：
+
+- **AI 整理的记忆**（`dream --apply` 等）标 `review="pending"`，确认前不算事实。
+- **AI 整理的知识**（`knowledge tidy`）标 `status="pending"`。
+- **AI 发起的人格变更**记 `source`（dream/自我总结/…）与 `evidence`（依据的记忆/事件 id），`persona history` 可溯源。
+- 一次看完所有待审项：`review` → `review confirm <id>` / `review discard <id>`（记忆 m_* 与知识 k_* 通用，后者等同 `knowledge confirm/discard`）；整体自查用 `audit`（待审计数 + 冲突记忆 + 该做什么）。
+
+每个会话的注入包会主动提醒有 `[待审核]` 项、有 `[人格漂移]`，不让幻觉静默沉淀。
+
 ### 情绪与类人机制
 
 情绪系统把"心情"做成一条会衰减的曲线，而不是一行写死的字：
 
 - **两条轴**：valence（喜/哀，-1~1）+ arousal（强度，0~1），用**半衰期叠加**算出此刻心情（`emotion now`），看轨迹用 `emotion arc`，情绪共 7 大类（`emotion list`）。
 - **怎么产生情绪**：`emotion evaluate` 认知评价自动产生（不是手动演出来的）、`emotion mirror` 共情跟入用户情绪、`emotion feel` 手动记一笔。共情强度与抑制清单是用户随时可改的设定（`emotion config`）。
+- **错判了能微调**：`emotion events` 看事件流（带序号），`emotion adjust <序号>` 只改判错的那几项（强度/情绪名/原因），`emotion del <序号>` 删掉误记的整条，不用推倒重来。
 - **情绪增强编码**：情绪强烈时记住的事更牢，记录带 `emotion` 标记（杏仁核打个标签）。
 - **情绪传染 / 心情惯性**：新情绪会被当下心情"染色"——同向被点燃放大，反向被惯性往回拽，不会瞬间反转。
 - **习惯化 / 享乐适应**：同一件事反复出现，情绪反应递减；反复记的同一件事重要性也不再步步抬升（但保留下限）。
@@ -94,8 +118,9 @@
 
 人格**不预写**。第一次使用时问用户"你希望我叫什么、是什么性格"，用户说不知道就由灵枢自己定。喜好、厌恶、习惯由相处中自己写。
 
-- 人格演化有完整历史，每次改动可回滚：`persona history` 看历史（序号从最新往前数），`persona rollback <序号>` 一键撤销那次改动；回滚本身也记一条历史。
-- **好奇心与理智**是两条内驱数值，不是出厂设定——用户嫌你啰嗦，理智上调；用户让你多挖多试，好奇心上调（`mind tune`）。
+- 人格演化有完整历史，每次改动可回滚：`persona history` 看历史（序号从最新往前数，条目带**来源 source** 与**依据 evidence**，能看清这次改人格来自哪段对话/哪些记忆），`persona rollback <序号>` 一键撤销那次改动；回滚本身也记一条历史。
+- **快照与漂移告警**：重要节点先 `persona snapshot --label "基准"` 拍一张完整快照；`persona snapshots` 列表、`persona restore <名字>` 一键还原。`persona drift` 把当前人格与最近基准快照逐字段对比（结构差异 + 最近 N 天 AI 改动，`--days` 可调），变化偏大时注入包会亮 `[人格漂移]` 告警——微小偏移也看得见，不是等跑偏了才发现。
+- **好奇心与理智**是两条内驱数值，不是出厂设定——用户嫌你啰嗦，理智上调；用户让你多挖多试，好奇心上调（`mind tune`）。它们不是只有裸数值：注入包（`startup` 的 human 模式块）会把数值翻成行为约束（`_behavior_map`），模型照做即可。
 - `persona self` 让你总结"我是谁"，`persona interview` 是初识引导。
 
 ## 成长路径
@@ -270,9 +295,12 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 上下文水位 | `check-context --used 68`（60 清点 / 75 做梦 / 90 封存） |
 | 原样封存 | `capture "<原文>" [--tag 逃生]` |
 | 做梦 | `dream` / `dream --apply apply.json` / `dream --auto` |
-| 人格 | `persona show\|self\|interview\|mind\|state\|edit\|history [--limit]\|rollback <序号>` |
-| 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config` |
+| 人格 | `persona show\|self\|interview\|mind\|state\|edit\|history [--limit]\|rollback <序号>\|snapshot [--label]\|snapshots\|restore <名字>\|drift [--days 7] [--json]` |
+| 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config\|events\|adjust <序号>\|del <序号>\|cool` |
 | 工作记忆 | `work status\|add\|list\|done <序号>\|flush [--skip-done]\|clear` |
+| 会话模式 | `mode show\|work\|human\|auto`（工程会话自动隔离情绪） |
+| 审核闸 | `review [--json]` / `review confirm <id>` / `review discard <id>`（记忆 m_* 与知识 k_* 通用） |
+| 自查 | `audit [--json]`（待审计数 + 冲突记忆 + 该做什么） |
 | 知识库 | `knowledge add\|list\|search\|show\|pin\|rm\|tidy\|review\|confirm <id>\|discard <id>` |
 | 冲突检查 | `detect-conflicts [--json] [--limit 50]`（启发式，只提醒不下结论） |
 | 模型档位 | `config show` / `config set model_tier small` / `config unset model_tier` |

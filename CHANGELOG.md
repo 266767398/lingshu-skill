@@ -2,6 +2,29 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.3 — 基线复盘：审核闸 · 会话模式 · 人格快照与漂移 · 情绪微调
+
+针对七条基线问题的修复（"软提示可无视 / 幻觉逐层沉淀 / 人格变更无溯源 / 情绪错判只能整删 / 裸数值缺行为映射 / 拟人模式与工程模式冲突 / 人格漂移静默"）：
+
+1. **审核闸（对抗幻觉逐层沉淀污染人格）**
+   - AI 整理的记忆（`dream --apply` 等）标 `review="pending"`，确认前不算事实；`review` / `review confirm <id>` / `review discard <id>` 统一过目（记忆 `m_*` 与知识 `k_*` 通用）。
+   - AI 发起的人格变更写入 `source`（dream/自我总结/…）与 `evidence`（依据的记忆/事件 id），`persona history` 可溯源。
+   - 新增 `audit` 整体自查：待审计数 + 冲突记忆 + 该做什么；注入包主动提醒 `[待审核]`。
+2. **会话模式与情绪隔离（工程时自动隔离情绪）**
+   - `config.mode`（默认 `auto`）+ `mode show/work/human/auto` 命令。
+   - work 模式：情绪与拟人语气不进注入包，明确"旧情绪与当前任务无关"；human 模式：情绪照常注入。
+   - auto 模式按话题关键词自动判（代码/报错/接口/数据 → work，日常 → human）。
+3. **人格快照与漂移告警（微小偏移也看得见）**
+   - `persona snapshot [--label]` 拍完整快照（`persona_snapshots/`），`persona snapshots` 列表、`persona restore <名字>` 一键还原。
+   - `persona drift [--days]` 与最近基准快照逐字段对比（结构差异 + AI 改动），变化偏大时注入包亮 `[人格漂移]` 告警。
+4. **情绪微调（错判不用整条删）**
+   - `emotion events` 看事件流（带序号）；`emotion adjust <序号>` 只改判错的项（强度/情绪名/原因/余波时长）；`emotion del <序号>` 删误记的整条；`emotion cool` 24 小时内强情绪整体降温（写代码前清余波）。
+   - 修正：`adjust / del` 的序号与 `events` 展示一致（按时间降序编号）。
+5. **行为映射（裸数值 → 可直接照做的约束）**
+   - 注入包 human 模式块把好奇心/理智/心情翻成行为约束（`_behavior_map`），不再只有裸数字。
+6. **健壮性**
+   - `read_jsonl` 改 `utf-8-sig`：Windows 脚本/编辑器写出的带 BOM 文件首行不再被误当"坏行"丢进 .corrupt。
+
 ## v2.2 — 技能自更新流程
 
 - 新增「更新灵枢技能」：SKILL.md 内置一键更新流程（gitee 仓库拉取 → 版本对照 → 覆盖技能文件 → 自检），对 AI 说「更新灵枢技能」即可执行。
