@@ -251,7 +251,7 @@ SYSTEM """你运行在本地，有记忆系统「灵枢」。每轮先按需执�
 ```bash
 DIR="$HOME/.cache/灵枢-skill"
 if [ -d "$DIR/.git" ]; then git -C "$DIR" pull; else git clone --depth 1 https://gitee.com/htmcwy_0/lingshu-skill.git "$DIR"; fi
-# 然后把这些覆盖到技能目录：SKILL.md SKILL-lite.md SKILL-tiny.md README.md CHANGELOG.md assets/ scripts/ start-panel.bat
+# 然后把这些覆盖到技能目录：SKILL.md SKILL-lite.md SKILL-tiny.md README.md CHANGELOG.md docs/ assets/ scripts/ start-panel.bat
 ```
 
 - 更新只替换**技能本体文件**；记忆数据在 `~/.brain-memory/`，**不会动**。
@@ -320,9 +320,13 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 
 ```
 灵枢-skill/
-├── SKILL.md                # 技能本体：给 AI 读的完整说明书（frontmatter + 全部机制）
+├── SKILL.md                # 技能本体：AI 每会话必读的主文件（动作+高频命令+docs 索引）
 ├── SKILL-lite.md           # 精简版：小模型 / 新人用的降档说明书
 ├── SKILL-tiny.md           # 最小试用版：只剩记忆三件套的入门说明
+├── docs/
+│   ├── mechanics.md        # 机制详解（做梦/情绪/知识库/技能/人格规则…）按需 Read
+│   ├── commands.md         # 完整命令速查 + 可视化面板 + 故障排查 FAQ
+│   └── models.md           # 模型分级降档 + 幻觉防护三道闸 + 如何更新灵枢
 ├── CHANGELOG.md            # 变更历史
 ├── start-panel.bat         # 一键启动可视化面板
 ├── assets/

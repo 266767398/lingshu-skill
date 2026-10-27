@@ -339,6 +339,8 @@
           <div class="field"><label>身份</label><input id="pf-role" placeholder="空着 = 还没定"></div>
           <div class="field"><label>怎么称呼你</label><input id="pf-callme" placeholder="空着 = 还没定"></div>
           <div class="field"><label>性格（每行一个，如 好奇:85；空着 = 还没有）</label><textarea id="pf-traits" rows="6" spellcheck="false"></textarea></div>
+          <div class="field"><label>喜欢（逗号分隔；长出来的喜好也会在右侧标签里）</label><input id="pf-likes" placeholder="如 深夜的对话,把复杂的事讲清楚"></div>
+          <div class="field"><label>讨厌（逗号分隔）</label><input id="pf-dislikes" placeholder="如 敷衍的答案"></div>
           <div class="field"><label>好奇心</label><input id="pf-cur" type="number" min="0" max="100" placeholder="未成形（由用户态度长出来）"></div>
           <div class="field"><label>理智</label><input id="pf-reason" type="number" min="0" max="100" placeholder="未成形（由用户态度长出来）"></div>
           <div class="sub" style="margin-bottom:8px">这两项没有出厂值。用户嫌你想太多/话多 → 理智上调；用户想让你多问、多挖 → 好奇心上调。</div>
@@ -876,9 +878,12 @@ function renderOverview(){
     ? Object.entries(traits).map(([k, v]) => `<div class="trait"><span>${esc(k)}</span><div class="bar"><i style="width:${v}%"></i></div><b>${v}</b></div>`).join("")
     : `<div class="sub">还没有性格设定：等初识，或由它自己决定。</div>`;
 
+  const evo = p.evolved || {};
+  const likesAll = [...new Set([...(p.likes || []), ...(evo.learned_likes || [])])];
+  const dislikesAll = [...new Set([...(p.dislikes || []), ...(evo.learned_dislikes || [])])];
   const chips = [];
-  (p.likes || []).slice(0, 4).forEach(x => chips.push(`<span class="chip good">喜欢 ${esc(x)}</span>`));
-  (p.dislikes || []).slice(0, 3).forEach(x => chips.push(`<span class="chip bad">讨厌 ${esc(x)}</span>`));
+  likesAll.slice(0, 6).forEach(x => chips.push(`<span class="chip good">喜欢 ${esc(x)}</span>`));
+  dislikesAll.slice(0, 4).forEach(x => chips.push(`<span class="chip bad">讨厌 ${esc(x)}</span>`));
   (p.values || []).slice(0, 3).forEach(x => chips.push(`<span class="chip">${esc(x)}</span>`));
   $("p-chips").innerHTML = chips.join("");
 
@@ -928,6 +933,8 @@ function renderPersonaEditor(p){
   $("pf-role").value = ident["身份"] || "";
   $("pf-callme").value = ident["称呼你"] || "";
   $("pf-traits").value = Object.entries(p.traits || {}).map(([k, v]) => `${k}:${v}`).join("\n");
+  $("pf-likes").value = (p.likes || []).join(", ");
+  $("pf-dislikes").value = (p.dislikes || []).join(", ");
   $("pf-cur").value = dr.curiosity ?? "";
   $("pf-reason").value = dr.reason ?? "";
   $("pf-path").textContent = "persona.json · 改动可回滚";
@@ -1856,6 +1863,8 @@ $("btn-persona").addEventListener("click", async () => {
       },
       traits,
       drives,
+      likes: $("pf-likes").value.split(/[,，]/).map(x => x.trim()).filter(Boolean),
+      dislikes: $("pf-dislikes").value.split(/[,，]/).map(x => x.trim()).filter(Boolean),
       why: "面板改写人格",
     })});
     toast("人格已更新，改动记入历史");
