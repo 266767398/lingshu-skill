@@ -377,6 +377,25 @@ python scripts/brain.py skill plugins --json      # 拿 JSON（给面板/脚本�
 
 面板的「技能」页顶部有一块「DSH（DeepSeek）插件 · 只读」，展示插件名、版本、profile、描述与是否带 `AGENTS.md`，带过滤框。这些插件属于 DSH 运行时，灵枢不修改它们。
 
+### 扩展模块：写进引擎的可执行钩子
+
+技能（`skill`）是**说明书**，扩展模块（`ext`）是**代码**。想让灵枢每会话自动做一件事、或加一个自己的命令，就写扩展模块：
+
+```bash
+python scripts/brain.py ext new flow-helper --desc "帮我管会话流程"   # 生成可跑模板
+python scripts/brain.py ext edit flow-helper --body "..."            # 整体改（或 --append / --file）
+python scripts/brain.py ext run flow-helper start                    # 跑 run(argv)
+python scripts/brain.py ext check flow-helper                        # 语法自检
+python scripts/brain.py ext list                                     # 列出全部
+```
+
+扩展是纯 Python 文件，放在数据目录 `~/.brain-memory/extensions/<名字>.py`：
+
+- **更新技能永不覆盖**——和 `lingshu.user.md`、`skills/` 一样，都在数据目录里。
+- 约定都可选：`DESC`（列表显示）、`inject(ctx)`（返回文本并入每会话注入包）、`run(argv)`（`ext run` 调用）。
+- **坏模块不致命**：某个扩展语法错/抛异常，`inject` 时被静默跳过，灵枢照常工作；`ext check <名字>` 能提前查出语法问题。
+- 与技能的分工：要"说清怎么做"→`skill`；要"每会话都执行/加自定义命令"→`ext`。
+
 ## 成长：定期复盘
 
 ```bash

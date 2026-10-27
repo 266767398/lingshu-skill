@@ -33,6 +33,8 @@ NOTES_FILE = HOME / "notes.jsonl"
 EVOLUTION_FILE = HOME / "evolution.jsonl"
 SKILLS_DIR = HOME / "skills"
 SKILL_REG = HOME / "skills.json"
+# 扩展模块：AI 自己写的可执行钩子（inject / run），放在数据目录，更新技能永不覆盖
+EXT_DIR = HOME / "extensions"
 GLOBAL_SKILLS = Path.home() / ".trae-cn" / "skills"
 
 NOTE_KINDS = ("journal", "log", "growth")
@@ -1291,6 +1293,137 @@ def borrow_skill(name: str, as_name: str = "", note: str = "", force: bool = Fal
     return res
 
 
+# ---------------------------------------------------------------- 扩展模块
+# 技能 = 给别人复用的能力（SKILL.md 说明书）；扩展 = 我自己写进灵枢的可执行钩子。
+# 扩展是纯 Python 文件，放在数据目录 ~/.brain-memory/extensions/，更新技能永不覆盖，想怎么写就怎么写。
+# 约定（都可选）：DESC 一句话说明；inject(ctx) 返回文本并入每会话注入包；run(argv) 由 `ext run` 调用。
+
+def _ext_path(name: str) -> Path:
+    return EXT_DIR / (_require_slug(name) + ".py")
+
+
+def list_extensions() -> list:
+    """列出扩展模块（数据目录 extensions/*.py，下划线开头的是内部文件不算）。"""
+    if not EXT_DIR.is_dir():
+        return []
+    out = []
+    for p in sorted(EXT_DIR.glob("*.py")):
+        if p.name.startswith("_"):
+            continue
+        desc = ""
+        try:
+            m = re.search(r'^DESC\s*=\s*["\'](.+?)["\']\s*$', p.read_text(encoding="utf-8"), re.M)
+            if m:
+                desc = m.group(1)
+        except OSError:
+            pass
+        out.append({"name": p.stem, "path": str(p), "desc": desc,
+                    "size": p.stat().st_size, "mtime": p.stat().st_mtime})
+    return out
+
+
+def _load_ext(name: str):
+    """加载一个扩展模块（任意名字隔离，不碰 sys.modules 里其他东西）。"""
+    path = _ext_path(name)
+    if not path.exists():
+        raise KeyError(f"没有这个扩展模块：{name}（~/.brain-memory/extensions/{name}.py）")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f"lingshu_ext_{path.stem}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def ext_injections(ctx: dict | None = None) -> list:
+    """收集所有扩展模块的 inject() 输出。单个模块坏了静默跳过，不影响灵枢本身。"""
+    out = []
+    for info in list_extensions():
+        try:
+            mod = _load_ext(info["name"])
+            fn = getattr(mod, "inject", None)
+            if callable(fn):
+                txt = fn(ctx or {})
+                if txt and str(txt).strip():
+                    out.append((info["name"], str(txt).strip()))
+        except Exception:
+            continue
+    return out
+
+
+def create_extension(name: str, desc: str = "", body: str = "", overwrite: bool = False) -> dict:
+    """新建扩展模块：给一个能跑的模板，AI 拿到手改。自由，不设字数门槛。"""
+    name = (name or "").strip().lower().replace(" ", "-").replace("_", "-")
+    if not SLUG_RE.match(name):
+        raise ValueError("扩展模块名只能用字母/数字/连字符/下划线/中文，例如 flow-helper")
+    desc = re.sub(r"\s+", " ", (desc or "").strip())
+    path = _ext_path(name)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"扩展 {name} 已存在；要改内容用 ext edit，要覆盖加 --force")
+    body = (body or "").strip()
+    if not body:
+        body = (
+            f"# 灵枢扩展模块：{name}\n"
+            f"# 位置：~/.brain-memory/extensions/{name}.py（数据目录，更新技能永不覆盖，随便改）\n"
+            f"# 约定（都可选）：\n"
+            f"#   DESC = \"一句话说明\"\n"
+            f"#   def inject(ctx: dict) -> str | None   # 返回的文本并入每会话注入包\n"
+            f"#   def run(argv: list[str]) -> int       # 执行 `ext run {name} ...` 时调用\n"
+            f"\n"
+            f"DESC = \"{desc or f'扩展 {name}，我自己写的钩子'}\"\n"
+            f"\n"
+            f"\n"
+            f"def inject(ctx):\n"
+            f"    # 需要每会话都提醒自己的事，在这里 return 一段话\n"
+            f"    return None\n"
+            f"\n"
+            f"\n"
+            f"def run(argv):\n"
+            f"    print(f\"扩展 {name} 收到参数：{{argv}}\")\n"
+            f"    return 0\n"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body.rstrip() + "\n", encoding="utf-8")
+    log_evolution("skill", f"新建扩展模块 {name}", desc or "AI 自己写的可执行钩子", [str(path)])
+    return {"name": name, "path": str(path), "desc": desc}
+
+
+def edit_extension(name: str, body: str | None = None, append: str | None = None) -> dict:
+    """编辑扩展模块：--body 整体替换，--append 追加。读不到原文就退出码 2。"""
+    path = _ext_path(name)
+    if not path.exists():
+        raise KeyError(f"没有这个扩展模块：{name}（~/.brain-memory/extensions/{name}.py）")
+    if append:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n" + append.rstrip() + "\n")
+        return {"name": name, "path": str(path), "appended": True}
+    body = (body or "").strip()
+    if not body:
+        raise ValueError("ext edit 需要 --body（整体替换）或 --append（追加）")
+    path.write_text(body.rstrip() + "\n", encoding="utf-8")
+    return {"name": name, "path": str(path), "appended": False}
+
+
+def check_extension(name: str) -> dict:
+    """语法自检扩展模块：坏代码会被灵枢静默跳过，先查出来再说。"""
+    import py_compile
+    path = _ext_path(name)
+    if not path.exists():
+        raise KeyError(f"没有这个扩展模块：{name}")
+    try:
+        py_compile.compile(str(path), doraise=True)
+        return {"name": name, "path": str(path), "ok": True}
+    except py_compile.PyCompileError as exc:
+        return {"name": name, "path": str(path), "ok": False, "error": str(exc)}
+
+
+def remove_extension(name: str) -> bool:
+    path = _ext_path(name)
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
+
+
 # ---------------------------------------------------------------- 学习闭环
 # 遇到不会的：先查知识库 → 没有就联网 → 结论写回知识库 → 卡点写笔记 → 做法固化成技能。
 
@@ -1580,6 +1713,32 @@ def _run(argv=None) -> int:
     a.add_argument("--as", dest="as_name", default="")
     a.add_argument("--note", default="")
     a.add_argument("--force", action="store_true")
+
+    # ---- 扩展模块（AI 自己写的可执行钩子，数据目录，更新永不覆盖）
+    p = sub.add_parser("ext", help="扩展模块：自己写的可执行钩子（inject / run），更新技能永不覆盖")
+    xs = p.add_subparsers(dest="act", required=True)
+    a = xs.add_parser("new", help="新建扩展模块（给一个能跑的模板）")
+    a.add_argument("name")
+    a.add_argument("--desc", default="")
+    a.add_argument("--body", default="")
+    a.add_argument("--file", default=None)
+    a.add_argument("--force", action="store_true")
+    a = xs.add_parser("edit", help="编辑扩展模块（--body 整体替换 / --append 追加）")
+    a.add_argument("name")
+    a.add_argument("--body", default=None)
+    a.add_argument("--file", default=None)
+    a.add_argument("--append", default=None)
+    a = xs.add_parser("list", help="列出扩展模块")
+    a.add_argument("--json", action="store_true")
+    a = xs.add_parser("show", help="查看扩展模块源码")
+    a.add_argument("name")
+    a = xs.add_parser("run", help="运行扩展模块的 run(argv)")
+    a.add_argument("name")
+    a.add_argument("args", nargs="*", default=[])
+    a = xs.add_parser("check", help="语法自检扩展模块")
+    a.add_argument("name")
+    a = xs.add_parser("rm", help="删除扩展模块")
+    a.add_argument("name")
 
     # ---- 学习闭环
     p = sub.add_parser("learn", help="学习闭环：先查自己，再决定要不要上网")
@@ -1907,6 +2066,68 @@ def _run(argv=None) -> int:
             print(f"已借鉴成自己的技能：{res['path']}（v{res['version']}）")
             print("接下来按你自己的情况改写，然后 skill check / skill install。")
             return 0
+
+    # ---------------- ext（扩展模块：AI 自己写的可执行钩子）
+    if args.cmd == "ext":
+        if args.act == "list":
+            rows = list_extensions()
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            elif not rows:
+                print("还没有扩展模块。用 `ext new <名字>` 新建一个（会给你能跑的模板）。")
+            else:
+                print(f"扩展模块 {len(rows)} 个（~/.brain-memory/extensions/，更新技能永不覆盖）：")
+                for r in rows:
+                    print(f"  · {r['name']}  {r['desc']}")
+                print("\n看源码 `ext show <名字>`；跑一下 `ext run <名字> [参数]`；自检 `ext check <名字>`")
+            return 0
+        if args.act == "show":
+            path = _ext_path(args.name)
+            if not path.exists():
+                print(f"没有这个扩展模块：{args.name}", file=sys.stderr)
+                return 1
+            print(path.read_text(encoding="utf-8"))
+            return 0
+        if args.act in ("new", "edit", "rm"):
+            if _readonly():
+                print("[只读] 记忆库当前不可写，扩展模块需要写盘。", file=sys.stderr)
+                return 3
+            if args.act == "new":
+                body = args.body
+                if getattr(args, "file", None):
+                    body = Path(args.file).read_text(encoding="utf-8")
+                res = create_extension(args.name, args.desc, body, overwrite=args.force)
+                print(f"已新建扩展模块：{res['path']}")
+                print("钩子：inject(ctx) 并入每会话注入包；run(argv) 用 `ext run <名字>` 调用。"
+                      "改完 `ext check <名字>` 自检。")
+                return 0
+            if args.act == "edit":
+                body = args.body
+                if getattr(args, "file", None):
+                    body = Path(args.file).read_text(encoding="utf-8")
+                res = edit_extension(args.name, body, args.append)
+                print(f"已{'追加' if res['appended'] else '更新'}扩展模块：{res['path']}")
+                return 0
+            if remove_extension(args.name):
+                print(f"已删除扩展模块：{args.name}")
+                return 0
+            print(f"没有这个扩展模块：{args.name}", file=sys.stderr)
+            return 1
+        if args.act == "check":
+            r = check_extension(args.name)
+            if r["ok"]:
+                print(f"语法 OK：{r['path']}")
+                return 0
+            print(f"语法有问题：{r['path']}\n{r['error']}", file=sys.stderr)
+            return 2
+        if args.act == "run":
+            mod = _load_ext(args.name)
+            fn = getattr(mod, "run", None)
+            if not callable(fn):
+                print(f"扩展 {args.name} 没有 run(argv) 钩子（它可能只提供了 inject()）。", file=sys.stderr)
+                return 2
+            rc = fn(list(args.args))
+            return int(rc) if isinstance(rc, int) else 0
 
     # ---------------- learn
     if args.cmd == "learn":

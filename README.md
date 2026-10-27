@@ -136,6 +136,7 @@
 ### 技能自编辑与全局化
 
 技能是固化的做法：`skill new` 写 → `skill check` 自检 → `skill install` 装进全局技能目录（`~/.trae-cn/skills/`），新会话直接可调。`skill use --auto` 用技能时自动全局化；`skill borrow` 借鉴别人的技能变成自己的版本（诚实标注来源）。**支持中文技能名**。
+技能有两种形态：`skill` 是说明书（给人/别的 AI 复用）；`ext`（扩展模块）是 AI 自己写进灵枢引擎的**可执行 Python 钩子**（`inject` 并入每会话注入、`run` 加自定义命令），放在数据目录 `~/.brain-memory/extensions/`，**更新永不覆盖**、坏模块自动跳过。
 
 ### 进化日志
 
@@ -308,6 +309,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 模型档位 | `config show` / `config set model_tier small` / `config unset model_tier` |
 | 笔记 | `note write\|search\|digest` |
 | 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow` |
+| 扩展模块 | `ext new\|edit\|show\|list\|run\|check\|rm`（可执行钩子，数据目录，更新永不覆盖） |
 | DSH 插件（只读） | `skill plugins [--json]` |
 | 成长 | `growth status` / `growth review --days 7` |
 | 进化日志 | `evolve log "标题" --kind persona\|skill\|knowledge\|thinking\|self` |
@@ -351,6 +353,8 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 ├── persona.json            # 人格档案
 ├── config.json             # 配置（阈值/权重）
 ├── skills/                 # 自己写的技能
+├── extensions/             # 扩展模块（可执行钩子 inject/run，更新永不覆盖）
+├── lingshu.user.md         # 用户附加规则（更新永不覆盖，每会话自动注入）
 ├── knowledge/              # 知识库
 ├── notes.jsonl             # 日记/日志/成长复盘
 ├── evolution.jsonl         # 进化日志

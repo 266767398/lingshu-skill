@@ -2,6 +2,17 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.6 — 扩展模块：AI 自己写进灵枢的可执行钩子
+
+技能（`skill`）= 说明书（给别人复用）；扩展模块（`ext`）= 代码（AI 自己写进灵枢引擎的 Python 钩子），更自由：
+
+- **`ext` 命令**：`ext new <名字>` 生成可跑模板 → `ext edit --body/--append/--file` 改 → `ext show/list/run/check/rm`。
+- **钩子**：`DESC`（列表说明）、`inject(ctx)`（返回文本并入**每会话注入包**，长期提醒）、`run(argv)`（`ext run <名字> [参数]` 自定义命令）。
+- **更新永不覆盖**：扩展放在数据目录 `~/.brain-memory/extensions/`，和 `lingshu.user.md`、`skills/` 一样，更新技能只动技能目录。
+- **坏模块不致命**：某扩展语法错/抛异常时被静默跳过，灵枢照常工作；`ext check <名字>` 提前查语法。
+- **只读门控**：数据目录不可写时 `ext new/edit/rm` 被挡（返回 3），`list/show/run/check` 放行。
+- SKILL.md 新增「扩展模块」节、README 数据目录树与命令速查、docs/mechanics.md 扩展模块小节。
+
 ## v2.5 — 更新不再覆盖用户内容
 
 升级会覆盖技能目录文件，把用户手动补的规则覆盖掉（DSH 只读保护、全局目录指回等），每次都要重写一遍。v2.5 从机制上解决：

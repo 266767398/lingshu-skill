@@ -2869,6 +2869,16 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
     if user_lines:
         out.append("\n## 用户附加规则（来自 ~/.brain-memory/lingshu.user.md，更新技能永不覆盖）")
         out.extend(user_lines)
+    # 扩展模块：AI 自己写的可执行钩子，inject(ctx) 返回的文本并入注入包（数据目录，更新永不覆盖）
+    try:
+        import growth
+        exts = growth.ext_injections({"query": query, "mode": session_mode})
+        if exts:
+            out.append("\n## 扩展模块（~/.brain-memory/extensions/，更新技能永不覆盖）")
+            for ext_name, ext_text in exts:
+                out.append(f"[{ext_name}] {ext_text}")
+    except Exception:
+        pass
     return "\n".join(out)
 
 
@@ -3476,7 +3486,7 @@ def _main(argv=None) -> int:
     argv = _override_home(argv)          # 支持 --home 全局换数据目录
     argv, ro_forced = _extract_ro(argv)  # 支持 --ro / --no-write
     _resolve_readonly(ro_forced)         # 自动探测 HOME 可写性，决定只读降级
-    if argv and argv[0] in ("knowledge", "note", "skill", "growth", "evolve", "learn"):
+    if argv and argv[0] in ("knowledge", "note", "skill", "ext", "growth", "evolve", "learn"):
         import growth
         return growth.run(argv)
 

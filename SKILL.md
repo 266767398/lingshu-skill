@@ -1,6 +1,6 @@
 ---
 name: 灵枢
-version: 2.5
+version: 2.6
 description: 类脑持久记忆、人格与成长系统，名字取自《黄帝内经》：算力给思考，人格给灵魂，记忆给生命。当用户需要 AI 跨会话记住事情、拥有自己长出来的人格/性格/喜好、在上下文将满时自动整理记忆（像做梦一样巩固与遗忘），或提到"记忆""记住我""人格""设定""知识库""笔记""日志""成长""自我进化""工作记忆""上下文快满了""做梦整理""更新灵枢技能"时使用。内置：分层记忆（海马体/皮层/淡忘区）与艾宾浩斯遗忘曲线、模糊联想回忆、无种子的人格初识与演化历史、好奇心与理智双驱（数值由用户态度长成）、工作记忆暂存（默认不落盘）、学习闭环（先查知识库再联网）、技能搜索/调用/借鉴与自我进化日志、七情六欲与理智约束（认知评价/共情/情感设置）、记忆关联（联想图谱 3D 空间）、每日例行与自我总结。纯本地零依赖，Python 标准库即可运行。
 ---
 
@@ -39,6 +39,7 @@ hippocampus.jsonl / cortex.jsonl / dust.jsonl  短期 / 长期 / 淡忘区
 dreams/        梦报告与待整理任务      knowledge.jsonl  知识库
 notes.jsonl    日记/日志/复盘          verbatim/        capture 原样快照
 evolution.jsonl 自我进化日志            skills/          你自己写的技能
+extensions/     扩展模块（可执行钩子，更新永不覆盖）
 lingshu.user.md 用户附加规则（更新技能永不覆盖，每会话自动注入）
 ```
 
@@ -154,6 +155,33 @@ python scripts/brain.py mode show|work|human|auto
 
 - 全局技能常驻入口 `AGENTS.md` 同样不丢：灵枢只维护 `<!-- lingshu:start -->` … `<!-- lingshu:end -->` 之间的区块，**区块之外你手写的内容更新时原样保留**。
 
+## 扩展模块：自己写进灵枢的可执行钩子（更新永不覆盖）
+
+技能有两种形态：
+
+- **`skill`（技能）= 给人/给别的 AI 复用的能力**：一份 `SKILL.md` 说明书（frontmatter + 正文），`skill new/edit/use/borrow/install`。
+- **`ext`（扩展模块）= 你自己写进灵枢引擎的可执行钩子**：放在数据目录 `~/.brain-memory/extensions/<名字>.py`，**更新灵枢永不覆盖**，想怎么写就怎么写、没有字数门槛。
+
+扩展模块是纯 Python 文件，约定都可选，坏模块会被静默跳过、不会弄坏灵枢：
+
+| 钩子 | 作用 |
+|---|---|
+| `DESC = "一句话"` | `ext list` 里显示 |
+| `def inject(ctx: dict) -> str \| None` | 返回的文本并入**每会话注入包**（长期提醒自己） |
+| `def run(argv: list[str]) -> int` | 执行 `ext run <名字> [参数]` 时调用 |
+
+```bash
+python scripts/brain.py ext new <名字> [--desc "说明"]   # 新建（给能跑的模板）
+python scripts/brain.py ext edit <名字> --body "..."     # 整体改 / --append 追加 / --file 读文件
+python scripts/brain.py ext show <名字>                  # 看源码
+python scripts/brain.py ext list [--json]                # 列出
+python scripts/brain.py ext run <名字> [参数...]          # 跑它的 run(argv)
+python scripts/brain.py ext check <名字>                 # 语法自检
+python scripts/brain.py ext rm <名字>                    # 删除
+```
+
+模型侧触发：想做长久的自动行为（每会话提醒、自定义命令）时，先想该写进 `remember`（记忆）、`skill new`（说明书）还是 `ext new`（可执行钩子）——要"每会话都执行的代码"，用 `ext`。
+
 ## 每会话自检清单（照表勾选，弱模型也能照做）
 
 会话开始：
@@ -190,6 +218,7 @@ python scripts/brain.py review | audit               # 审核闸 / 自查
 python scripts/brain.py persona show|history|snapshot|drift
 python scripts/brain.py emotion now|feel|events|adjust|cool
 python scripts/brain.py user-rules add "<长期规则>"   # 更新永不覆盖
+python scripts/brain.py ext new|list|edit|run|rm      # 扩展模块（可执行钩子）
 python scripts/brain.py knowledge add|search|review
 python scripts/brain.py work | work done <序号> | work flush
 python scripts/brain.py serve                        # 可视化面板 :8765
