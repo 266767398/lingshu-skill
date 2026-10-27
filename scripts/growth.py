@@ -98,7 +98,8 @@ def load_knowledge() -> list:
 
 
 def save_knowledge(rows: list) -> None:
-    brain.write_jsonl(KNOWLEDGE_FILE, rows)
+    with brain._locked(KNOWLEDGE_FILE):
+        brain.write_jsonl(KNOWLEDGE_FILE, rows)
     rebuild_index(rows)
 
 
@@ -299,7 +300,7 @@ def knowledge_stats() -> dict:
 
 def tidy_knowledge() -> dict:
     """机械整理：找相似簇、无主题、无标签、过短条目，产出 pending.json 交给 LLM 压缩。"""
-    rows = load_knowledge()
+    rows = [r for r in load_knowledge() if r.get("status") != "discarded"]  # 废弃条目不进整理清单
     if not rows:
         return {"task_id": None, "clusters": [], "untagged": [], "no_topic": [], "short": [],
                 "message": "知识库还是空的"}
@@ -470,7 +471,8 @@ def load_notes() -> list:
 
 
 def save_notes(rows: list) -> None:
-    brain.write_jsonl(NOTES_FILE, rows)
+    with brain._locked(NOTES_FILE):
+        brain.write_jsonl(NOTES_FILE, rows)
 
 
 def write_note(kind: str, title: str, body: str, mood: str = "", tags=None,
@@ -539,7 +541,7 @@ def list_notes(kind: str | None = None, days: int | None = None, limit: int = 60
     rows = load_notes()
     if kind:
         rows = [r for r in rows if r.get("type") == kind]
-    if days:
+    if days is not None:
         floor = brain.now_ts() - days * brain.DAY
         rows = [r for r in rows if r.get("created", 0) >= floor]
     return sorted(rows, key=lambda r: r.get("created", 0), reverse=True)[:limit]

@@ -2,6 +2,41 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.8 — 第二轮深度审查：安全漏洞 + 人格灵魂机制 + 逻辑数据一致性
+
+沿用「真影响使用才改」的原则，三路并行审查（安全 / 人格灵魂 / 逻辑一致性）后修复：
+
+**安全**
+
+- **存储型 XSS 修复**：面板记忆卡片的 `kind` / `layer` 未经转义直接进 HTML；现在统一 `esc()` 输出、`cssCls()` 清洗 class；`/api/memory` 增加 `kind` 白名单（只允许标准七类）+ `importance` 强制 clamp 到 0-1。
+- **备份/恢复加固**：`restore` 增加防 zip 炸弹限额（条目 ≤200、解压后 ≤512MB），并对"不像灵枢备份"提前拒绝；`backup` 自动跳过敏感文件（`.env`、`*.token/*.key/*.pem`、`id_rsa*`、含 secret/credential 的文件名）。
+- **面板安装收敛**：`skill install` 从面板调用时忽略 `from_dir`（只有本地 CLI 能指定外部目录），防远程/恶意页面乱指路径。
+- **面板响应加固**：统一加 `X-Content-Type-Options: nosniff` + `Referrer-Policy` + CSP（同源资源、放开内联脚本样式）；`_origin_ok` 支持 IPv6 Host（`[::1]:8765`）；负 `Content-Length` 视为空体；未捕获异常不再回显本机路径（日志留全栈，响应给通用文案）。
+- **跨进程写锁补齐**：`persona.json` 保存、知识的 `save_knowledge`、笔记的 `save_notes` 全部加锁（此前只有记忆文件有锁，并发时可能互相覆盖）。
+
+**人格灵魂**
+
+- **初识不再空手打勾**：`persona self` 名字和性格都空着时不再标记初识完成；AI 自写的溯源从 `source=自我总结` 改为 `source=初识`，漂移统计不误报。
+- **锁定区覆盖 self/interview**：`persona self` / `persona interview` 写名字、自称、性格前都查 `_is_locked`，整组锁（`traits`）与子键锁都生效。
+- **AI 变更判定改看 source**：`ai_persona_changes` 优先按 `source` 字段判定（dream/初识），不再只靠 `why` 字符串猜，面板编辑/用户回答不再误报为 AI 私改。
+- **persona set 加白名单**：根路径只认 identity/traits/drives/state/style/values/background/likes/dislikes/relationship；列表字段强制转 list（此前 `set likes=xxx` 会把 list 打成 str，后续注入崩溃）。
+- **快照克制**：快照保留上限 40 张自动修剪；`restore` 支持按 label/名字片段模糊匹配，且恢复时合并当前历史（此前恢复会把之后的审计轨迹整个丢掉）；`drift` 基准跳过"restore前自动备份"、`state.updated` 不再计入漂移。
+- **回滚显式覆盖**：`persona rollback` 加锁检查（锁定字段拒绝回滚），返回值带 `overwrote_later`，CLI 明确提示"之后的改动已被一并回滚"。
+- **traits 语义修正**：更新性格时，做梦整理 = 增量微调（±），面板/CLI = 绝对值；都 clamp 到 0-100。
+
+**逻辑数据一致性**
+
+- **`dream --apply` 校验任务号**：apply.json 的 `task_id` 必须和 `pending.json` 一致才应用（防止把上一场/乱写的结果落到现在的记忆上），不一致直接拒绝，不再无脑删 pending。
+- **JSONL 读写重构**：支持跨行格式化 JSON 块（按括号配对识别，坏块整块进 `.corrupt`）；写入改临时文件原子替换（pid+纳秒文件名，不再互踩 `.tmp`）。
+- **缺失字段容错**：`dream` / `cluster_memories` / `build_injection` / `_print_mem` 对缺 `created`/`kind`/`importance` 的记录不再崩溃。
+- **日常一致性**：`daily --force` 不再把内容重复追加进同一天笔记（`append_same_day=not force`）；梦报告同秒重复生成时自动加序号不覆盖。
+- **知识整理**：`tidy_knowledge` 过滤已废弃条目，不再把 discarded 复活进整理清单；`list_notes` 支持 `days=0` 语义。
+- **修一个 `check-context` 崩溃**：该命令里局部变量 `dream` 遮蔽了全局 `dream()` 函数，导致 `brain.py dream` 命令直接 UnboundLocalError——改为 `dream_pct`。
+
+**文档同步**
+
+- 版本号 2.7→2.8（SKILL / lite / tiny / README）；本 CHANGELOG 新增本条。
+
 ## v2.7 — 全面审查完善：健壮性 + 只读门控统一 + 错误修复
 
 对全部脚本与文档做了一次系统的自我审查，按"真影响使用"筛选修复：

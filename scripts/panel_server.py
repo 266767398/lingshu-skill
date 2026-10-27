@@ -24,10 +24,13 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets"
 # 只读门控名单：这些 POST 端点会写数据目录，数据目录不可写时统一 403
 _WRITE_ENDPOINTS = {
     "/api/remember", "/api/persona", "/api/persona/state", "/api/persona/restore",
-    "/api/memory", "/api/knowledge", "/api/knowledge/review", "/api/note",
-    "/api/skill", "/api/skill/install", "/api/skill/uninstall", "/api/evolve",
-    "/api/dream", "/api/dream/apply", "/api/emotion", "/api/mode", "/api/work",
-    "/api/assoc", "/api/daily", "/api/user-rules", "/api/sync", "/api/config",
+    "/api/persona/edit", "/api/persona/mind", "/api/persona/interview",
+    "/api/persona/self", "/api/persona/rollback",
+    "/api/memory", "/api/memory/review", "/api/knowledge", "/api/knowledge/review",
+    "/api/note", "/api/skill", "/api/skill/install", "/api/skill/uninstall",
+    "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/apply",
+    "/api/emotion", "/api/mode", "/api/work", "/api/assoc", "/api/link",
+    "/api/forget", "/api/daily", "/api/user-rules", "/api/sync", "/api/config",
 }
 
 # 本机随机 token：页面加载时注入，之后每个 API 请求都要带上。
@@ -194,6 +197,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")  # 防止把响应当 HTML 解析
+        self.send_header("Referrer-Policy", "no-referrer")
+        # 页面有内联 <script>/<style>，明确放开；其余资源只能同源，禁止外链脚本/图片域名
+        self.send_header("Content-Security-Policy",
+                         "default-src 'self'; script-src 'unsafe-inline'; "
+                         "style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
         self.end_headers()
         self.wfile.write(body)
 
@@ -205,7 +214,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
-        if not length:
+        if length <= 0:  # 负的 Content-Length 视为空请求体
             return {}
         if length > 2_000_000:
             self._json({"error": "请求体过大"}, 413)
@@ -222,7 +231,11 @@ class Handler(BaseHTTPRequestHandler):
         Host 必须是 127.0.0.1/localhost——否则恶意域名解析到 127.0.0.1 后，
         浏览器会把它当成同源，从而读走全部记忆。
         """
-        host = (self.headers.get("Host") or "").split(":")[0].strip().lower()
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host.startswith("["):       # IPv6：[::1]:8765
+            host = host.split("]")[0] + "]"
+        else:
+            host = host.split(":")[0]
         if host not in ("127.0.0.1", "localhost", "[::1]", "::1"):
             return False
         origin = self.headers.get("Origin")
@@ -505,12 +518,18 @@ class Handler(BaseHTTPRequestHandler):
                 if not target:
                     self._json({"error": "没有这条记忆"}, 404)
                     return
-                for key in ("text", "gist", "kind", "pinned"):
+                for key in ("text", "gist", "pinned"):
                     if key in data:
                         target[key] = data[key]
+                if "kind" in data:
+                    kind = str(data["kind"] or "").strip()
+                    if kind not in brain.KINDS:  # 白名单：防恶意/手滑写入怪异类型
+                        self._json({"error": f"kind 只能是：{'、'.join(brain.KINDS)}"}, 400)
+                        return
+                    target["kind"] = kind
                 if "importance" in data:
                     imp = float(data["importance"])
-                    target["importance"] = round(imp / 10 if imp > 1 else imp, 3)
+                    target["importance"] = round(max(0.0, min(1.0, imp / 10 if imp > 1 else imp)), 3)
                 if "tags" in data:
                     target["tags"] = [t.strip() for t in data["tags"] if t.strip()]
                 brain.save_all(records)
@@ -585,9 +604,10 @@ class Handler(BaseHTTPRequestHandler):
                                             data.get("append"), data.get("description"))
                     self._json({"ok": True, "skill": res, "workspace": workspace()})
                 elif act == "install":
+                    # 面板安装忽略 from_dir：本地 CLI 才能指外部目录，防远程乱指
                     res = growth.install_skill(data.get("name", ""),
                                                bool(data.get("force")),
-                                               data.get("from_dir"),
+                                               None,
                                                accept_risk=bool(data.get("yes")))
                     self._json({"ok": True, "result": res, "workspace": workspace()})
                     return
@@ -660,10 +680,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._json({"error": "not found"}, 404)
-        except Exception as exc:  # 面板需要把错误显示给用户
+        except (ValueError, KeyError, PermissionError) as exc:
+            # 业务异常：消息本身就是给用户看的，直接回显
+            self._json({"error": str(exc)}, 400)
+        except Exception:  # 其它异常：日志里留全栈，响应只给通用文案，避免回显本机路径
             import traceback
             traceback.print_exc()
-            self._json({"error": str(exc)}, 500)
+            self._json({"error": "面板内部错误，详情见运行日志"}, 500)
 
 
 def serve(port: int = 8765, open_browser: bool = True) -> None:

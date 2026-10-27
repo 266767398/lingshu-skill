@@ -750,6 +750,7 @@
 const S = { ov: null, tab: "overview", ws: null, memIndex: {} };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const cssCls = (s) => String(s == null ? "" : s).replace(/[^a-zA-Z0-9_-]/g, "_");
 const KIND = {fact:"事实", preference:"偏好", emotion:"情绪", insight:"洞见", habit:"习惯", episode:"片段", identity:"身份"};
 const LAYER = {cortex:"长期", hippo:"短期", dust:"淡忘"};
 function tierLabel(t){
@@ -806,9 +807,9 @@ function memCard(m){
     <div class="ring" style="--p:${pct}"><b>${pct}%</b></div>
     <div class="mem-body">
       <div class="mem-top">
-        <span class="badge ${m.layer}">${LAYER[m.layer] || m.layer}</span>
+        <span class="badge ${cssCls(m.layer)}">${esc(LAYER[m.layer] || m.layer)}</span>
         ${pending ? `<span class="badge" style="background:rgba(230,100,80,.18);color:#e66450" title="AI 整理出来的，还没人工确认，确认前不算事实">待审核</span>` : ""}
-        <span class="badge">${KIND[m.kind] || m.kind}</span>
+        <span class="badge">${esc(KIND[m.kind] || m.kind)}</span>
         ${m.emotion ? `<span class="badge" style="background:rgba(233,196,106,.16);color:var(--amber)" title="情绪增强编码：情绪强烈时记住的事更牢">♡ ${esc(m.emotion)}</span>` : ""}
         <span class="stars">${stars(m.importance)}</span>
         <span class="date">${esc(m.created_text)}</span>

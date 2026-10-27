@@ -325,9 +325,18 @@ def ai_persona_changes(days: int = 7) -> list:
     for h in p.get("history", []):
         if float(h.get("ts", 0)) < cutoff:
             continue
+        src = str(h.get("source", ""))
         why = str(h.get("why", ""))
-        # 用户自己说的（初识回答、手动编辑、回滚、面板保存）不算 AI 私改
-        if ("用户" in why) or why in ("手动编辑", "回滚", "persona restore"):
+        # 优先看 source 字段（比 why 可靠）；用户自己说的（初识回答、手动编辑、
+        # 回滚、面板保存）不算 AI 私改
+        if src:
+            if src in ("面板", "用户", "手动编辑", "回滚", "restore", "persona restore"):
+                continue
+            if "初识" in src and "我自己" not in src:
+                continue
+            out.append(h)
+            continue
+        if ("用户" in why) or why in ("手动编辑", "回滚", "persona restore") or "初识" in why:
             continue
         out.append(h)
     return out
@@ -401,61 +410,97 @@ def audit() -> dict:
             "review": rep, "conflicts": conf, "tips": tips}
 
 
+def _tmp_path(path: Path) -> Path:
+    """临时文件名带 pid + 纳秒，避免多线程/多进程同时写同一文件时互相截断。"""
+    return path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+
+
 def atomic_json(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = _tmp_path(path)
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
 
+def _brace_balance(line: str) -> int:
+    """估算一行的括号净深度（忽略字符串内的括号），用于把多行 JSON 块拼回整条。"""
+    depth, in_str, esc = 0, False, False
+    for ch in line:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+    return depth
+
+
 def read_jsonl(path: Path) -> list:
     if not path.exists():
         return []
-    out, broken = [], 0
+    out, bad_blocks = [], []
     # utf-8-sig：兼容 Windows 编辑器 / 脚本写出的带 BOM 文件，BOM 不该把首行变成"坏行"
     raw = path.read_text(encoding="utf-8-sig")
-    for line in raw.splitlines():
-        line = line.strip()
+    lines = raw.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i].strip()
         if not line:
+            i += 1
             continue
         try:
             out.append(json.loads(line))
-        except Exception:
-            broken += 1
+            i += 1
             continue
-    if broken:
-        # 有损坏行：先把好的行写回，坏行单独挪到 .corrupt 备份，
+        except Exception:
+            pass
+        # 单行解析失败：可能是多行格式化 JSON。按括号配对把整块累积起来再试，
+        # 避免把一条跨行合法记录当成坏行丢掉。
+        block = [lines[i]]
+        depth = _brace_balance(lines[i])
+        i += 1
+        while i < n and depth > 0 and len(block) < 200:
+            block.append(lines[i])
+            depth += _brace_balance(lines[i])
+            i += 1
+        joined = "\n".join(block).strip()
+        try:
+            obj = json.loads(joined)
+            if isinstance(obj, dict):
+                out.append(obj)
+                continue
+        except Exception:
+            pass
+        bad_blocks.append(joined)
+    if bad_blocks:
+        # 有损坏块：好记录写回，坏块原样（可含多行）挪到 .corrupt 备份，
         # 绝不静默当作没发生、也不让后续保存把它们永久抹掉。
-        good = [l for l in raw.splitlines() if l.strip()]
-        good = [l for l in good if _is_json_line(l)]
         try:
             corrupt = path.with_name(path.name + ".corrupt")
             with open(corrupt, "a", encoding="utf-8") as cf:
-                for l in raw.splitlines():
-                    if l.strip() and not _is_json_line(l):
-                        cf.write(l.rstrip() + "\n")
-            tmp = path.with_name(path.name + ".tmp")
+                for b in bad_blocks:
+                    cf.write(b.rstrip() + "\n---\n")
+            tmp = _tmp_path(path)
             with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-                for l in good:
-                    f.write(l + "\n")
+                for r in out:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
             os.replace(tmp, path)
         except Exception:
-            pass  # 只读环境修不了就下次再修；坏行仍在原文件里，没丢
+            pass  # 只读环境修不了就下次再修；坏块仍在原文件里，没丢
     return out
-
-
-def _is_json_line(line: str) -> bool:
-    try:
-        json.loads(line)
-        return True
-    except Exception:
-        return False
 
 
 def write_jsonl(path: Path, rows: list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = _tmp_path(path)
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -698,7 +743,7 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
                 m["gist"] = heuristic_gist(new)
             else:
                 m["gist"] = heuristic_gist(old)
-            m["importance"] = round(max(m.get("importance", 0.5), float(imp) if imp <= 1 else imp / 10), 3)
+            m["importance"] = round(max(0.0, min(1.0, max(m.get("importance", 0.5), float(imp) if imp <= 1 else imp / 10))), 3)
             m["last_access"] = now_ts()
             m["access_count"] = m.get("access_count", 0) + 1
             m["stability"] = min(MAX_STABILITY, m.get("stability", DEFAULT_STABILITY) * 1.4 * stability_boost)
@@ -1869,7 +1914,8 @@ def load_persona() -> dict:
 
 
 def save_persona(p: dict) -> None:
-    atomic_json(HOME / "persona.json", p)
+    with _locked(HOME / "persona.json"):
+        atomic_json(HOME / "persona.json", p)
 
 
 def _is_locked(p: dict, label: str) -> bool:
@@ -1878,10 +1924,16 @@ def _is_locked(p: dict, label: str) -> bool:
         return False
     if label in locks:
         return True
+    # 整组锁：lock "identity" / "traits" / "drives" 锁住该组下所有字段
+    if "." in label and label.split(".", 1)[0] in locks:
+        return True
     if label.startswith("identity.") and label.split(".", 1)[1] in locks:
         return True
+    if label.startswith("traits.") and label.split(".", 1)[1] in locks:
+        return True
     for item in locks:
-        if "价值" in item and label == "values":
+        # 用户在面板/文档里看到的叫"底线"（persona_brief），锁的写法可能是"价值观/底线"
+        if label == "values" and any(k in item for k in ("价值", "底线")):
             return True
     return False
 
@@ -1972,8 +2024,15 @@ def update_persona(updates: dict, why: str = "做梦整理", source: str = "",
             rejected.append(f"traits.{key}(已锁定)")
             continue
         old = p["traits"][key]
-        new = old + int(val) if isinstance(val, (int, float)) and abs(val) <= 20 else int(val)
-        new = max(0, min(100, new))
+        try:
+            if why == "做梦整理" and isinstance(val, (int, float)):
+                new = int(old or 50) + int(val)   # 做梦只做微调（增量 ±3 以内）
+            else:
+                new = int(val)                     # 面板 / CLI：绝对值 0-100
+            new = max(0, min(100, new))
+        except (TypeError, ValueError):
+            rejected.append(f"traits.{key}(非法值)")
+            continue
         p["traits"][key] = new
         log(f"traits.{key}", old, new)
     if updates.get("mood"):
@@ -2019,8 +2078,27 @@ def update_persona(updates: dict, why: str = "做梦整理", source: str = "",
     return rejected
 
 
+_PERSONA_ROOTS = {"identity", "traits", "drives", "state",
+                  "style", "values", "background", "likes", "dislikes", "relationship"}
+_PERSONA_LIST_FIELDS = {"style", "values", "background", "likes", "dislikes", "relationship"}
+
+
+def _split_list_value(value: str) -> list:
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [str(x).strip() for x in parsed if str(x).strip()]
+    except Exception:
+        pass
+    return [x.strip() for x in re.split(r"[、,，;；\n]+", value or "") if x.strip()]
+
+
 def set_persona_field(path: str, value: str) -> dict:
     p = load_persona()
+    root = path.split(".")[0]
+    if root not in _PERSONA_ROOTS:
+        raise ValueError(f"不认识的字段：{path}（可用 identity.* / traits.* / drives.* / state.* / "
+                         "style / values / background / likes / dislikes / relationship）")
     if _is_locked(p, path):
         raise PermissionError(f"{path} 已被锁定，不能由 AI 修改")
     parts = path.split(".")
@@ -2029,14 +2107,19 @@ def set_persona_field(path: str, value: str) -> dict:
         if part not in node or not isinstance(node[part], dict):
             node[part] = {}
         node = node[part]
-    old = node.get(parts[-1])
-    try:
-        val = json.loads(value)
-    except Exception:
-        val = value
-    if isinstance(old, int) and isinstance(val, (int, float)):
-        val = int(val)
-    node[parts[-1]] = val
+    leaf = parts[-1]
+    old = node.get(leaf)
+    if root in _PERSONA_LIST_FIELDS:
+        # 列表字段：一律转成 list，避免把 likes 之类写成裸字符串让注入崩溃
+        val = _split_list_value(value)
+    else:
+        try:
+            val = json.loads(value)
+        except Exception:
+            val = value
+        if isinstance(old, int) and isinstance(val, (int, float)):
+            val = int(val)
+    node[leaf] = val
     p.setdefault("history", []).append({"ts": now_ts(), "field": path, "from": old, "to": val, "why": "手动编辑"})
     save_persona(p)
     return p
@@ -2065,6 +2148,8 @@ def persona_rollback(index: int | None = None) -> dict:
     entry = hist[len(hist) - idx]
     field = entry.get("field", "")
     frm, to = entry.get("from"), entry.get("to")
+    if _is_locked(p, field):
+        raise PermissionError(f"{field} 已被锁定，不能回滚")
     parts = field.split(".")
     node = p
     for part in parts[:-1]:
@@ -2072,29 +2157,50 @@ def persona_rollback(index: int | None = None) -> dict:
             node[part] = {}
         node = node[part]
     leaf = parts[-1]
+    overwrote = False
     if field.startswith("evolved."):
         bucket = field.split(".", 1)[1]
         arr = node.get(bucket)
         if isinstance(arr, list):
             node[bucket] = [x for x in arr
                             if (x.get("name") if isinstance(x, dict) else x) != to]
-    elif frm is None:
-        node.pop(leaf, None)
-    elif isinstance(node.get(leaf), dict) and isinstance(frm, str):
-        # 目标叶子是 dict（如 onboarding），而历史里的 from 是字符串（初识标记），
-        # 直接替换会把它变成字符串导致后续注入崩溃 → 只回滚 dict 内部的初识标记。
-        node[leaf] = {"stage": frm}
     else:
-        node[leaf] = frm
+        current = node.get(leaf)
+        # 该字段在这条变更之后还被改过（当前值已不是这条的 to）→ 回滚会把它打回旧值，
+        # 让调用方明确提示"这会覆盖之后 N 次改动"，而不是静默覆盖。
+        if to is not None and current != to:
+            overwrote = True
+        if frm is None:
+            node.pop(leaf, None)
+        elif isinstance(current, dict) and isinstance(frm, str):
+            # 目标叶子是 dict（如 onboarding），而历史里的 from 是字符串（初识标记），
+            # 直接替换会把它变成字符串导致后续注入崩溃 → 只回滚 dict 内部的初识标记。
+            node[leaf] = {"stage": frm}
+        else:
+            node[leaf] = frm
     hist.append({"ts": now_ts(), "field": field,
                  "from": to, "to": frm, "why": "回滚"})
     save_persona(p)
-    return {"field": field, "from": to, "to": frm, "why": entry.get("why", "")}
+    return {"field": field, "from": to, "to": frm, "why": entry.get("why", ""),
+            "overwrote_later": overwrote}
 
 
 # ------------------------------------------------ 人格快照 / 漂移
 
 PERSONA_SNAP_DIR = HOME / "persona_snapshots"
+
+
+PERSONA_SNAP_KEEP = 40  # 快照保留上限，防止无限增长
+
+
+def _prune_snapshots(keep: int = PERSONA_SNAP_KEEP) -> None:
+    """只保留最近 keep 张快照，多余的删掉（不会删到刚拍的这张）。"""
+    rows = persona_snapshots(10000)
+    for r in rows[keep:]:
+        try:
+            (PERSONA_SNAP_DIR / f"{r['name']}.json").unlink()
+        except OSError:
+            pass
 
 
 def persona_snapshot(label: str = "") -> dict:
@@ -2106,6 +2212,10 @@ def persona_snapshot(label: str = "") -> dict:
     PERSONA_SNAP_DIR.mkdir(parents=True, exist_ok=True)
     path = PERSONA_SNAP_DIR / f"{now_ts()}_{safe}.json"
     atomic_json(path, {"ts": now_ts(), "label": label.strip() or "快照", "persona": p})
+    try:
+        _prune_snapshots()
+    except Exception:
+        pass
     return {"path": str(path), "ts": now_ts(), "label": label.strip() or "快照"}
 
 
@@ -2130,8 +2240,15 @@ def persona_restore(name: str) -> dict:
     import re as _re
     safe = _re.sub(r"[^\w\u4e00-\u9fff-]+", "_", name or "")
     path = PERSONA_SNAP_DIR / f"{safe}.json"
+    if not path.exists() and name:
+        # 允许用快照的 label 或名字片段模糊匹配（用户通常记得标签而不是时间戳文件名）
+        cands = [r for r in persona_snapshots(10000)
+                 if name == r.get("label") or name in r.get("label", "")
+                 or name in r.get("name", "")]
+        if len(cands) == 1:
+            path = PERSONA_SNAP_DIR / f"{cands[0]['name']}.json"
     if not path.exists():
-        names = "、".join(r["name"] for r in persona_snapshots(10)) or "（还没有快照）"
+        names = "、".join(f"{r['label']}({r['name']})" for r in persona_snapshots(10)) or "（还没有快照）"
         raise ValueError(f"没有快照：{name}。现有：{names}")
     d = _slurp_json(path)
     if not isinstance(d, dict):
@@ -2142,6 +2259,17 @@ def persona_restore(name: str) -> dict:
         persona_snapshot("restore前自动备份")
     except Exception:
         pass
+    # 合并历史：快照里的历史 + 当前历史（去重、按时间排序），避免恢复后丢失之后的审计轨迹
+    cur_hist = (load_persona().get("history") or [])
+    snap_hist = persona.get("history") or []
+    merged, seen = [], set()
+    for h in sorted(snap_hist + cur_hist, key=lambda x: float(x.get("ts", 0) or 0)):
+        key = (h.get("ts"), h.get("field"), str(h.get("to")), h.get("why"))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(h)
+    persona["history"] = merged
     persona.setdefault("history", []).append(
         {"ts": now_ts(), "field": "persona", "from": "(自动备份)",
          "to": name, "why": "persona restore"})
@@ -2154,17 +2282,18 @@ def persona_drift(days: int = 7) -> dict:
 
     目的：微小的偏移也要让用户看得到，不是等跑偏了才发现。
     """
-    snaps = persona_snapshots(1)
+    snaps = [s for s in persona_snapshots(40) if s.get("label") != "restore前自动备份"]
     diff = []
     if snaps and (now_ts() - snaps[0]["ts"]) <= days * 86400:
         try:
             base = json.loads((PERSONA_SNAP_DIR / f"{snaps[0]['name']}.json").read_text(encoding="utf-8"))
             bp, cur = base.get("persona") or {}, load_persona()
-            keys = (("traits", {}), ("drives", {}), ("identity", {}), ("state", {}))
-            for section, _ in keys:
+            for section in ("traits", "drives", "identity", "state"):
                 b = bp.get(section) or {}
                 c = cur.get(section) or {}
                 for k in set(b) | set(c):
+                    if section == "state" and k == "updated":
+                        continue  # 状态更新的时间戳是元数据，不算漂移
                     if b.get(k) != c.get(k):
                         diff.append({"section": section, "key": k,
                                      "from": b.get(k), "to": c.get(k)})
@@ -2369,16 +2498,18 @@ def persona_interview(name: str = "", traits: str = "", style: str = "", values:
         p.setdefault("history", []).append(
             {"ts": now, "field": field, "from": old, "to": new, "why": why})
 
-    if name:
+    if name and not _is_locked(p, "identity.名字"):
         log("identity.名字", ident.get("名字"), name)
         ident["名字"] = name
-    if self_name.strip():
+    if self_name.strip() and not _is_locked(p, "identity.自称"):
         log("identity.自称", ident.get("自称"), self_name.strip())
         ident["自称"] = self_name.strip()
-    if callme.strip():
+    if callme.strip() and not _is_locked(p, "identity.称呼你"):
         log("identity.称呼你", ident.get("称呼你"), callme.strip())
         ident["称呼你"] = callme.strip()
     for k, v in parsed.items():
+        if _is_locked(p, f"traits.{k}"):
+            continue
         log(f"traits.{k}", p.setdefault("traits", {}).get(k), v)
         p["traits"][k] = v
     for key, val in (("style", style), ("values", values)):
@@ -2404,27 +2535,34 @@ def persona_self_author(name: str = "", traits: str = "", likes: str = "", disli
     for key in ("habits", "learned_likes", "learned_dislikes", "insights"):
         ev.setdefault(key, [])
     hist = p.setdefault("history", [])
-    mark = len(hist)   # 这之后追加的条目都算 AI（自我总结）发起，用于溯源/漂移
+    mark = len(hist)   # 这之后追加的条目都算 AI（初识）发起，用于溯源/漂移
+    filled = False     # 真正写入了身份/性格才算"我的部分完成"
 
     def items(text):
         return [x.strip() for x in re.split(r"[、,，;；\n]+", text or "") if x.strip()]
 
-    if name.strip():
+    if name.strip() and not _is_locked(p, "identity.名字"):
         hist.append({"ts": now, "field": "identity.名字", "from": ident.get("名字"),
                      "to": name.strip(), "why": "初识：用户不知道，我自己起的名字"})
         ident["名字"] = name.strip()
-    if self_name.strip():
+        filled = True
+    if self_name.strip() and not _is_locked(p, "identity.自称"):
         hist.append({"ts": now, "field": "identity.自称", "from": ident.get("自称"),
                      "to": self_name.strip(), "why": "初识：我自己定的自称"})
         ident["自称"] = self_name.strip()
-    if callme.strip():
+        filled = True
+    if callme.strip() and not _is_locked(p, "identity.称呼你"):
         hist.append({"ts": now, "field": "identity.称呼你", "from": ident.get("称呼你"),
                      "to": callme.strip(), "why": "初识：我自己定的称呼"})
         ident["称呼你"] = callme.strip()
+        filled = True
     for k, v in _parse_traits(traits).items():
+        if _is_locked(p, f"traits.{k}"):
+            continue
         hist.append({"ts": now, "field": f"traits.{k}", "from": p.setdefault("traits", {}).get(k),
                      "to": v, "why": "初识：用户没定，我自己写的性格"})
         p["traits"][k] = v
+        filled = True
     for item in items(likes):
         if item not in ev["learned_likes"]:
             ev["learned_likes"].append(item)
@@ -2451,12 +2589,13 @@ def persona_self_author(name: str = "", traits: str = "", likes: str = "", disli
                 p[key].append(item)
                 hist.append({"ts": now, "field": key, "from": None,
                              "to": item, "why": "初识：我自己选的"})
-    if ob.get("stage") != "done":
+    # 名字和性格都空着就不算完成——不能凭空打勾；只有真正写出了名字或性格才算
+    if ob.get("stage") != "done" and filled:
         ob.update({"stage": "done", "completed": True, "completed_at": now})
         hist.append({"ts": now, "field": "onboarding", "from": "awaiting_self",
                      "to": "done", "why": "初识完成"})
     for _h in hist[mark:]:
-        _h.setdefault("source", "自我总结")
+        _h.setdefault("source", "初识")
     save_persona(p)
     return p
 
@@ -2517,11 +2656,13 @@ def cluster_memories(records: list, max_clusters: int = 6, include_ids: set | No
     clusters.sort(key=lambda g: (len(g) * max(m.get("importance", 0) for m in g)), reverse=True)
 
     out = []
+    now = now_ts()
     for g in clusters[:max_clusters]:
         out.append({
             "ids": [m["id"] for m in g],
-            "texts": [{"id": m["id"], "kind": m["kind"], "text": m["text"],
-                       "importance": m["importance"], "age_days": round((now_ts() - m["created"]) / DAY, 1)} for m in g],
+            "texts": [{"id": m["id"], "kind": m.get("kind", "fact"),
+                       "text": m.get("text", ""), "importance": m.get("importance", 0.5),
+                       "age_days": round((now - float(m.get("created", now))) / DAY, 1)} for m in g],
             "tags": _dedupe([t for m in g for t in m.get("tags", [])]),
             "entities": _dedupe([e for m in g for e in m.get("entities", [])]),
         })
@@ -2541,7 +2682,7 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
         verbatim = bool(m.get("verbatim"))
         R = retention(m, now)
         if (not verbatim and m.get("layer") == "hippo" and R < RETENTION_FLOOR
-                and m.get("importance", 0.5) < 0.75 and now - m["created"] > 2 * DAY):
+                and m.get("importance", 0.5) < 0.75 and now - float(m.get("created", now)) > 2 * DAY):
             m["layer"] = "dust"
             m["forgotten_at"] = now
             m["detail"] = round(max(0.12, float(m.get("detail", 1)) * 0.4), 2)
@@ -2569,32 +2710,34 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
 
     if not dry_run:
         save_all(records)
-        pending = {
-            "task_id": task_id,
-            "created": now,
-            "trigger": trigger,
-            "instructions": "把 clusters 里的碎片压缩成更抽象、更持久的长期记忆；提取人格变化；输出 apply.json 后执行 --apply。",
-            "clusters": clusters,
-            "report": {k: report[k] for k in ("forgotten", "promoted", "faded")},
-            "apply_schema": {
+        if clusters:
+            pending = {
                 "task_id": task_id,
-                "memories": [{"kind": "fact|preference|insight|habit|emotion",
-                              "text": "抽象后的长期记忆", "gist": "一句话要点",
-                              "importance": "0-1 或 0-10", "tags": [], "entities": [],
-                              "source_ids": ["m_..."]}],
-                "persona_updates": {"mood": {"value": "这次聊完的情绪", "reason": "..."},
-                                    "traits": {"幽默": 2},
-                                    "habits": [{"name": "深夜更容易说真话", "evidence": "..."}],
-                                    "likes": [], "dislikes": [], "insights": []},
-                "forget": ["m_..."],
-                "narrative": "这次梦的叙述（可选）",
-            },
-        }
-        atomic_json(HOME / "dreams" / "pending.json", pending)
+                "created": now,
+                "trigger": trigger,
+                "instructions": "把 clusters 里的碎片压缩成更抽象、更持久的长期记忆；提取人格变化；输出 apply.json 后执行 --apply。",
+                "clusters": clusters,
+                "report": {k: report[k] for k in ("forgotten", "promoted", "faded")},
+                "apply_schema": {
+                    "task_id": task_id,
+                    "memories": [{"kind": "fact|preference|insight|habit|emotion",
+                                  "text": "抽象后的长期记忆", "gist": "一句话要点",
+                                  "importance": "0-1 或 0-10", "tags": [], "entities": [],
+                                  "source_ids": ["m_..."]}],
+                    "persona_updates": {"mood": {"value": "这次聊完的情绪", "reason": "..."},
+                                        "traits": {"幽默": 2},
+                                        "habits": [{"name": "深夜更容易说真话", "evidence": "..."}],
+                                        "likes": [], "dislikes": [], "insights": []},
+                    "forget": ["m_..."],
+                    "narrative": "这次梦的叙述（可选）",
+                },
+            }
+            atomic_json(HOME / "dreams" / "pending.json", pending)
+        # 没有可整理的碎片就不写 pending.json，免得让 AI 对着一份空任务空转
         write_dream_report(report)
         st = load_dream_state()
         st["last_dream"] = now
-        st["last_task"] = task_id
+        st["last_task"] = task_id if clusters else None
         atomic_json(HOME / "dream_state.json", st)
 
     return report
@@ -2602,7 +2745,12 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
 
 def write_dream_report(report: dict) -> Path:
     now = report["at"]
-    path = HOME / "dreams" / f"{datetime.fromtimestamp(now).strftime('%Y%m%d_%H%M%S')}.md"
+    base = f"{datetime.fromtimestamp(now).strftime('%Y%m%d_%H%M%S')}"
+    path = HOME / "dreams" / f"{base}.md"
+    n = 1
+    while path.exists():  # 同秒多次做梦时不要覆盖上一份
+        n += 1
+        path = HOME / "dreams" / f"{base}_{n}.md"
     lines = [f"# 梦境整理 · {fmt_time(now)}", "", f"触发：{report['trigger']}", ""]
     lines.append(f"- 重放片段：{sum(len(c['texts']) for c in report['clusters'])} 条 / {len(report['clusters'])} 组")
     lines.append(f"- 巩固入长期：{len(report['promoted'])} 条")
@@ -2632,6 +2780,22 @@ def load_dream_state() -> dict:
 
 def apply_dream(result: dict) -> dict:
     ensure_home()
+    # 先对任务号：apply 必须对着当前这场的 pending.json，防止把上一场的结果
+    # 或乱写的 task_id 应用到现在的记忆上。不对就直接拒绝，不碰任何数据。
+    pending_path = HOME / "dreams" / "pending.json"
+    pending_id = None
+    if pending_path.exists():
+        try:
+            pending_id = (json.loads(pending_path.read_text("utf-8")) or {}).get("task_id")
+        except Exception:
+            pending_id = None
+    task_id = result.get("task_id") or pending_id
+    if pending_id is None:
+        raise ValueError("没有待应用的任务：dreams/pending.json 不存在")
+    if task_id != pending_id:
+        raise ValueError(
+            f"任务对不上：apply 里的 task_id={task_id!r}，与 pending.json 的 {pending_id!r} 不一致，拒绝应用。"
+        )
     records = load_all()
     by_id = {m["id"]: m for m in records}
     applied = {"memories": 0, "forgotten": 0, "persona": [], "rejected": []}
@@ -2681,8 +2845,6 @@ def apply_dream(result: dict) -> dict:
         applied["rejected"] = update_persona(upd, why="做梦整理", source="dream", evidence=evid)
 
     pending_path = HOME / "dreams" / "pending.json"
-    task_id = result.get("task_id") or (json.loads(pending_path.read_text("utf-8")).get("task_id")
-                                        if pending_path.exists() else None)
     narrative = (result.get("narrative") or "").strip()
     if narrative or applied["memories"]:
         path = HOME / "dreams" / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_apply.md"
@@ -2814,7 +2976,7 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
         if used + lines_join_len(lines) > char_budget * 0.75:
             break
         star = "★" * max(1, round(float(m.get("importance", 0.5)) * 5))
-        lines.append(f"- [{fmt_date(m['created'])} {star}] {display_text(m)}")
+        lines.append(f"- [{fmt_date(m.get('created', 0))} {star}] {display_text(m)}")
     if lines:
         out.append(header)
         out.extend(lines)
@@ -3036,6 +3198,20 @@ def _default_backup_dir() -> Path:
     return HOME
 
 
+def _is_sensitive_file(f: Path) -> bool:
+    """备份时跳过明显的密钥/凭据文件，避免把秘密打包进 zip。"""
+    n = f.name.lower()
+    if n == ".env" or n.startswith(".env."):
+        return True
+    if n.endswith((".token", ".key", ".pem", ".pfx", ".p12")):
+        return True
+    if "secret" in n or "credential" in n:
+        return True
+    if n.startswith(("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")):
+        return True
+    return False
+
+
 def cmd_backup(target: str | None = None, keep: int = 20) -> int:
     """把整个记忆库打成 zip。保留最近 keep 份，旧的自动修剪。"""
     if not HOME.exists():
@@ -3053,6 +3229,7 @@ def cmd_backup(target: str | None = None, keep: int = 20) -> int:
         zip_path = out_dir / f"brain-memory_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{k}.zip"
         k += 1
     n = 0
+    skipped = 0
     try:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in sorted(HOME.rglob("*")):
@@ -3062,11 +3239,16 @@ def cmd_backup(target: str | None = None, keep: int = 20) -> int:
                     continue
                 if "backups" in f.parts and f.suffix == ".zip":
                     continue  # 别把上一次的备份打包进去
+                if _is_sensitive_file(f):
+                    skipped += 1
+                    continue  # 密钥/凭据不进备份包
                 zf.write(f, f.relative_to(HOME).as_posix())
                 n += 1
     except Exception as exc:
         print(f"[错误] 备份失败：{exc}", file=sys.stderr)
         return 2
+    if skipped:
+        print(f"跳过 {skipped} 个敏感文件（密钥/凭据不进备份）")
     removed = 0
     if keep and keep > 0:
         existing = sorted(out_dir.glob("brain-memory_*.zip"), key=lambda p: p.name, reverse=True)
@@ -3081,6 +3263,10 @@ def cmd_backup(target: str | None = None, keep: int = 20) -> int:
     if removed:
         print(f"修剪旧备份 {removed} 个（保留最近 {keep} 个）")
     return 0
+
+
+MAX_RESTORE_ENTRIES = 200
+MAX_RESTORE_BYTES = 512 * 1024 * 1024  # 512 MB，防 zip 炸弹
 
 
 def cmd_restore(zip_path: str, yes: bool = False) -> int:
@@ -3100,6 +3286,15 @@ def cmd_restore(zip_path: str, yes: bool = False) -> int:
                if x.startswith("/") or ".." in Path(x).parts or ":" in x]
         if bad:
             print(f"[错误] 备份里包含非法路径，已拒绝：{bad[:3]}", file=sys.stderr)
+            return 2
+        # 防 zip 炸弹：条目数、解压后总大小都要有上限
+        if len(names) > MAX_RESTORE_ENTRIES:
+            print(f"[错误] 备份条目过多（{len(names)} > {MAX_RESTORE_ENTRIES}），拒绝恢复", file=sys.stderr)
+            return 2
+        total_size = sum(i.file_size for i in zf.infolist() if not i.is_dir())
+        if total_size > MAX_RESTORE_BYTES:
+            print(f"[错误] 备份解压后过大（{total_size / 1024 / 1024:.0f} MB > {MAX_RESTORE_BYTES / 1024 / 1024:.0f} MB），拒绝恢复",
+                  file=sys.stderr)
             return 2
         if not any(x in ("persona.json", "hippocampus.jsonl", "cortex.jsonl", "config.json") for x in names):
             print("[错误] 这不像灵枢的记忆备份（缺 persona.json / hippocampus.jsonl）", file=sys.stderr)
@@ -3480,7 +3675,8 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
         note, how = growth.write_note("journal", f"今日 {today}",
                                       "\n".join(body), mood=mood_brief(),
                                       tags=["每日例行"],
-                                      memory_ids=[m["id"] for m in mems[:12]])
+                                      memory_ids=[m["id"] for m in mems[:12]],
+                                      append_same_day=not force)
         st["last_run"] = now_ts()
         st["last_date"] = today
         st["note_id"] = note.get("id")
@@ -3500,7 +3696,7 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
 def _print_mem(m: dict, score: float | None = None, parts: dict | None = None) -> None:
     star = "★" * max(1, round(float(m.get("importance", 0.5)) * 5))
     layer = {"hippo": "海马体", "cortex": "皮层", "dust": "淡忘"}.get(m.get("layer"), m.get("layer"))
-    head = f"[{fmt_time(m['created'])}] {layer} · {m.get('kind')} · {star}"
+    head = f"[{fmt_time(m.get('created', 0))}] {layer} · {m.get('kind')} · {star}"
     if score is not None:
         head += f" · 回忆度 {score:.2f}"
         if parts:
@@ -3926,11 +4122,13 @@ def _main(argv=None) -> int:
                     return 2
             try:
                 r = persona_rollback(idx)
-            except ValueError as exc:
+            except (ValueError, PermissionError) as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
             print(f"已回滚 {r['field']}：{r['from'] if r['from'] is not None else '∅'} → "
                   f"{r['to'] if r['to'] is not None else '∅'}（原来是「{r['why']}」）")
+            if r.get("overwrote_later"):
+                print("  注意：这个字段之后又被改过，本次回滚已把后来的改动一并覆盖。")
             print(persona_brief(load_persona()))
             return 0
         if args.action == "snapshot":
@@ -4557,10 +4755,10 @@ def _main(argv=None) -> int:
         cfg = load_config()
         used = float(args.used)
         review = float(cfg.get("review_threshold", 0.60)) * 100
-        dream = float(cfg.get("dream_threshold", 0.75)) * 100
+        dream_pct = float(cfg.get("dream_threshold", 0.75)) * 100
         escape = float(cfg.get("escape_threshold", 0.90)) * 100
 
-        print(f"上下文 {used:.0f}%（清点 {review:.0f}% / 做梦 {dream:.0f}% / 封存 {escape:.0f}%）")
+        print(f"上下文 {used:.0f}%（清点 {review:.0f}% / 做梦 {dream_pct:.0f}% / 封存 {escape:.0f}%）")
 
         if args.unsaved and args.unsaved > 0:
             print(f"  还有约 {args.unsaved:.0f} 字没落盘——滚出窗口就找不回来了，先补记/封存。")
@@ -4569,7 +4767,7 @@ def _main(argv=None) -> int:
             print("  [封存] 快满了，先原样保存再说压缩：")
             print("    python scripts/brain.py capture \"<把这一段上下文粘进来>\" --tag 逃生 --kind episode")
             print("  （capture 原文落盘 + 归档，100% 不丢；做完再考虑做梦压缩）")
-        elif used >= dream:
+        elif used >= dream_pct:
             print("  [做梦] 该压缩了：")
             print("    1) python scripts/brain.py dream --auto            # 机器自愈：重放→启发式合并→沉淀")
             print("    2) 或人工三步：dream --trigger context → 填 apply.json → dream --apply apply.json")
