@@ -76,6 +76,9 @@ def overview() -> dict:
         "daily_state": brain._daily_state(),
         "last_self_review": load_config_last_review(),
         "onboarding": brain.onboarding_state(),
+        "readonly": bool(brain.READONLY),
+        "model_tier": brain.model_tier(),
+        "home": str(brain.HOME),
     }
 
 
@@ -84,6 +87,69 @@ def load_config_last_review() -> float:
         return float(brain.load_config().get("last_self_review", 0) or 0)
     except Exception:
         return 0
+
+
+def filtered_memories(url) -> list:
+    """组合筛选：层 + 关键词 + 标签 + 情绪 + 重要性区间 + 时间范围 + 排序。
+
+    面板的搜索框只做字面过滤；真正的模糊回忆走 /api/search（recall）。
+    """
+    qs = parse_qs(url.query)
+
+    def one(key: str, default: str = "") -> str:
+        return (qs.get(key) or [default])[0]
+
+    layer = one("layer").strip()
+    tag = one("tag").strip().lower()
+    emotion = one("emotion").strip().lower()
+    text = one("q").strip().lower()
+    sort = one("sort", "created")
+    limit = _int_param(url, "limit", 200, 1, 500)
+
+    def num(key: str, default: float) -> float:
+        try:
+            return float(one(key, str(default)) or default)
+        except (TypeError, ValueError):
+            return default
+
+    imp_min, imp_max = num("imp_min", 0.0), num("imp_max", 1.0)
+    # 兼容「1–10 分」输入：大于 1 视为十分制
+    if imp_min > 1:
+        imp_min /= 10
+    if imp_max > 1:
+        imp_max /= 10
+
+    days = _int_param(url, "days", 0, 0, 36500)
+    since = brain.now_ts() - days * 86400 if days else 0
+
+    rows = []
+    for m in brain.load_all():
+        if layer and m.get("layer") != layer:
+            continue
+        if tag and tag not in [str(t).lower() for t in (m.get("tags") or [])]:
+            continue
+        if emotion and emotion not in str(m.get("emotion") or "").lower():
+            continue
+        if text:
+            blob = " ".join([str(m.get("text", "")),
+                             " ".join(str(t) for t in (m.get("tags") or [])),
+                             " ".join(str(e) for e in (m.get("entities") or []))]).lower()
+            if text not in blob:
+                continue
+        imp = float(m.get("importance") or 0)
+        if imp < imp_min or imp > imp_max:
+            continue
+        if since and float(m.get("created") or 0) < since:
+            continue
+        rows.append(m)
+
+    if sort == "importance":
+        rows.sort(key=lambda m: float(m.get("importance") or 0), reverse=True)
+    elif sort == "retention":
+        rows.sort(key=lambda m: brain.retention(m), reverse=True)
+    else:
+        rows.sort(key=lambda m: m.get("created") or 0, reverse=True)
+    return [memory_view(m) for m in rows[:limit]]
 
 
 def workspace() -> dict:
@@ -98,6 +164,9 @@ def workspace() -> dict:
         "dsh_plugins": growth.list_dsh_plugins(),
         "evolution": growth.load_evolution(limit=30),
         "onboarding": brain.onboarding_state(),
+        "readonly": bool(brain.READONLY),
+        "model_tier": brain.model_tier(),
+        "pending_knowledge": growth.knowledge_pending(),
     }
 
 
@@ -201,6 +270,22 @@ class Handler(BaseHTTPRequestHandler):
             k = _int_param(url, "k", 12, 1, 100)
             results = brain.recall(q, k=k, strengthen=False)
             self._json([{"memory": memory_view(m), "score": s, "parts": p} for m, s, p in results])
+            return
+        if path == "/api/memories":
+            self._json(filtered_memories(url))
+            return
+        if path == "/api/inject-preview":
+            q = (parse_qs(url.query).get("q") or [""])[0]
+            try:
+                packet = brain.build_injection(q)
+            except Exception as exc:
+                self._json({"error": f"生成注入包失败：{exc}"}, 500)
+                return
+            self._json({"packet": packet})
+            return
+        if path == "/api/conflicts":
+            limit = _int_param(url, "limit", 50, 1, 200)
+            self._json({"conflicts": brain.detect_conflicts(limit)})
             return
         if path == "/api/graph":
             limit = _int_param(url, "limit", 300, 10, 800)
@@ -437,6 +522,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "knowledge": rec, "workspace": workspace()})
                 elif act == "delete":
                     self._json({"ok": growth.delete_knowledge(data.get("id", "")), "workspace": workspace()})
+                elif act == "review":
+                    rec = growth.set_knowledge_status(data.get("id", ""), "confirmed")
+                    self._json({"ok": bool(rec), "knowledge": rec, "workspace": workspace()})
+                elif act == "discard":
+                    rec = growth.set_knowledge_status(data.get("id", ""), "discarded")
+                    self._json({"ok": bool(rec), "knowledge": rec, "workspace": workspace()})
                 elif act == "tidy":
                     self._json({"ok": True, "report": growth.tidy_knowledge(), "workspace": workspace()})
                 elif act == "tidy/apply":
@@ -518,6 +609,16 @@ class Handler(BaseHTTPRequestHandler):
                                               data.get("style", ""), data.get("values", ""),
                                               data.get("callme", ""), data.get("self_name", ""))
                 self._json({"ok": True, "persona": p, "onboarding": brain.onboarding_state()})
+                return
+
+            if path == "/api/persona/rollback":
+                idx = data.get("index") or 0
+                try:
+                    p = brain.persona_rollback(int(idx))
+                except (ValueError, IndexError) as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                self._json({"ok": True, "persona": p})
                 return
 
             self._json({"error": "not found"}, 404)

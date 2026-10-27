@@ -143,7 +143,7 @@ def add_knowledge(title: str, body: str, topic: str = "", points=None, tags=None
 
 
 def _new_knowledge(title, body, topic="", points=None, tags=None, entities=None,
-                   source_ids=None, confidence=0.8) -> dict:
+                   source_ids=None, confidence=0.8, status="confirmed") -> dict:
     now = brain.now_ts()
     return {
         "id": _uid("k_", title),
@@ -155,6 +155,7 @@ def _new_knowledge(title, body, topic="", points=None, tags=None, entities=None,
         "entities": _dedupe(list(entities or [])),
         "source_ids": _dedupe(list(source_ids or [])),
         "confidence": max(0.0, min(1.0, float(confidence))),
+        "status": status,          # confirmed 已确认 / pending 待审核（AI 整理产出）/ discarded 废弃
         "pinned": False,
         "version": 1,
         "created": now,
@@ -163,11 +164,34 @@ def _new_knowledge(title, body, topic="", points=None, tags=None, entities=None,
     }
 
 
-def list_knowledge(topic: str | None = None, limit: int = 50) -> list:
+def list_knowledge(topic: str | None = None, limit: int = 50,
+                   include_discarded: bool = False) -> list:
     rows = load_knowledge()
+    if not include_discarded:
+        rows = [r for r in rows if r.get("status") != "discarded"]
     if topic:
         rows = [r for r in rows if r.get("topic") == topic]
     return sorted(rows, key=lambda r: (r.get("pinned", False), r.get("updated", 0)), reverse=True)[:limit]
+
+
+def knowledge_pending() -> list:
+    """待审核的知识（多由 knowledge tidy 的 AI 整理产出，可能含幻觉，需人工过目）。"""
+    return [r for r in load_knowledge() if r.get("status") == "pending"]
+
+
+def set_knowledge_status(kid: str, status: str) -> dict | None:
+    if status not in ("confirmed", "pending", "discarded"):
+        raise ValueError(f"未知状态：{status}")
+    rows = load_knowledge()
+    rec = next((r for r in rows if r["id"] == kid), None)
+    if not rec:
+        return None
+    rec["status"] = status
+    rec["updated"] = brain.now_ts()
+    rec.setdefault("history", []).append(
+        {"ts": rec["updated"], "why": f"状态改为 {status}", "version": int(rec.get("version", 1))})
+    save_knowledge(rows)
+    return rec
 
 
 def search_knowledge(query: str, k: int = 8) -> list:
@@ -179,6 +203,8 @@ def search_knowledge(query: str, k: int = 8) -> list:
     idf = brain.build_idf(docs)
     out = []
     for rec, doc in zip(rows, docs):
+        if rec.get("status") == "discarded":
+            continue
         score = brain.relevance(q, doc, idf)
         if rec.get("pinned") and score > 0:
             score = min(1.0, score + 0.05)
@@ -254,7 +280,7 @@ def rebuild_index(rows: list | None = None, force: bool = False) -> dict:
 
 
 def knowledge_stats() -> dict:
-    rows = load_knowledge()
+    rows = [r for r in load_knowledge() if r.get("status") != "discarded"]
     idx = rebuild_index(rows)
     return {
         "total": len(rows),
@@ -262,6 +288,7 @@ def knowledge_stats() -> dict:
         "tags": list(idx["tags"].items())[:8],
         "words": sum(len(r.get("body", "")) for r in rows),
         "pinned": sum(1 for r in rows if r.get("pinned")),
+        "pending": sum(1 for r in rows if r.get("status") == "pending"),
     }
 
 
@@ -361,6 +388,7 @@ def apply_tidy(result: dict) -> dict:
                 base[key] = _dedupe(op[key])
         base["updated"] = brain.now_ts()
         base["version"] = int(base.get("version", 1)) + 1
+        base["status"] = "pending"   # AI 动过的东西一律先待审核，别让它直接沉淀
         base.setdefault("history", []).append(
             {"ts": base["updated"], "why": "知识整理：合并 " + str(len(ids)) + " 条", "version": base["version"]})
         done["merged"] += 1
@@ -377,6 +405,7 @@ def apply_tidy(result: dict) -> dict:
                 rec[key] = _dedupe(op[key])
         rec["updated"] = brain.now_ts()
         rec["version"] = int(rec.get("version", 1)) + 1
+        rec["status"] = "pending"   # AI 更新过 → 待审核
         rec.setdefault("history", []).append(
             {"ts": rec["updated"], "why": "知识整理：更新", "version": rec["version"]})
         done["updated"] += 1
@@ -386,7 +415,8 @@ def apply_tidy(result: dict) -> dict:
             continue
         title = (op.get("title") or "").strip() or _clip(op.get("body", ""), 24)
         rec = _new_knowledge(title, op.get("body", ""), op.get("topic", ""),
-                             op.get("points"), op.get("tags"), op.get("entities"))
+                             op.get("points"), op.get("tags"), op.get("entities"),
+                             status="pending")   # AI 新建 → 待审核，别让幻觉直接入库
         rows.append(rec)
         by_id[rec["id"]] = rec
         done["created"] += 1
@@ -1329,6 +1359,11 @@ def _print_knowledge(rec: dict, score: float | None = None) -> None:
     head = f"[{rec.get('topic', '未分类')}] {rec.get('title')}"
     if score is not None:
         head += f"  · 相关度 {score:.2f}"
+    st = rec.get("status")
+    if st == "pending":
+        head += "  ⏳待审核"
+    elif st == "discarded":
+        head += "  🗑️已废弃"
     print(head)
     print(f"  {rec['id']}  v{rec.get('version', 1)}  {brain.fmt_date(rec.get('updated', 0))}"
           + ("  ★置顶" if rec.get("pinned") else ""))
@@ -1392,6 +1427,12 @@ def _run(argv=None) -> int:
     a = ks.add_parser("pin", help="置顶/取消置顶")
     a.add_argument("id")
     a = ks.add_parser("rm", help="删除一条知识")
+    a.add_argument("id")
+    a = ks.add_parser("review", help="列出待审核的知识（AI 整理产出，可能含幻觉）")
+    a.add_argument("--json", action="store_true")
+    a = ks.add_parser("confirm", help="确认一条待审核知识")
+    a.add_argument("id")
+    a = ks.add_parser("discard", help="废弃一条知识（不再显示）")
     a.add_argument("id")
 
     # ---- 笔记
@@ -1541,9 +1582,15 @@ def _run(argv=None) -> int:
                 if not path.exists():
                     print(f"找不到整理结果：{path}", file=sys.stderr)
                     return 2
-                res = apply_tidy(json.loads(path.read_text(encoding="utf-8-sig")))
+                try:
+                    result = brain.load_loose_json(path, "knowledge tidy --apply 的结果")
+                except ValueError as e:
+                    print(str(e), file=sys.stderr)
+                    return 2
+                res = apply_tidy(result)
                 print(f"知识整理完成：合并 {res['merged']} 组，更新 {res['updated']} 条，"
                       f"新建 {res['created']} 条，删除 {res['deleted']} 条")
+                print("（AI 动过的条目已标为待审核：knowledge review 查看 → confirm/discard）")
                 return 0
             rep = tidy_knowledge()
             if args.json:
@@ -1570,6 +1617,25 @@ def _run(argv=None) -> int:
                 return 1
             rec = update_knowledge(args.id, pinned=not rec.get("pinned", False))
             print("已置顶。" if rec["pinned"] else "已取消置顶。")
+            return 0
+        if args.act == "review":
+            rows = knowledge_pending()
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            elif not rows:
+                print("没有待审核的知识。AI 整理（tidy）产出的条目会自动标为待审核。")
+            else:
+                print(f"待审核 {len(rows)} 条（AI 整理产出，确认无误后再 knowledge confirm <id>）\n")
+                for r in rows:
+                    _print_knowledge(r)
+            return 0
+        if args.act in ("confirm", "discard"):
+            st = "confirmed" if args.act == "confirm" else "discarded"
+            rec = set_knowledge_status(args.id, st)
+            if not rec:
+                print("没找到这条知识。", file=sys.stderr)
+                return 1
+            print(("已确认。" if st == "confirmed" else "已废弃（不再显示）。") + f" {rec['title']}")
             return 0
 
     # ---------------- note

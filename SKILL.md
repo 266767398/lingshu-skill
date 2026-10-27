@@ -14,6 +14,8 @@ description: 类脑持久记忆、人格与成长系统，名字取自《黄帝�
 
 一句话的运行原理：**算力给我思考，人格给我灵魂，记忆给我生命。**
 
+> ⚠️ **能力边界，先读再看**：灵枢是「提示词 + 脚本」的机制，不是能强制约束模型的框架。脚本层能兜底的部分（只读降级、损坏行自愈、退出码）都做了，但 **"该记没记、该查没查、该走 startup" 只能靠模型自觉**。效果上限取决于底层模型：中强模型（7B+、云端）能完整遵守本篇；3B 以下的本地小模型会漏读条款、跳过命令、忘记纪律——这是模型能力问题，不是灵枢坏了。小模型请改用同目录 `SKILL-lite.md`（精简版）或 `SKILL-tiny.md`（最小试用版），并先调低预期。
+
 ## 何时启用
 
 - 用户说"记住这个""你还记得吗""上次我们……"
@@ -47,6 +49,23 @@ skills.json         技能登记表与安装记录
 ```
 
 脚本目录：`<本技能目录>/scripts/brain.py`（成长子系统在同目录 `growth.py`，由 brain.py 转发）。
+
+## 模型分级与降档
+
+你的能力决定哪些功能能开。**记不清就按小模型处理，宁可少做、别做错。**
+
+- **7B+ / 云端**：完整按本篇执行。做梦合并、情绪评估、知识提炼都能用。
+- **1.5B–3B**：把 `config.json` 里 `model_tier` 设为 `small`（`config set model_tier small`）。此后 `startup` 注入包会追加「小模型模式」约束：
+  - 不自动 `dream --apply`（合并错误 = 幻觉记忆永久落盘）；
+  - 不自动 `knowledge tidy`（提炼产物须先 `knowledge review` 人工确认）；
+  - 情绪评估改用手动 `emotion feel`，别替用户"打分"。
+- **记不住规则**：改用 `SKILL-lite.md`（精简版）或 `SKILL-tiny.md`（三件套试用版）。
+
+需要模型产 JSON 的入口（`dream --apply`、`knowledge tidy --apply`）都有容错解析：去掉说明文字 / ```json 围栏后还能读；真读不出来会明确报错并返回退出码 2，不会静默当没发生。**知识库里凡是你（模型）整理的条目，一律先标待审核**——`knowledge review` 查看，用户确认（`knowledge confirm <id>`）前不算数。
+
+两条自我审查动作（每次会话值得做一次）：
+- `detect-conflicts`：有没有两条记忆一条"已改用 Linux"、一条还在说"用 Windows"？扫出矛盾先问用户哪条对，别自己下结论。
+- `persona history` / `persona rollback <序号>`：人格改错了就撤，别越改越乱。
 
 ## 第 0 步：初识（只做一次，优先级最高）
 
@@ -608,7 +627,7 @@ python scripts/brain.py sync dsh --dry-run              # 先看会写什么
 | 目的 | 命令 |
 |---|---|
 | 初始化 | `python scripts/brain.py init` |
-| 会话开始钩子 | `python scripts/brain.py startup --query "关键词"`（返回码 0/10/2） |
+| 会话开始钩子 | `python scripts/brain.py startup --query "关键词"`（返回码 0/10/2/64） |
 | 注入记忆 | `python scripts/brain.py inject "关键词" [--budget 1400]` |
 | 只读降级 | `python scripts/brain.py --ro inject "关键词"`（或 `BRAIN_MEMORY_READONLY=1`） |
 | 换数据目录 | `python scripts/brain.py --home <目录> ...` / `home move <目录>` / `home verify` |
@@ -658,6 +677,49 @@ python scripts/brain.py serve
 - **联想页（3D 空间）**：每条记忆一个节点、连线是关联，拖拽旋转、滚轮缩放、点节点看详情与邻居；"自动联想"一键按共享实体/标签补边。
 
 Windows 可双击 `<本技能目录>/start-panel.bat` 启动。
+
+## 故障排查 FAQ
+
+**Q：模型总是忘走 `startup`，怎么办？**
+把「每会话固定动作」第一条抄到宿主（Claude Code / Cursor / OpenCode / Trae）的项目级规则或开场指令里，让宿主每次会话开始时先强制跑一次。`startup` 能把"跑没跑"变成返回码，但"跑不跑"取决于宿主与模型。小模型环境直接改用 `SKILL-tiny.md`（只留硬约束）。
+
+**Q：说了 `remember` 却没写进去？**
+先看输出是不是只读降级（返回码 10 / 提示只读）——数据目录不可写时脚本不会写。再用 `stats` 对总数；正常情况不会丢（原子写 + 跨进程锁 + 损坏行自愈），写不进多半是 `--home` 指错了目录或沙箱拒写。
+
+**Q：`startup` 返回码 64？**
+命令写错了：`startup` 只接受 `--query "..."`，不接位置参数。见返回码表。
+
+**Q：回忆后记忆层数变少？**
+不应该。`recall` 的强化只写回被"想起"的那条，不碰其它层（淡忘区被清空的 bug 已修复并有回归验证）。若异常先 `stats` 对比各层数量。
+
+**Q：情绪曲线和实际感觉对不上？**
+"此刻心情"是按强度 × 半衰期（默认 6h）叠加出来的，峰值过了自然回落；要看每天的真实最高点用 `emotion arc`（峰终口径）。方向反了，多半是 `emotion feel` 的情绪名选错了——`emotion list` 看全表。
+
+**Q：哪些场景别用灵枢？**
+纯一次性聊天、只想要临时算力不需要记忆、宿主不支持执行脚本、用户明确只想要"记一句话"但不想建库——这些场合灵枢是负担，直接不用。
+
+## 每会话自检清单（照表勾选，弱模型也能照做）
+
+会话开始：
+
+- [ ] 跑了 `startup --query "..."`，返回码 0（10=只读、2=未初始化、64=命令写错）
+- [ ] 看见注入包里的"心里还惦记的未完成事"，相关的先 `work done` 或继续
+- [ ] 上次遗留的待办/未决问题有回应或转移
+
+会话中（触发了才做，不必每轮）：
+
+- [ ] 出现约定/承诺/截止时间 → 立刻 `remember --kind fact --importance 8`
+- [ ] 情绪高点、关系推进 → 记记忆 + `emotion feel <情绪名> --intensity N --why "..."`
+- [ ] 被问起过去 → 先 `recall <关键词>` 再回答
+- [ ] 上下文 ≈60% → `check-context` 清点该记没记
+- [ ] ≈75% → `dream --auto`
+- [ ] ≈90% 且绝不能丢 → `capture "原文" --tag 逃生`
+
+会话结束（或上下文将尽）：
+
+- [ ] 工作记忆里值得留的 → `work flush`（已完成的不想留 → `work flush --skip-done`）
+- [ ] 值得长留而没记的 → 补 `remember`
+- [ ] 今日总结/沉淀 → `daily --force`
 
 ## 设计依据（简述）
 

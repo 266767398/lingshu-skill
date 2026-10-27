@@ -65,6 +65,9 @@ DEFAULT_CONFIG = {
     "escape_threshold": 0.90,
     "weights": {"relevance": 0.55, "recency": 0.25, "importance": 0.20, "primacy": 0.03},
     "panel_port": 8765,
+    # 模型档位：auto 不干预；small 时注入"小模型模式"提示，劝退高风险自动能力
+    # （dream --apply 自动合并 / knowledge tidy 提炼 / emotion evaluate 自动判读）。
+    "model_tier": "auto",
 }
 
 if sys.platform == "win32":
@@ -110,6 +113,126 @@ def load_config() -> dict:
             pass
     cfg["weights"] = dict(DEFAULT_CONFIG["weights"], **(cfg.get("weights") or {}))
     return cfg
+
+
+def load_loose_json(path, label: str = "JSON") -> dict | list:
+    """读取（可能由大模型生成的）JSON 文件，尽量容错。
+
+    模型常把 JSON 包在 ```json 代码块里、或前后夹带说明文字、或行尾漏了括号。
+    这里先按原样解析；失败再去掉代码围栏；再失败就截取第一个配平的 {...} 或 [...]。
+    全都不行抛 ValueError（带上路径与开头片段），不让"静默失败 / 一堆 traceback"吞掉问题。
+    """
+    p = Path(path)
+    raw = p.read_text(encoding="utf-8-sig")
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    text = raw.strip()
+    m = re.search(r"```(?:json)?\s*(.+?)```", text, re.S | re.I)
+    if m:
+        try:
+            return json.loads(m.group(1).strip())
+        except Exception:
+            pass
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        start = text.find(open_ch)
+        if start < 0:
+            continue
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == open_ch:
+                depth += 1
+            elif text[i] == close_ch:
+                depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except Exception:
+                    break
+    snippet = raw[:120].replace("\n", " ")
+    raise ValueError(f"{label}解析失败：{p} 不是合法 JSON（开头：{snippet}…）。"
+                     "模型输出里多半混了说明文字或代码块——请只保留 JSON 主体再试。")
+
+
+def config_set(key: str, value: str) -> dict:
+    """改一项配置（值能当 JSON 解析就当 JSON，否则按字符串存）。"""
+    cfg = load_config()
+    try:
+        val = json.loads(value)
+    except Exception:
+        val = value
+    cfg[key] = val
+    ensure_home()
+    atomic_json(HOME / "config.json", cfg)
+    return cfg
+
+
+def config_unset(key: str) -> dict:
+    cfg = load_config()
+    cfg.pop(key, None)
+    ensure_home()
+    atomic_json(HOME / "config.json", cfg)
+    return cfg
+
+
+def model_tier() -> str:
+    """当前模型档位：auto / small / large。"""
+    return str(load_config().get("model_tier", "auto") or "auto").lower()
+
+
+def detect_conflicts(limit: int = 50) -> list:
+    """启发式扫描"可能矛盾的记忆"（如「我用 Windows」vs「我改用 Linux」）。
+
+    按实体分组，组内两两比较：词面有交集、且一条带改口/否定信号、另一条不带，
+    就列为候选。只做提醒、不下结论——到底矛不矛盾由人来判。
+    """
+    records = load_all()
+    by_entity: dict[str, list] = {}
+    for m in records:
+        for ent in (m.get("entities") or []):
+            by_entity.setdefault(str(ent), []).append(m)
+
+    change_cues = ("改用", "换成", "改成", "改为", "不再", "已经不用", "换了", "现在用",
+                   "现在不用", "不喝", "不吃", "不用", "戒了", "停了", "放弃", "移除", "删了")
+    neg_cues = ("不", "没", "别", "反")
+    found, seen = [], set()
+
+    def flag(a, b, reason):
+        key = tuple(sorted((a["id"], b["id"])))
+        if key in seen:
+            return
+        seen.add(key)
+        found.append({
+            "a": {"id": a["id"], "text": a["text"], "ts": a.get("created")},
+            "b": {"id": b["id"], "text": b["text"], "ts": b.get("created")},
+            "reason": reason,
+        })
+
+    for ent, members in by_entity.items():
+        if len(members) < 2:
+            continue
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                a, b = members[i], members[j]
+                if a["id"] == b["id"]:
+                    continue
+                inter = set(terms(a.get("text", ""))) & set(terms(b.get("text", "")))
+                if len(inter) < 1:
+                    continue
+                ca = any(c in a.get("text", "") for c in change_cues)
+                cb = any(c in b.get("text", "") for c in change_cues)
+                if ca != cb:
+                    flag(a, b, f"关于「{ent}」的两条记忆词面相近，但其中一条带改口信号"
+                               "（改用/不再/换成…），可能已经过时或更新了")
+                    continue
+                na = any(c in a.get("text", "") for c in neg_cues)
+                nb = any(c in b.get("text", "") for c in neg_cues)
+                if na != nb:
+                    flag(a, b, f"关于「{ent}」的两条记忆一条肯定一条否定，可能互相矛盾")
+
+    found.sort(key=lambda x: min(x["a"]["ts"] or 0, x["b"]["ts"] or 0), reverse=True)
+    return found[:limit]
 
 
 def atomic_json(path: Path, obj) -> None:
@@ -1661,6 +1784,52 @@ def set_persona_field(path: str, value: str) -> dict:
     return p
 
 
+def persona_history(limit: int = 30) -> list:
+    p = load_persona()
+    h = list(p.get("history", []))
+    return list(reversed(h[-limit:]))
+
+
+def persona_rollback(index: int | None = None) -> dict:
+    """一键回滚人格：把某条历史变更撤掉。
+
+    index 从最新一条往前数（1 = 撤销最近一次改动）。被撤的是普通字段就
+    恢复成旧值；是 evolved.* 的增项就把那条移除。回滚本身会记进历史，
+    让"改了什么"始终有据可查。
+    """
+    p = load_persona()
+    hist = p.setdefault("history", [])
+    if not hist:
+        raise ValueError("没有可回滚的人格历史（还什么都没改过）。")
+    idx = index or 1
+    if idx < 1 or idx > len(hist):
+        raise ValueError(f"序号越界：历史共 {len(hist)} 条，回滚写 1..{len(hist)}。")
+    entry = hist[len(hist) - idx]
+    field = entry.get("field", "")
+    frm, to = entry.get("from"), entry.get("to")
+    parts = field.split(".")
+    node = p
+    for part in parts[:-1]:
+        if part not in node or not isinstance(node[part], dict):
+            node[part] = {}
+        node = node[part]
+    leaf = parts[-1]
+    if field.startswith("evolved."):
+        bucket = field.split(".", 1)[1]
+        arr = node.get(bucket)
+        if isinstance(arr, list):
+            node[bucket] = [x for x in arr
+                            if (x.get("name") if isinstance(x, dict) else x) != to]
+    elif frm is None:
+        node.pop(leaf, None)
+    else:
+        node[leaf] = frm
+    hist.append({"ts": now_ts(), "field": field,
+                 "from": to, "to": frm, "why": "回滚"})
+    save_persona(p)
+    return {"field": field, "from": to, "to": frm, "why": entry.get("why", "")}
+
+
 def edit_persona(identity: dict | None = None, traits: dict | None = None,
                  drives: dict | None = None, style=None, values=None,
                  likes=None, dislikes=None, background=None,
@@ -2183,6 +2352,15 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
            "算力给我思考，人格给我灵魂，记忆给我生命。",
            "## 我是谁", persona_brief(p)]
     used = len(persona_brief(p)) + 60
+
+    if model_tier() == "small":
+        out.append("\n## 小模型模式（当前模型档位 = small）")
+        out.append("你的上下文和推理都有限，下面这些高风险自动能力**不要主动做**：")
+        out.append("- 不要自动 `dream --apply` 合并记忆、不要自动 `knowledge tidy` 提炼知识库——"
+                   "这两件事容易把幻觉固化落盘。要做也行，但产出必须 `knowledge review` 人工过目。")
+        out.append("- `emotion evaluate` 自动判读情绪在小模型上很不可靠，改用最朴素的 `emotion feel` 手动记。")
+        out.append("- 只保留硬约束：会话开始 `startup`、值得记的 `remember`、被问起 `recall`、")
+        out.append("  快满了 `check-context` / `capture` 保命。其余的能省则省。")
 
     work = load_working()
     out.append("\n## 工作记忆（就是你现在能看见的对话）")
@@ -2947,8 +3125,8 @@ def _main(argv=None) -> int:
     p_per = sub.add_parser("persona", help="人格查看与编辑")
     p_per.add_argument("action", nargs="?", default="show",
                        choices=["show", "set", "sync", "path", "interview", "self", "onboarding",
-                                "lock", "unlock"])
-    p_per.add_argument("pair", nargs="?", default=None, help="例如 traits.幽默=70")
+                                "lock", "unlock", "history", "rollback"])
+    p_per.add_argument("pair", nargs="?", default=None, help="例如 traits.幽默=70 / rollback 的序号")
     p_per.add_argument("--json", action="store_true")
     p_per.add_argument("--name", default="", help="interview：用户给你起的名字")
     p_per.add_argument("--traits", default="", help="interview：性格，如 温柔:70,好奇:85")
@@ -2961,6 +3139,7 @@ def _main(argv=None) -> int:
     p_per.add_argument("--habits", default="", help="self：我想养成的习惯")
     p_per.add_argument("--insights", default="", help="self：我自己的洞见")
     p_per.add_argument("--unsure", action="store_true", help="interview：用户不知道名字/性格，自己定")
+    p_per.add_argument("--limit", type=int, default=30, help="history：显示最近 N 条改动")
 
     p_mind = sub.add_parser("mind", help="理智与好奇心：思考决策")
     p_mind.add_argument("action", nargs="?", default="state",
@@ -3008,6 +3187,16 @@ def _main(argv=None) -> int:
 
     p_stats = sub.add_parser("stats", help="记忆统计")
     p_stats.add_argument("--json", action="store_true")
+
+    p_cfg = sub.add_parser("config", help="查看 / 修改配置")
+    p_cfg.add_argument("action", nargs="?", default="show",
+                       choices=["show", "set", "unset"])
+    p_cfg.add_argument("key", nargs="?", default="", help="set/unset：配置项名")
+    p_cfg.add_argument("value", nargs="?", default="", help="set：配置项值（如 model_tier small）")
+
+    p_conf = sub.add_parser("detect-conflicts", help="启发式扫描矛盾记忆（如「用Windows」vs「改用Linux」）")
+    p_conf.add_argument("--json", action="store_true")
+    p_conf.add_argument("--limit", type=int, default=50)
 
     p_list = sub.add_parser("list", help="列出记忆")
     p_list.add_argument("--limit", type=int, default=30)
@@ -3162,7 +3351,11 @@ def _main(argv=None) -> int:
             if not path.exists():
                 print(f"找不到整理结果文件：{path}", file=sys.stderr)
                 return 2
-            result = json.loads(path.read_text(encoding="utf-8-sig"))
+            try:
+                result = load_loose_json(path, "dream --apply 的结果")
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
             applied = apply_dream(result)
             print(f"梦已沉淀：新增长期记忆 {applied['memories']} 条，遗忘 {applied['forgotten']} 条")
             if applied["rejected"]:
@@ -3224,6 +3417,38 @@ def _main(argv=None) -> int:
             })
             save_persona(p)
             print(f"{'已锁定' if args.action == 'lock' else '已解锁'}：{item}")
+            return 0
+        if args.action == "history":
+            h = persona_history(getattr(args, "limit", 30) or 30)
+            if args.json:
+                print(json.dumps(h, ensure_ascii=False, indent=2))
+            elif not h:
+                print("还没有人格改动历史。")
+            else:
+                print(f"人格改动历史（最新在前，共 {len(h)} 条）：")
+                print("  序号 = 从 1 起往前数；想撤销哪条就 persona rollback <序号>")
+                for i, e in enumerate(h, 1):
+                    print(f"  {i}. {fmt_time(e.get('ts', 0))}  {e.get('field')}  "
+                          f"{e.get('from') if e.get('from') is not None else '∅'} → "
+                          f"{e.get('to') if e.get('to') is not None else '∅'}"
+                          f"（{e.get('why', '')}）")
+            return 0
+        if args.action == "rollback":
+            idx = None
+            if args.pair:
+                try:
+                    idx = int(args.pair.strip())
+                except ValueError:
+                    print("序号得是数字：persona rollback <序号>", file=sys.stderr)
+                    return 2
+            try:
+                r = persona_rollback(idx)
+            except ValueError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            print(f"已回滚 {r['field']}：{r['from'] if r['from'] is not None else '∅'} → "
+                  f"{r['to'] if r['to'] is not None else '∅'}（原来是「{r['why']}」）")
+            print(persona_brief(load_persona()))
             return 0
         if args.action == "interview":
             p = persona_interview(args.name, args.traits, args.style, args.values,
@@ -3598,6 +3823,40 @@ def _main(argv=None) -> int:
                 print(f"  上次做梦：{fmt_time(s['last_dream'])}")
             if s["top_tags"]:
                 print("  高频标签：" + "、".join(f"{t}×{c}" for t, c in s["top_tags"]))
+        return 0
+
+    if args.cmd == "config":
+        if args.action == "show":
+            print(json.dumps(load_config(), ensure_ascii=False, indent=2))
+            return 0
+        if args.action == "set":
+            if not args.key or not args.value:
+                print("用法：config set model_tier small / config set budget_tokens 800", file=sys.stderr)
+                return 2
+            cfg = config_set(args.key, args.value)
+            print(f"已设置 {args.key} = {json.dumps(cfg[args.key], ensure_ascii=False)}")
+            return 0
+        if args.action == "unset":
+            if not args.key:
+                print("用法：config unset <key>", file=sys.stderr)
+                return 2
+            config_unset(args.key)
+            print(f"已移除 {args.key}")
+            return 0
+
+    if args.cmd == "detect-conflicts":
+        hits = detect_conflicts(args.limit)
+        if args.json:
+            print(json.dumps(hits, ensure_ascii=False, indent=2))
+        elif not hits:
+            print("没发现明显矛盾的记忆对。")
+        else:
+            print(f"发现 {len(hits)} 组疑似矛盾（启发式提醒，请人工判断）：\n")
+            for h in hits:
+                print(f"· {h['reason']}")
+                print(f"   A {h['a']['id']}：{h['a']['text'][:90]}")
+                print(f"   B {h['b']['id']}：{h['b']['text'][:90]}\n")
+            print("核实后处理：保留最新的 `remember` 一条即可，旧的用 `forget <id>` 或等它自然淡忘。")
         return 0
 
     if args.cmd == "list":

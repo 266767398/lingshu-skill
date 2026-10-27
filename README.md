@@ -2,6 +2,10 @@
 
 > 名字取自《黄帝内经》：**算力给思考，人格给灵魂，记忆给生命。**
 
+> ⚠️ **能力天花板（先读）**：灵枢是「提示词 + 脚本」的机制，**不能从底层强制约束模型**。当模型发生强幻觉时依然会无视全部规则；效果上限取决于底层大模型本身的推理、记忆与指令遵循能力。中强模型（7B+、云端）可完整遵守；**3B 以下本地小模型会出现大量规则漏执行**（忘走 startup、跳过写盘、纪律打折）——请据此降低预期，或改用 `SKILL-lite.md`（精简版）/ `SKILL-tiny.md`（最小试用版）。
+
+> 🚨 **风险警告：幻觉会被固化落盘**。本地保存 ≠ 内容真实。`dream`、`knowledge tidy`、`emotion evaluate` 都要大模型产出结构化结果；模型若把无关记忆强行合并、编造内容、误判情绪，这些错误会被**持久写进本地记忆库 / 知识库**，不会自动消失。防护措施：AI 动过的知识条目一律先标为**待审核**（`knowledge review` → `confirm` / `discard`），小模型请用 `config set model_tier small` 关掉高风险自动能力。**落盘前请人工过目。**
+
 一套纯本地、零依赖（只用 Python 标准库）的 AI 记忆系统。它把"上下文窗口"变成"会生长的记忆"——短期记忆像海马体一样快速写入、自然衰减；上下文将满时像人做梦一样重放、压缩、巩固到长期皮层；想不起来时靠模糊联想而不是精确匹配。
 
 ## 目录
@@ -22,6 +26,10 @@
 - [DeepSeek 生态兼容](#deepseek-生态兼容)
 - [可视化面板](#可视化面板)
 - [可靠性设计](#可靠性设计)
+- [脚本 vs 模型：谁在真正干活](#脚本-vs-模型谁在真正干活)
+- [模型适配与档位](#模型适配与档位)
+- [接入大模型（Ollama 示例）](#接入大模型ollama-示例)
+- [规模上限与归档](#规模上限与归档)
 - [快速开始](#快速开始)
 - [命令速查](#命令速查)
 - [项目结构](#项目结构)
@@ -85,7 +93,7 @@
 
 人格**不预写**。第一次使用时问用户"你希望我叫什么、是什么性格"，用户说不知道就由灵枢自己定。喜好、厌恶、习惯由相处中自己写。
 
-- 人格演化有完整历史，每次改动可回滚。
+- 人格演化有完整历史，每次改动可回滚：`persona history` 看历史（序号从最新往前数），`persona rollback <序号>` 一键撤销那次改动；回滚本身也记一条历史。
 - **好奇心与理智**是两条内驱数值，不是出厂设定——用户嫌你啰嗦，理智上调；用户让你多挖多试，好奇心上调（`mind tune`）。
 - `persona self` 让你总结"我是谁"，`persona interview` 是初识引导。
 
@@ -93,7 +101,7 @@
 
 ### 知识库
 
-把经历提炼成可复用的**结论**（不是流水账）。每条有主题、观点、要点、相关记忆引用，支持置顶与版本更新。`knowledge tidy` 会提示你哪些经历值得提炼成知识。
+把经历提炼成可复用的**结论**（不是流水账）。每条有主题、观点、要点、相关记忆引用，支持置顶与版本更新。`knowledge tidy` 会提示你哪些经历值得提炼成知识——**AI 动过的条目一律先标为待审核**（面板里直接看，或 `knowledge review` 查看），人工 `knowledge confirm <id>` / `knowledge discard <id>` 确认后才算数，防止模型幻觉直接沉淀成知识库。
 
 ### 笔记日志
 
@@ -118,10 +126,13 @@
 
 `brain.py serve` 启动本地面板（仅监听 127.0.0.1，`start-panel.bat` 一键启动）：
 
-- 记忆浏览：按层/类型/重要性筛选、置顶、编辑、忘记
-- 人格、内驱数值实时查看与微调
-- 知识库、笔记、技能（含 DSH 插件区块）、成长、进化日志
+- 记忆浏览：层 + 重要性区间 + 时间范围 + 标签 + 情绪 + 排序的**组合筛选**；置顶、编辑、忘记
+- **注入包预览**：直接看 `startup` 会注入给模型的完整记忆包（只读，不落盘、不加强记忆）
+- **冲突检查**：启发式扫出"可能矛盾/已过时"的记忆对，只提醒不下结论
+- 人格、内驱数值实时查看与微调；**人格历史可一键回滚**
+- 知识库（含 **⏳待审核 / 已确认 / 已废弃** 状态，可 confirm/discard）、笔记、技能（含 DSH 插件区块）、成长、进化日志
 - 做梦报告、备份恢复
+- **只读降级有醒目横幅**：目录不可写时页面顶部直接提示"修改不会保存"
 
 **安全**：面板自带随机 token 鉴权（页面加载时注入，所有 API 请求必须携带），并校验 Host/Origin，挡住 DNS rebinding 与无来源直连偷读记忆。
 
@@ -132,6 +143,78 @@
 - **备份/恢复**：`backup` 打包整个记忆库（含 verbatim/ 与 skills/），自动修剪旧备份；`restore` 恢复前先留现状备份，校验 zip 合法性并防 zip-slip 路径穿越
 - **只读降级**：沙箱写盘被拒时自动降级为只读注入，已有的记忆照样带回；`--home` 支持把数据目录迁到工作区
 - **原子写入**：所有文件写入走临时文件 + `os.replace`，不会出现写一半的脏文件
+
+## 脚本 vs 模型：谁在真正干活
+
+**先打消一个误会：装上灵枢不等于自动拥有类人脑智能。** 这套脚本是「存储、调度、数学计算」；真正的「智能」——合并记忆、理解情绪、提炼知识——仍然靠你接入的大模型。谁干什么，边界如下：
+
+| 工作 | 谁干 | 说明 |
+|---|---|---|
+| 存储 / 衰减 / 强化 / 分层搬运 | **脚本** | 艾宾浩斯曲线、蔡格尼克、峰终、杏仁核劫持上限等全是公式，模型只负责触发命令 |
+| 模糊回忆 | **脚本** | 字符二元组 / 词元加权，不需要模型参与（也因此是字面匹配，不是向量语义检索） |
+| 上下文注入包（startup 输出） | **脚本** | 纯拼装，模型照抄即可 |
+| 重放 → 碎片分组（dream） | **脚本** | pending 分组是启发式完成 |
+| 碎片合并成新记忆、判断要不要 | **模型** | 这一段是幻觉高发区：合并错误、编造就发生在这里 |
+| 情绪事件的解读（emotion evaluate） | **模型** | 小模型会把中性对话判成愤怒/狂喜，或看不出反话 |
+| 提炼知识库（knowledge tidy） | **模型** | 小模型容易编造结论，直接沉淀成知识 = 幻觉落盘 |
+| 技能自检（skill check） | **模型** | 全靠模型读正文挑毛病 |
+
+所以：**脚本保证"记下来了、想得起来、删得掉、片段不丢"；模型决定"记得准不准、合并对不对、情绪认不认"。** 想提高"记得准"，就换更强的模型或动 `config`。
+
+## 模型适配与档位
+
+灵枢不在脚本里硬堵模型能力，而是提供一个**档位开关**，让高风险自动能力按模型强弱开合：
+
+| 能力 | 7B+ / 云端 | 1.5B–3B 小模型 |
+|---|---|---|
+| 记忆增删查（remember / recall / list） | ✅ 完整 | ✅ 完整（脚本本身零模型依赖） |
+| capture 原样封存 | ✅ | ✅ |
+| dream 重放分组 | ✅ | ✅（启发式部分可用） |
+| dream --apply 合并结果 | ✅ 完整用 | ⚠️ 建议关：合并错误 = 幻觉记忆落盘 |
+| knowledge tidy | ✅ 完整用 | ⚠️ 建议关（或强制走待审核） |
+| emotion evaluate / mirror | ✅ | ⚠️ 易判错情绪，改用手动 `emotion feel` |
+| skill check | ✅ | ⚠️ 结果可信度低 |
+
+**小模型模式**（`config set model_tier small`）做的事：`startup` 注入包里追加「小模型模式」约束——不要自动 `dream --apply`、不要自动 `knowledge tidy`（产出须先 `knowledge review` 过目）、情绪评估改用手动 `emotion feel`。这只是**注入提示**，约束力取决于模型听话程度；3B 以下仍会漏执行，别指望它当保险丝。恢复：`config unset model_tier`（回到 auto）。
+
+**输出容错**：所有需要模型产 JSON 的入口（`dream --apply`、`knowledge tidy --apply`）都做了**容错解析**——先按标准 JSON 读，失败再去掉 ```json 代码围栏，再失败截取第一个配平的 `{...}`，实在读不出来会**明确报错并返回退出码 2**，不再静默吞掉。解析失败时报错里带文件路径与内容开头，方便直接排查。
+
+## 接入大模型（Ollama 示例）
+
+灵枢是命令行工具，接入哪家模型由你决定，它只负责被调用。以本地 Ollama + qwen2.5 7b 为例：
+
+```bash
+# 1) 你家 Agent 是一次会话的调度者，为每次会话先跑三条
+python scripts/brain.py startup --query "$USER_MSG"        # 把记忆注入提示前面
+python scripts/brain.py remember "$USER_MSG" --source user # 用户说的入模记忆
+# 2) 之后正常对话；水位到了再触发整理
+python scripts/brain.py check-context --used 68            # 60 清点 / 75 做梦 / 90 封存
+python scripts/brain.py dream --auto
+```
+
+Ollama 侧只需要一份 `Modelfile`，把"调用脚本"写进 system prompt 让它自己看情况执行：
+
+```dockerfile
+FROM qwen2.5:7b
+SYSTEM """你运行在本地，有记忆系统「灵枢」。每轮先按需执行：
+- 新会话第一轮：运行 startup --query "本轮主题"，把输出原样作为你的记忆前缀。
+- 用户说了值得记的事：运行 remember "<原话>" --kind fact|preference|emotion --importance 1-10。
+- 需要回忆：运行 recall "<关键词>"。
+- 上下文快满：运行 check-context --used <已用百分比>，并按提示配合。
+如果命令没有可执行环境，就按 SKILL.md 的规则口头执行，绝不乱编记忆。
+"""
+```
+
+更省事的替代：直接把这套框架装成 Agent 技能（`skill install` 全局化后，DSH / 本地 Agent 每会话自动读到 SKILL.md，按里面的机制走）。
+
+## 规模上限与归档
+
+记忆以 JSONL 纯文本存储（hippocampus/cortex/dust 等），**没有数据库索引**：
+
+- `recall` 模糊匹配要遍历全部记录，条数上万后每次命中会变慢（本地为毫秒级→百毫秒级，仍在可用区间）。
+- `dream` 会自动把一批短期记忆打包喂给模型，短期记忆越多，当次 token 消耗越大。
+
+**建议的养生方案**：每周一次 `backup`（默认保留最近 20 份，自动修剪）；长期不用的旧记忆用 `forget` 移入淡忘区（只留残余轮廓，不占活跃匹配）；知识库定期 `knowledge review` 确认。真到数据膨胀影响手感的层级，把 `--home` 指向新目录再 `restore` 最近备份，旧目录留档。
 
 ## 快速开始
 
@@ -170,10 +253,12 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 上下文水位 | `check-context --used 68`（60 清点 / 75 做梦 / 90 封存） |
 | 原样封存 | `capture "<原文>" [--tag 逃生]` |
 | 做梦 | `dream` / `dream --apply apply.json` / `dream --auto` |
-| 人格 | `persona show\|self\|interview\|mind\|state\|edit` |
+| 人格 | `persona show\|self\|interview\|mind\|state\|edit\|history [--limit]\|rollback <序号>` |
 | 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config` |
 | 工作记忆 | `work status\|add\|list\|done <序号>\|flush [--skip-done]\|clear` |
-| 知识库 | `knowledge add\|list\|search\|show\|pin\|rm\|tidy` |
+| 知识库 | `knowledge add\|list\|search\|show\|pin\|rm\|tidy\|review\|confirm <id>\|discard <id>` |
+| 冲突检查 | `detect-conflicts [--json] [--limit 50]`（启发式，只提醒不下结论） |
+| 模型档位 | `config show` / `config set model_tier small` / `config unset model_tier` |
 | 笔记 | `note write\|search\|digest` |
 | 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow` |
 | DSH 插件（只读） | `skill plugins [--json]` |
@@ -191,6 +276,9 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 ```
 灵枢-skill/
 ├── SKILL.md                # 技能本体：给 AI 读的完整说明书（frontmatter + 全部机制）
+├── SKILL-lite.md           # 精简版：小模型 / 新人用的降档说明书
+├── SKILL-tiny.md           # 最小试用版：只剩记忆三件套的入门说明
+├── CHANGELOG.md            # 变更历史
 ├── start-panel.bat         # 一键启动可视化面板
 ├── assets/
 │   └── panel.html          # 可视化面板前端（单文件，无依赖）

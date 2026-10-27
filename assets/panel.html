@@ -232,6 +232,11 @@
       <div class="sub" id="clock">2026/10/23 15:59:00</div>
     </header>
 
+    <div class="card hidden" id="ro-banner" style="margin-bottom:14px;border-color:var(--red);background:rgba(201,107,95,.08)">
+      <h2 style="margin-bottom:4px;color:var(--red)">只读模式</h2>
+      <div class="sub">记忆库目录不可写（权限不足）。页面上的任何修改都不会保存——先去修目录权限，再刷新。</div>
+    </div>
+
     <!-- 概览 -->
     <section class="view active" id="view-overview">
       <div class="card hidden" id="onboard-banner" style="margin-bottom:14px;border-color:var(--amber)">
@@ -285,15 +290,41 @@
     <!-- 记忆 -->
     <section class="view" id="view-memories">
       <div class="toolbar">
-        <input class="search" id="search" placeholder="模糊回忆：输入一句话或几个关键词…">
+        <input class="search" id="search" placeholder="字面筛选：输入一句话或几个关键词…（回车 = 模糊回忆）">
         <select id="layerFilter">
           <option value="">全部层</option>
           <option value="cortex">长期记忆</option>
           <option value="hippo">短期记忆</option>
           <option value="dust">淡忘区</option>
         </select>
+        <select id="impFilter">
+          <option value="">重要性</option>
+          <option value="high">高 ≥7</option>
+          <option value="mid">中 4–7</option>
+          <option value="low">低 &lt;4</option>
+        </select>
+        <select id="timeFilter">
+          <option value="0">全部时间</option>
+          <option value="7">近 7 天</option>
+          <option value="30">近 30 天</option>
+          <option value="90">近 90 天</option>
+        </select>
+        <input id="tagFilter" placeholder="标签" style="width:96px">
+        <input id="emoFilter" placeholder="情绪" style="width:96px">
+        <select id="sortFilter">
+          <option value="created">最新优先</option>
+          <option value="importance">按重要性</option>
+          <option value="retention">按记忆强度</option>
+        </select>
         <button class="ghost" id="btn-search">回忆</button>
+        <button class="ghost" id="btn-inject">注入预览</button>
+        <button class="ghost" id="btn-conflicts">冲突检查</button>
         <button class="btn" id="btn-add">＋ 写一条</button>
+      </div>
+      <div class="card hidden" id="conflict-box" style="margin-bottom:14px;border-color:rgba(201,107,95,.4)">
+        <h2>可能冲突的记忆</h2>
+        <div class="sub" style="margin-bottom:8px">启发式扫描，只做提醒、不下结论。确认哪条过时后，手动淡忘或改写它。</div>
+        <div id="conflict-list"></div>
       </div>
       <div id="mem-list"></div>
     </section>
@@ -699,12 +730,30 @@
   </div>
 </div>
 
+<div class="modal hidden" id="inject-modal">
+  <div class="box" style="width:min(820px,100%)">
+    <h3>会话注入预览</h3>
+    <div class="sub" style="margin-bottom:10px">这就是 startup 会注入给模型的记忆包。只读预览，不会落盘、不会触发记忆加强。</div>
+    <div class="field"><label>模拟用户这句话（可留空）</label><input id="inject-q" placeholder="例如：帮我写个 Python 脚本"></div>
+    <div class="row">
+      <span class="sub" id="inject-meta"></span>
+      <button class="btn" id="inject-run">生成</button>
+      <button class="ghost" id="inject-close">关闭</button>
+    </div>
+    <div class="pre" id="inject-out" style="margin-top:12px;max-height:52vh">点「生成」看本次会注入哪些记忆。</div>
+  </div>
+</div>
+
 <script>
-const S = { ov: null, tab: "overview", ws: null };
+const S = { ov: null, tab: "overview", ws: null, memIndex: {} };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const KIND = {fact:"事实", preference:"偏好", emotion:"情绪", insight:"洞见", habit:"习惯", episode:"片段", identity:"身份"};
 const LAYER = {cortex:"长期", hippo:"短期", dust:"淡忘"};
+function tierLabel(t){
+  return t === "small" ? "小模型模式（劝退自动 dreaming / 情绪评估）"
+    : t === "large" ? "大模型模式" : "自动档";
+}
 
 function toast(msg, err){
   const t = $("toast");
@@ -802,7 +851,12 @@ function renderOverview(){
   $("m-cortex").textContent = st.cortex ?? 0;
   $("m-hippo").textContent = st.hippo ?? 0;
   $("m-ret").textContent = Math.round((st.avg_retention || 0) * 100) + "%";
-  $("sidefoot").innerHTML = `<b>记忆库</b><br>${esc(st.home || "")}<br><br><b>人格档案</b><br>persona.json`;
+  $("sidefoot").innerHTML = `<b>记忆库</b><br>${esc(ov.home || st.home || "")}<br><br><b>人格档案</b><br>persona.json`
+    + `<br><br><b>模型档位</b><br>${esc(tierLabel(ov.model_tier))}`
+    + (ov.readonly ? `<br><b style="color:var(--red)">只读模式</b>` : "");
+
+  const roBanner = $("ro-banner");
+  if (roBanner) roBanner.classList.toggle("hidden", !ov.readonly);
 
   const traits = p.traits || {};
   $("p-traits").innerHTML = Object.keys(traits).length
@@ -1317,9 +1371,17 @@ function renderEvolved(p){
 }
 
 function renderHistory(p){
-  const h = (p.history || []).slice(-24).reverse();
+  const all = p.history || [];
+  const h = all.slice(-24).reverse();
   $("history").innerHTML = h.length
-    ? `<table class="hist"><tbody>${h.map(x => `<tr><td>${esc(new Date(x.ts * 1000).toLocaleString("zh-CN"))}</td><td>${esc(x.field)}</td><td>${esc(x.from)} → ${esc(typeof x.to === "object" ? JSON.stringify(x.to) : x.to)}</td><td>${esc(x.why || "")}</td></tr>`).join("")}</tbody></table>`
+    ? `<div class="sub" style="margin-bottom:8px">序号从最新一条往前数：1 = 撤销最近一次改动。回滚本身也会留一条历史。</div>
+       <table class="hist"><tbody>${h.map((x, j) => `<tr>
+         <td>${esc(new Date(x.ts * 1000).toLocaleString("zh-CN"))}</td>
+         <td>${esc(x.field)}</td>
+         <td>${esc(x.from)} → ${esc(typeof x.to === "object" ? JSON.stringify(x.to) : x.to)}</td>
+         <td>${esc(x.why || "")}</td>
+         <td><button class="ghost" style="padding:2px 9px;font-size:11px" data-rollback="${j + 1}">回滚到此</button></td>
+       </tr>`).join("")}</tbody></table>`
     : `<div class="sub">还没有人格变更记录。</div>`;
 }
 
@@ -1399,11 +1461,21 @@ function renderDshPlugins(){
 }
 
 function kgCard(k){
+  const stBadge = k.status === "pending"
+    ? '<span class="badge" style="background:rgba(217,164,65,.16);color:var(--amber)" title="AI 整理产出，可能含幻觉，需人工确认">⏳待审核</span>'
+    : k.status === "discarded" ? '<span class="badge dust">已废弃</span>' : "";
+  const acts = (k.status === "pending")
+    ? `<button class="iconbtn pin" title="确认（不再提示）" data-kgreview="${esc(k.id)}">✓</button>
+       <button class="iconbtn" title="废弃" data-kgdiscard="${esc(k.id)}">✕</button>`
+    : `<button class="iconbtn ${k.pinned ? "pin" : ""}" title="置顶" data-kgpin="${esc(k.id)}">◈</button>
+       <button class="iconbtn" title="编辑" data-kgedit="${esc(k.id)}">✎</button>
+       <button class="iconbtn" title="删除" data-kgdel="${esc(k.id)}">✕</button>`;
   return `<article class="mem">
     <div class="mem-body" style="width:100%">
       <div class="mem-top">
         <span class="badge cortex">${esc(k.topic || "未分类")}</span>
         <span class="badge">v${k.version || 1}</span>
+        ${stBadge}
         ${k.pinned ? '<span class="badge">★ 置顶</span>' : ""}
         <span class="date">${esc(new Date((k.updated || 0) * 1000).toLocaleDateString("zh-CN"))}</span>
       </div>
@@ -1412,11 +1484,7 @@ function kgCard(k){
       ${(k.points && k.points.length) ? `<ul class="list">${k.points.map(p => `<li>${esc(p)}</li>`).join("")}</ul>` : ""}
       ${(k.tags && k.tags.length) ? `<div class="tags">${k.tags.map(t => `<span>#${esc(t)}</span>`).join("")}</div>` : ""}
     </div>
-    <div class="acts">
-      <button class="iconbtn ${k.pinned ? "pin" : ""}" title="置顶" data-kgpin="${esc(k.id)}">◈</button>
-      <button class="iconbtn" title="编辑" data-kgedit="${esc(k.id)}">✎</button>
-      <button class="iconbtn" title="删除" data-kgdel="${esc(k.id)}">✕</button>
-    </div>
+    <div class="acts">${acts}</div>
   </article>`;
 }
 
@@ -1569,15 +1637,36 @@ async function load(){
   } catch (e) { toast(e.message, true); }
 }
 
-function renderMemoryList(){
+function indexMemories(rows){
+  S.memIndex = S.memIndex || {};
+  (rows || []).forEach(m => { S.memIndex[m.id] = m; });
+}
+
+async function renderMemoryList(){
   if (!S.ov) return;
-  const q = $("search").value.trim().toLowerCase();
+  const p = new URLSearchParams();
+  const q = $("search").value.trim();
+  if (q) p.set("q", q);
   const layer = $("layerFilter").value;
-  let rows = S.ov.memories || [];
-  if (layer) rows = rows.filter(m => m.layer === layer);
-  if (q) rows = rows.filter(m => (m.text + " " + (m.tags || []).join(" ") + " " + (m.entities || []).join(" ")).toLowerCase().includes(q));
-  $("mem-list").innerHTML = rows.length ? rows.map(memCard).join("")
-    : `<div class="empty">没有匹配的记忆。换个说法试试，真正的回忆是模糊的。</div>`;
+  if (layer) p.set("layer", layer);
+  const tag = ($("tagFilter").value || "").trim();
+  if (tag) p.set("tag", tag);
+  const emo = ($("emoFilter").value || "").trim();
+  if (emo) p.set("emotion", emo);
+  const imp = $("impFilter").value;
+  if (imp === "high") p.set("imp_min", "0.7");
+  else if (imp === "mid") { p.set("imp_min", "0.4"); p.set("imp_max", "0.7"); }
+  else if (imp === "low") p.set("imp_max", "0.4");
+  const days = $("timeFilter").value;
+  if (days && days !== "0") p.set("days", days);
+  p.set("sort", $("sortFilter").value || "created");
+  p.set("limit", "200");
+  try {
+    const rows = await api("/api/memories?" + p.toString());
+    indexMemories(rows);
+    $("mem-list").innerHTML = rows.length ? rows.map(memCard).join("")
+      : `<div class="empty">没有匹配的记忆。放宽筛选，或者按回车做一次模糊回忆。</div>`;
+  } catch (e) { toast(e.message, true); }
 }
 
 async function doSearch(){
@@ -1585,10 +1674,46 @@ async function doSearch(){
   if (!q) { renderMemoryList(); return; }
   try {
     const rows = await api("/api/search?q=" + encodeURIComponent(q) + "&k=30");
+    indexMemories(rows.map(r => r.memory));
     $("mem-list").innerHTML = rows.length
       ? rows.map(r => `<div style="margin-bottom:8px">${memCard(r.memory)}<div class="sub" style="margin:-4px 0 0 54px">回忆度 ${r.score.toFixed(2)} · 相关 ${r.parts.relevance} / 新鲜 ${r.parts.recency} / 重要 ${r.parts.importance}</div></div>`).join("")
       : `<div class="empty">想不起来了。也许当时没记，也许已经淡忘。</div>`;
   } catch (e) { toast(e.message, true); }
+}
+
+async function loadConflicts(){
+  $("conflict-box").classList.remove("hidden");
+  $("conflict-list").innerHTML = `<div class="sub">扫描中…</div>`;
+  try {
+    const data = await api("/api/conflicts?limit=50");
+    const rows = data.conflicts || [];
+    $("conflict-list").innerHTML = rows.length ? rows.map(c => `<div class="mem" style="margin-bottom:8px">
+      <div class="mem-body" style="width:100%">
+        <div class="sub" style="margin-bottom:6px">${esc(c.reason)}</div>
+        <p>① ${esc(c.a.text)}</p>
+        <p style="opacity:.85">② ${esc(c.b.text)}</p>
+      </div></div>`).join("")
+      : `<div class="empty">没扫到明显冲突。启发式只抓改口 / 否定信号，语义级的矛盾还得靠人看。</div>`;
+  } catch (e) { $("conflict-list").innerHTML = `<div class="empty">扫描失败：${esc(e.message)}</div>`; }
+}
+
+function openInject(){
+  $("inject-modal").classList.remove("hidden");
+  $("inject-q").value = $("search").value.trim();
+  $("inject-out").textContent = "点「生成」看本次会注入哪些记忆。";
+  $("inject-meta").textContent = "";
+}
+
+async function runInject(){
+  const q = $("inject-q").value.trim();
+  $("inject-out").textContent = "生成中…";
+  $("inject-meta").textContent = "";
+  try {
+    const data = await api("/api/inject-preview?q=" + encodeURIComponent(q));
+    const packet = data.packet || "";
+    $("inject-out").textContent = packet || "（空）";
+    $("inject-meta").textContent = packet ? `约 ${packet.length} 字` : "这次没有可注入的记忆";
+  } catch (e) { $("inject-out").textContent = "生成失败：" + e.message; }
 }
 
 function switchTab(tab){
@@ -1626,14 +1751,20 @@ if (dshFilter) dshFilter.addEventListener("input", () => renderDshPlugins());
 
 $("search").addEventListener("input", renderMemoryList);
 $("search").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
-$("layerFilter").addEventListener("change", renderMemoryList);
+["layerFilter", "impFilter", "timeFilter", "sortFilter"].forEach(id => $(id).addEventListener("change", renderMemoryList));
+["tagFilter", "emoFilter"].forEach(id => $(id).addEventListener("input", renderMemoryList));
 $("btn-search").addEventListener("click", doSearch);
+$("btn-inject").addEventListener("click", openInject);
+$("btn-conflicts").addEventListener("click", loadConflicts);
+$("inject-run").addEventListener("click", runInject);
+$("inject-close").addEventListener("click", () => $("inject-modal").classList.add("hidden"));
 
 $("mem-list").addEventListener("click", async (e) => {
   const pin = e.target.closest("[data-pin]"), ed = e.target.closest("[data-edit]"), fg = e.target.closest("[data-forget]");
+  const findMem = id => (S.memIndex && S.memIndex[id]) || (S.ov && S.ov.memories.find(x => x.id === id));
   try {
     if (pin) {
-      const m = S.ov.memories.find(x => x.id === pin.dataset.pin);
+      const m = findMem(pin.dataset.pin);
       await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: pin.dataset.pin, pinned: !m.pinned})});
       toast(m.pinned ? "已取消置顶" : "已置顶，不会淡忘");
       load();
@@ -1645,7 +1776,7 @@ $("mem-list").addEventListener("click", async (e) => {
       load();
     }
     if (ed) {
-      const m = S.ov.memories.find(x => x.id === ed.dataset.edit);
+      const m = findMem(ed.dataset.edit);
       const text = prompt("修改记忆内容：", m.text);
       if (text == null) return;
       await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: m.id, text})});
@@ -1711,6 +1842,18 @@ $("btn-state").addEventListener("click", async () => {
     toast("状态已保存");
     load();
   } catch (e) { toast(e.message, true); }
+});
+
+$("history").addEventListener("click", async (e) => {
+  const rb = e.target.closest("[data-rollback]");
+  if (!rb) return;
+  const idx = Number(rb.dataset.rollback);
+  if (!confirm(`回滚到历史第 ${idx} 条（撤销那次改动）？回滚本身也会记一条历史。`)) return;
+  try {
+    await api("/api/persona/rollback", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({index: idx})});
+    toast("已回滚，人格恢复到那次改动之前");
+    await load(); loadWS();
+  } catch (err) { toast(err.message, true); }
 });
 
 const emoBtn = $("btn-emo-feel");
@@ -1929,7 +2072,21 @@ $("kg-save").addEventListener("click", async () => {
 });
 $("kg-list").addEventListener("click", async (e) => {
   const pin = e.target.closest("[data-kgpin]"), ed = e.target.closest("[data-kgedit]"), del = e.target.closest("[data-kgdel]");
+  const rev = e.target.closest("[data-kgreview]"), dis = e.target.closest("[data-kgdiscard]");
   try {
+    if (rev) {
+      await post("/api/knowledge", {action: "review", id: rev.dataset.kgreview});
+      toast("已确认，进入知识库");
+      await loadWS();
+      return;
+    }
+    if (dis) {
+      if (!confirm("标记为废弃？它会被移出知识库（历史仍保留在文件里）。")) return;
+      await post("/api/knowledge", {action: "discard", id: dis.dataset.kgdiscard});
+      toast("已废弃");
+      await loadWS();
+      return;
+    }
     if (pin) {
       const k = S.ws.knowledge.find(x => x.id === pin.dataset.kgpin);
       await post("/api/knowledge", {action: "update", id: k.id, pinned: !k.pinned});
