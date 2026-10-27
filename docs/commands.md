@@ -14,7 +14,7 @@
 | 只读降级 | `--ro inject "关键词"`（或 `BRAIN_MEMORY_READONLY=1`） |
 | 换数据目录 | `--home <目录> ...` / `home move <目录>` / `home verify` |
 | 备份 / 恢复 | `backup [--out 目录] [--keep 20]` / `restore <zip> [--yes]` |
-| 工作记忆 | `work [add "..."]` → `work done <序号>` / `work flush[--skip-done]` / `work clear` |
+| 工作记忆 | `work [status\|list]`（看一眼）→ `work add "..."` → `work done <序号>` / `work flush [--skip-done]` / `work clear` |
 | 写入 | `remember "内容" --kind fact --importance 7 --tags a,b` |
 | 回忆 | `recall "关键词" --k 8` |
 | 遇到不会的 | `learn ask "问题"` / `learn loop` |
@@ -25,7 +25,7 @@
 | 人格 | `persona [show\|sync\|path\|set traits.幽默=70\|lock 名字\|unlock 名字]` |
 | 人格历史/回滚 | `persona history [--limit N]` → 看来源与依据 → `persona rollback <序号>` |
 | 人格快照/漂移 | `persona snapshot --label "基准"` / `persona snapshots` / `persona restore <名字>` / `persona drift [--days 7] [--json]` |
-| 人格编辑 | `persona edit --name ... --identity ... --traits "幽默:70,直率:60" --style ... --values ... --like ... --dislike ...` |
+| 人格编辑 | `persona set traits.幽默=70`（逐字段改，写进历史可回滚） |
 | 初识 | `persona interview [--name ... --traits ...\|--unsure]` → `persona self [--name ... --traits ... --likes ... --dislikes ... --habits ...]` |
 | 理智/好奇 | `mind [state\|weigh "事" --benefit 7 --cost 3\|tune --curiosity +5 --reason -3 --why "..."]` |
 | 会话模式 | `mode show\|work\|human\|auto`（工程会话自动隔离情绪） |
@@ -34,23 +34,25 @@
 | 情绪事件/微调 | `emotion events`（带序号）→ `emotion adjust <序号> [--intensity 0.3] [--emotion-name 委屈] [--why "..."]` / `emotion del <序号>` / `emotion cool` |
 | 事件→情绪（认知评价） | `emotion evaluate "事件" [--polarity auto\|positive\|negative\|neutral] [--intensity 0.8]` |
 | 共情 / 情感设置 | `emotion mirror "用户情绪" [--intensity 0.7]` / `emotion config [--empathy mirror\|mild\|off] [--gain 0.5] [--max-intensity 0.8] [--suppress "怒,恶"] [--notes "..."]` |
-| 记忆关联 | `assoc [link <idA> <idB> --relation 因果 --weight 1\|of <id>\|auto [--dry-run]\|graph --limit 300]` |
+| 记忆关联 | `assoc [link <idA> <idB> --relation 因果 --weight 1\|unlink <idA> <idB>\|of <id>\|auto [--dry-run]\|graph --limit 300]` |
 | 每日例行 | `daily [--dry-run] [--force]`（写日记 + 沉淀知识 + 过期的梦自动做掉） |
 | 自我总结（每2-3天） | `skill self-review [--force] [--days 3]` |
 | 知识库 | `knowledge add\|list\|search\|show\|pin\|rm` |
 | 整理知识 | `knowledge tidy` → 填 apply.json → `knowledge tidy --apply apply.json` |
 | 知识审核 | `knowledge review` / `knowledge confirm <id>` / `knowledge discard <id>` |
-| 笔记 | `note write "标题" --type journal\|log\|growth --body ...` |
+| 笔记 | `note write "标题" --type journal\|log\|growth --body ...` / `note list [--type ...]` / `note show <id>` |
 | 笔记检索 / 素材 | `note search "词"` / `note digest --days 7` |
 | 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow` |
 | 技能安装 | `skill install <名字> [--force] [--from 外部目录]`（整目录 + 自动生成 AGENTS.md；装灵枢本体需先过风险确认 `--yes`） |
 | 技能自动全局化 | `skill use <名字> --auto` |
 | DSH 插件（只读） | `skill plugins [--json]` |
+| 用户附加规则 | `user-rules show\|add <规则>\|clear`（数据目录 lingshu.user.md，更新永不覆盖，每会话自动注入） |
+| 扩展模块 | `ext new\|edit\|show\|list\|run\|check\|rm`（可执行钩子，数据目录，更新永不覆盖） |
 | 成长 | `growth status` / `growth review --days 7` |
 | 进化日志 | `evolve log "标题" --kind persona\|skill\|knowledge\|thinking\|self` / `evolve list` |
 | 统计 | `stats` |
 | 列表 / 忘记 | `list` / `forget <id>` |
-| 配置 | `config [set key value] [get key]` / `config unset <key>` |
+| 配置 | `config show` / `config set <key> <value>` / `config unset <key>` |
 | 记忆冲突检查 | `detect-conflicts [--json] [--limit 50]` |
 | 可视化面板 | `serve` → http://127.0.0.1:8765 |
 

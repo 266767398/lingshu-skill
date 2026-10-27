@@ -21,6 +21,15 @@ import growth  # noqa: E402
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 
+# 只读门控名单：这些 POST 端点会写数据目录，数据目录不可写时统一 403
+_WRITE_ENDPOINTS = {
+    "/api/remember", "/api/persona", "/api/persona/state", "/api/persona/restore",
+    "/api/memory", "/api/knowledge", "/api/knowledge/review", "/api/note",
+    "/api/skill", "/api/skill/install", "/api/skill/uninstall", "/api/evolve",
+    "/api/dream", "/api/dream/apply", "/api/emotion", "/api/mode", "/api/work",
+    "/api/assoc", "/api/daily", "/api/user-rules", "/api/sync", "/api/config",
+}
+
 # 本机随机 token：页面加载时注入，之后每个 API 请求都要带上。
 # 目的是挡住「本机其他进程 / 恶意网页借 DNS rebinding 读走全部记忆」——
 # 只靠 Origin/Host 校验挡不住不带 Origin 的直连请求。
@@ -307,6 +316,10 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         data = self._body()
         if data is None:
+            return
+        # 只读门控：写接口在数据目录不可写时直接 403（展示/预览接口放行）
+        if brain.READONLY and path in _WRITE_ENDPOINTS:
+            self._json({"error": "readonly", "message": "数据目录当前只读，写操作已被禁用。"}, 403)
             return
         try:
             if path == "/api/remember":
@@ -655,7 +668,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(port: int = 8765, open_browser: bool = True) -> None:
     brain.ensure_home()
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    brain._resolve_readonly(False)   # 面板也要探测只读：数据目录不可写时 POST 写接口返回 403
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    except OSError as exc:
+        print(f"[错误] 端口 {port} 被占用或不可用：{exc}", file=sys.stderr)
+        print("换一个端口试试：python scripts/panel_server.py --port 8766", file=sys.stderr)
+        raise SystemExit(1) from exc
     url = f"http://127.0.0.1:{port}"
     print(f"灵枢 · 记忆面板：{url}")
     print(f"记忆库：{brain.HOME}")

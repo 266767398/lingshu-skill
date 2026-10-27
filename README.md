@@ -2,6 +2,8 @@
 
 > 名字取自《黄帝内经》：**算力给思考，人格给灵魂，记忆给生命。**
 
+> 当前版本 **v2.7**（变更见 [CHANGELOG.md](CHANGELOG.md)）
+
 > ⚠️ **能力天花板（先读）**：灵枢是「提示词 + 脚本」的机制，**不能从底层强制约束模型**。当模型发生强幻觉时依然会无视全部规则；效果上限取决于底层大模型本身的推理、记忆与指令遵循能力。中强模型（7B+、云端）可完整遵守；**3B 以下本地小模型会出现大量规则漏执行**（忘走 startup、跳过写盘、纪律打折）——请据此降低预期，或改用 `SKILL-lite.md`（精简版）/ `SKILL-tiny.md`（最小试用版）。
 
 > 🚨 **风险警告：幻觉会被固化落盘**。本地保存 ≠ 内容真实。`dream`、`knowledge tidy`、`emotion evaluate` 都要大模型产出结构化结果；模型若把无关记忆强行合并、编造内容、误判情绪，这些错误会被**持久写进本地记忆库 / 知识库**，不会自动消失。防护措施：AI 动过的记忆 / 知识一律先标为**待审核**（`review` → `confirm` / `discard`；知识也可 `knowledge review`），人格变更带**来源与依据**（`persona history`），另有全局自查 `audit`。小模型请用 `config set model_tier small` 关掉高风险自动能力。**落盘前请人工过目。**
@@ -297,7 +299,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 上下文水位 | `check-context --used 68`（60 清点 / 75 做梦 / 90 封存） |
 | 原样封存 | `capture "<原文>" [--tag 逃生]` |
 | 做梦 | `dream` / `dream --apply apply.json` / `dream --auto` |
-| 人格 | `persona show\|self\|interview\|mind\|state\|edit\|history [--limit]\|rollback <序号>\|snapshot [--label]\|snapshots\|restore <名字>\|drift [--days 7] [--json]` |
+| 人格 | `persona show\|set traits.幽默=70\|sync\|path\|interview\|self\|lock\|unlock\|history [--limit]\|rollback <序号>\|snapshot [--label]\|snapshots\|restore <名字>\|drift [--days 7] [--json]` |
 | 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config\|events\|adjust <序号>\|del <序号>\|cool` |
 | 工作记忆 | `work status\|add\|list\|done <序号>\|flush [--skip-done]\|clear` |
 | 会话模式 | `mode show\|work\|human\|auto`（工程会话自动隔离情绪） |
@@ -350,14 +352,21 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 ├── dust.jsonl              # 淡忘区
 ├── working.jsonl           # 工作记忆（会话暂存）
 ├── emotions.jsonl          # 情绪事件流（心情按半衰期从这里叠加出来）
+├── desires.json            # 六欲状态（生、耳目口鼻感官欲等底层需要）
+├── assoc.jsonl             # 记忆关联边（联想图谱）
 ├── persona.json            # 人格档案
+├── persona_snapshots/      # 人格快照（snapshot / restore / drift 基准）
 ├── config.json             # 配置（阈值/权重）
+├── dream_state.json        # 做梦状态（上次做梦时间等）
+├── daily_state.json        # 每日例行状态
+├── knowledge.jsonl         # 知识库
+├── knowledge/              # 知识库附件（index.json）
+├── notes.jsonl             # 日记/日志/成长复盘
+├── evolution.jsonl         # 进化日志
+├── skills.json             # 技能注册表
 ├── skills/                 # 自己写的技能
 ├── extensions/             # 扩展模块（可执行钩子 inject/run，更新永不覆盖）
 ├── lingshu.user.md         # 用户附加规则（更新永不覆盖，每会话自动注入）
-├── knowledge/              # 知识库
-├── notes.jsonl             # 日记/日志/成长复盘
-├── evolution.jsonl         # 进化日志
 ├── dreams/                 # 梦报告与 pending
 ├── verbatim/               # capture 原样封存的保险柜
 └── backups/                # 备份

@@ -122,6 +122,9 @@ def add_knowledge(title: str, body: str, topic: str = "", points=None, tags=None
     rows = load_knowledge()
     new_title_terms = brain.terms(title)
     for old in rows:
+        # 废弃（discarded）条目不能被合并复活：新内容写进去也永远搜不到
+        if old.get("status") == "discarded":
+            continue
         # 只在标题几乎相同（或包含关系极强）时合并，避免把同主题的不同结论揉成一条
         if brain.jaccard(new_title_terms, brain.terms(old.get("title", ""))) >= 0.75:
             if body and body not in old.get("body", ""):
@@ -368,11 +371,13 @@ def apply_tidy(result: dict) -> dict:
 
     removed = set()
     for op in result.get("merge") or []:
-        ids = [i for i in (op.get("ids") or []) if i in by_id]
+        ids = _dedupe([i for i in (op.get("ids") or []) if i in by_id])
         if not ids:
             continue
         base = by_id[ids[0]]
         for other_id in ids[1:]:
+            if other_id == base["id"]:
+                continue   # 重复 id 不能把 base 自己当"被合并者"删掉
             other = by_id[other_id]
             if other.get("body") and other["body"] not in base.get("body", ""):
                 base["body"] = (base.get("body", "") + "\n\n" + other["body"]).strip()
@@ -594,7 +599,7 @@ def digest(days: int = 7) -> str:
             lines.append(f"- [{k.get('topic')}] {k.get('title')}（v{k.get('version')}）")
     if nts:
         lines += ["", "## 最近写下的笔记"]
-        for n in nts[:8]:
+        for n in sorted(nts, key=lambda x: x.get("created", 0), reverse=True)[:8]:
             lines.append(f"- {n.get('date')} [{n.get('type')}] {n.get('title')}：{_clip(n.get('body', ''), 80)}")
     if sks:
         lines += ["", "## 我写过的技能"]
@@ -602,7 +607,7 @@ def digest(days: int = 7) -> str:
             lines.append(f"- {s['name']}（v{s.get('version', 1)}）{s.get('description', '')[:60]}")
     if evo:
         lines += ["", "## 最近的自我进化"]
-        for e in evo[:8]:
+        for e in sorted(evo, key=lambda x: x.get("ts", 0), reverse=True)[:8]:
             lines.append(f"- {e.get('date')} [{e.get('kind')}] {e.get('title')}：{_clip(e.get('detail', ''), 80)}")
     lines += ["", "## 写复盘时回答这三个问题",
               "1. 这段时间我对待用户的方式，哪里更好了？哪里还急？",
@@ -633,9 +638,10 @@ def save_registry(reg: dict) -> None:
 
 
 def _require_slug(name: str) -> str:
-    name = (name or "").strip()
+    # 统一归一化：大小写、空格、下划线都折算成连字符，保证 new / show / rm 用同一个名字都能找到
+    name = (name or "").strip().lower().replace(" ", "-").replace("_", "-")
     if not SLUG_RE.match(name):
-        raise ValueError("技能名不合法：只能用字母/数字/连字符/下划线/中文，2-63 个字符")
+        raise ValueError("技能名不合法：只能用字母/数字/连字符/下划线/中文，1-63 个字符")
     return name
 
 
@@ -801,10 +807,10 @@ AGENTS_BLOCK_END = "<!-- lingshu:end -->"
 _LEGACY_AGENTS_SIGNATURE = "由灵枢在全局化时生成"
 
 
-def _agents_rules(name: str, description: str, meta: dict) -> str:
+def _agents_rules(name: str, description: str, meta: dict, from_dir: str | None = None) -> str:
     """AGENTS.md 里由灵枢维护的规则正文（区块内部，不含标题与标记）。"""
     entry = ""
-    src_dir = SKILLS_DIR / name
+    src_dir = Path(from_dir).expanduser() if from_dir else (SKILLS_DIR / name)
     if (src_dir / "scripts").is_dir():
         scripts = sorted(p.name for p in (src_dir / "scripts").glob("*.py"))
         if scripts:
@@ -822,12 +828,12 @@ def _agents_rules(name: str, description: str, meta: dict) -> str:
     return "\n".join(lines)
 
 
-def _agents_md(name: str, description: str, meta: dict) -> str:
+def _agents_md(name: str, description: str, meta: dict, from_dir: str | None = None) -> str:
     """给全局技能生成 AGENTS.md：DSH/DeepSeek 生态的常驻入口。
     只写「何时用 / 怎么调 / 在哪」，不复制 SKILL.md 正文。
     生成内容用 <!-- lingshu:start/end --> 区块包裹：更新时只替换这个区块，
     区块之外的用户手写内容（如 DSH 只读保护、全局目录指回）永远保留。"""
-    rules = _agents_rules(name, description, meta)
+    rules = _agents_rules(name, description, meta, from_dir)
     lines = [
         f"# {name}",
         "",
@@ -888,19 +894,20 @@ def _upsert_agents_block(path: Path, generated: str) -> str:
 
 
 def _is_lingshu(name: str, meta: dict, from_dir: str | None = None) -> bool:
-    """判断这次装的是不是灵枢本体（会自动记忆/整理/自编辑的那一个）。"""
-    if (name or "").strip() == "灵枢":
-        return True
-    if (meta.get("name") or "").strip() == "灵枢":
-        return True
-    if "灵枢" in (meta.get("origin") or ""):
+    """判断这次装的是不是灵枢本体（会自动记忆/整理/自编辑的那一个）。
+
+    只认名字叫「灵枢」的本体：AI 自己建的技能默认 origin 也是"灵枢"，
+    不能因为来源字符串里带"灵枢"就被当成本体去走风险确认（否则每个自建技能都装不进去）。
+    """
+    is_name = (name or "").strip() == "灵枢" or (meta.get("name") or "").strip() == "灵枢"
+    if is_name:
         return True
     if from_dir:
         p = Path(from_dir).expanduser() / "SKILL.md"
         if p.exists():
             try:
                 m2, _ = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
-                if (m2.get("name") or "").strip() == "灵枢" or "灵枢" in (m2.get("origin") or ""):
+                if (m2.get("name") or "").strip() == "灵枢":
                     return True
             except OSError:
                 pass
@@ -956,9 +963,18 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
 
     if dst.exists() and not force:
         if dst.read_text(encoding="utf-8") == src.read_text(encoding="utf-8"):
-            return {"name": name, "state": "already", "path": str(dst)}
+            # 内容没变：也要修复/补齐 AGENTS.md（区块化更新，用户手写部分不动）。
+            # 否则用户曾删掉或损坏 AGENTS.md 后，再 install 永远停在 "already"。
+            agents = dst_dir / "AGENTS.md"
+            generated = _agents_md(name, meta.get("description", ""), meta, from_dir)
+            if not agents.exists():
+                agents.write_text(generated, encoding="utf-8")
+            else:
+                _upsert_agents_block(agents, generated)
+            return {"name": name, "state": "already", "path": str(dst), "agents": str(agents)}
         raise FileExistsError(f"全局技能目录已有同名技能 {name}；确认覆盖请加 --force")
 
+    generated = _agents_md(name, meta.get("description", ""), meta, from_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
     # 整目录复制（跳过缓存、临时文件与源仓库的 .git 历史），保留 scripts/ assets/ 等运行时资源
     for item in src_dir.rglob("*"):
@@ -974,10 +990,9 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
     # 区块化维护：灵枢只写 <!-- lingshu:start/end --> 之间的规则，
     # 用户手写部分（DSH 只读保护、全局目录指回等）更新永不覆盖。
     agents = dst_dir / "AGENTS.md"
-    generated = _agents_md(name, meta.get("description", ""), meta)
     if not agents.exists():
         agents.write_text(generated, encoding="utf-8")
-    elif force:
+    else:
         _upsert_agents_block(agents, generated)
 
     reg = load_registry()
@@ -1255,6 +1270,7 @@ def locate_skill(name: str) -> dict:
     name = (name or "").strip()
     if not name:
         raise ValueError("要给出技能名")
+    name = _require_slug(name)   # 归一化 + 防路径穿越，与 read_skill 保持一致
     for source, root in _skill_roots():
         p = root / name / "SKILL.md"
         if p.is_file():
@@ -1328,9 +1344,15 @@ def _load_ext(name: str):
     if not path.exists():
         raise KeyError(f"没有这个扩展模块：{name}（~/.brain-memory/extensions/{name}.py）")
     import importlib.util
-    spec = importlib.util.spec_from_file_location(f"lingshu_ext_{path.stem}", path)
+    mod_name = f"lingshu_ext_{path.stem}"
+    spec = importlib.util.spec_from_file_location(mod_name, path)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    sys.modules[mod_name] = mod   # 让 @dataclass / pickle / typing.get_type_hints 等能按模块名解析
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(mod_name, None)
+        raise
     return mod
 
 
@@ -1344,8 +1366,8 @@ def ext_injections(ctx: dict | None = None) -> list:
             if callable(fn):
                 txt = fn(ctx or {})
                 if txt and str(txt).strip():
-                    out.append((info["name"], str(txt).strip()))
-        except Exception:
+                    out.append((info["name"], str(txt).strip()[:800]))   # 截断，防撑爆注入预算
+        except BaseException:
             continue
     return out
 
@@ -1361,6 +1383,7 @@ def create_extension(name: str, desc: str = "", body: str = "", overwrite: bool 
         raise FileExistsError(f"扩展 {name} 已存在；要改内容用 ext edit，要覆盖加 --force")
     body = (body or "").strip()
     if not body:
+        desc_literal = json.dumps(desc or f"扩展 {name}，我自己写的钩子", ensure_ascii=False)
         body = (
             f"# 灵枢扩展模块：{name}\n"
             f"# 位置：~/.brain-memory/extensions/{name}.py（数据目录，更新技能永不覆盖，随便改）\n"
@@ -1369,7 +1392,7 @@ def create_extension(name: str, desc: str = "", body: str = "", overwrite: bool 
             f"#   def inject(ctx: dict) -> str | None   # 返回的文本并入每会话注入包\n"
             f"#   def run(argv: list[str]) -> int       # 执行 `ext run {name} ...` 时调用\n"
             f"\n"
-            f"DESC = \"{desc or f'扩展 {name}，我自己写的钩子'}\"\n"
+            f"DESC = {desc_literal}\n"
             f"\n"
             f"\n"
             f"def inject(ctx):\n"
@@ -1405,14 +1428,18 @@ def edit_extension(name: str, body: str | None = None, append: str | None = None
 
 def check_extension(name: str) -> dict:
     """语法自检扩展模块：坏代码会被灵枢静默跳过，先查出来再说。"""
-    import py_compile
     path = _ext_path(name)
     if not path.exists():
         raise KeyError(f"没有这个扩展模块：{name}")
     try:
-        py_compile.compile(str(path), doraise=True)
+        # 用内置 compile 做语法检查：不落 __pycache__，只读数据目录下也能用
+        src = path.read_text(encoding="utf-8-sig")
+        compile(src, str(path), "exec")
         return {"name": name, "path": str(path), "ok": True}
-    except py_compile.PyCompileError as exc:
+    except SyntaxError as exc:
+        return {"name": name, "path": str(path), "ok": False,
+                "error": f"{exc.msg}（第 {exc.lineno} 行）"}
+    except OSError as exc:
         return {"name": name, "path": str(path), "ok": False, "error": str(exc)}
 
 
@@ -1533,7 +1560,8 @@ def growth_status() -> dict:
     kstat = knowledge_stats()
     nstat = note_stats()
     sks = list_skills()
-    last_growth = next((n for n in load_notes() if n.get("type") == "growth"), None)
+    last_growth = max((n for n in load_notes() if n.get("type") == "growth"),
+                      key=lambda n: n.get("created", 0), default=None)
     evo = evolution_status()
     return {
         "days_alive": len(days),
@@ -1596,6 +1624,10 @@ def run(argv=None) -> int:
         return _run(argv)
     except (ValueError, FileExistsError, KeyError) as exc:
         print(f"[错误] {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # 文件被占用 / 读不到文件 / 目录不可写等，给可读信息而不是裸 traceback
+        print(f"[错误] 文件操作失败：{exc}", file=sys.stderr)
         return 2
 
 
@@ -1772,6 +1804,24 @@ def _run(argv=None) -> int:
     args = dp.parse_args(argv)
     brain.ensure_home()
 
+    # ---- 只读门控：growth 的写命令统一挡在这里（此前只有 ext 单独挡，其余会照写）
+    if brain.READONLY:
+        act = getattr(args, "act", "") or ""
+        writing = (
+            (args.cmd == "knowledge" and act in ("add", "tidy", "apply", "pin",
+                                                 "rm", "confirm", "discard"))
+            or (args.cmd == "note" and act in ("write", "update", "delete"))
+            or (args.cmd == "skill" and act in ("new", "edit", "install", "uninstall",
+                                                "rm", "borrow", "use"))
+            or (args.cmd == "ext" and act in ("new", "edit", "rm"))
+            or (args.cmd == "evolve" and act == "log")
+            or args.cmd == "learn"
+        )
+        if writing:
+            print(f"[只读] 记忆库当前不可写，{args.cmd} {act} 需要写盘。"
+                  "改用 --home 指向可写目录，或先解除写保护。", file=sys.stderr)
+            return 3
+
     # ---------------- knowledge
     if args.cmd == "knowledge":
         if args.act == "add":
@@ -1839,8 +1889,11 @@ def _run(argv=None) -> int:
             return 0
         if args.act in ("pin", "rm"):
             if args.act == "rm":
-                print("已删除。" if delete_knowledge(args.id) else "没找到这条知识。")
-                return 0
+                if delete_knowledge(args.id):
+                    print("已删除。")
+                    return 0
+                print("没找到这条知识。", file=sys.stderr)
+                return 1
             rec = next((r for r in load_knowledge() if r["id"] == args.id), None)
             if not rec:
                 print("没找到这条知识。", file=sys.stderr)
@@ -1970,8 +2023,11 @@ def _run(argv=None) -> int:
             print("已卸载。" if res["state"] == "uninstalled" else "全局目录里没有这个技能。")
             return 0
         if args.act == "rm":
-            print("已删除自己写的技能。" if remove_skill(args.name) else "没找到这个技能。")
-            return 0
+            if remove_skill(args.name):
+                print("已删除自己写的技能。")
+                return 0
+            print("没找到这个技能。", file=sys.stderr)
+            return 1
         if args.act == "find":
             q = " ".join(args.query)
             rows = search_skills(q, args.limit)
@@ -2035,28 +2091,24 @@ def _run(argv=None) -> int:
             if sk["truncated"]:
                 print(f"\n…（原文更长，完整内容见 {sk['path']}）")
             if args.auto:
-                res_auto = install_skill(args.name, force=False)
-                if res_auto.get("state") == "risk_required":
+                try:
+                    res = install_skill(args.name, force=False)
+                except FileExistsError:
+                    # 全局已有同名但内容不同 → 覆盖，保证全局目录始终是最新版
+                    res = install_skill(args.name, force=True)
+                    res["state"] = "updated"
+                if res.get("state") == "risk_required":
                     print("\n「灵枢」会自动读写记忆、自动整理、能自己改说明书。自动全局化前请先接受风险：\n")
-                    for i, line in enumerate(res_auto["risks"], 1):
+                    for i, line in enumerate(res["risks"], 1):
                         print(f"  {i}. {line}")
                     print("\n用户接受后，执行一次（只做一次，之后不再问）：")
                     print('  python scripts/brain.py skill install 灵枢 --from "灵枢技能目录" --yes')
-                    raise SystemExit(0)
-                res_state = res_auto["state"]
-                if res_state == "risk_required":
                     return 0
-                try:
-                    install_skill(args.name, force=False)
-                    res_state = "installed"
-                except FileExistsError:
-                    # 内容有更新 → 覆盖，保证全局目录始终是最新版
-                    install_skill(args.name, force=True)
-                    res_state = "updated"
-                print(f"\n已自动全局化：{GLOBAL_SKILLS / args.name / 'SKILL.md'}（{res_state}）")
+                state = res.get("state", "installed")
+                print(f"\n已自动全局化：{GLOBAL_SKILLS / args.name / 'SKILL.md'}（{state}）")
                 try:
                     log_evolution("skill", f"使用即全局化：{args.name}",
-                                  f"skill use --auto：{res_state}，保证新会话可调",
+                                  f"skill use --auto：{state}，保证新会话可调",
                                   [str(GLOBAL_SKILLS / args.name / "SKILL.md")])
                 except Exception:
                     pass

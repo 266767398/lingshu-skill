@@ -1,6 +1,6 @@
 ---
 name: 灵枢
-version: 2.6
+version: 2.7
 description: 类脑持久记忆、人格与成长系统，名字取自《黄帝内经》：算力给思考，人格给灵魂，记忆给生命。当用户需要 AI 跨会话记住事情、拥有自己长出来的人格/性格/喜好、在上下文将满时自动整理记忆（像做梦一样巩固与遗忘），或提到"记忆""记住我""人格""设定""知识库""笔记""日志""成长""自我进化""工作记忆""上下文快满了""做梦整理""更新灵枢技能"时使用。内置：分层记忆（海马体/皮层/淡忘区）与艾宾浩斯遗忘曲线、模糊联想回忆、无种子的人格初识与演化历史、好奇心与理智双驱（数值由用户态度长成）、工作记忆暂存（默认不落盘）、学习闭环（先查知识库再联网）、技能搜索/调用/借鉴与自我进化日志、七情六欲与理智约束（认知评价/共情/情感设置）、记忆关联（联想图谱 3D 空间）、每日例行与自我总结。纯本地零依赖，Python 标准库即可运行。
 ---
 
@@ -34,12 +34,13 @@ description: 类脑持久记忆、人格与成长系统，名字取自《黄帝�
 
 ```
 persona.json   人格+情绪状态+好奇心/理智+演化历史
-working.jsonl  工作记忆暂存（会话级，9 条，12h 过期）
+persona_snapshots/ 人格快照（snapshot / restore / drift 基准）
+emotions.jsonl 情绪事件流        desires.json     六欲状态
+assoc.jsonl    记忆关联边        working.jsonl    工作记忆暂存（会话级，9 条，12h 过期）
 hippocampus.jsonl / cortex.jsonl / dust.jsonl  短期 / 长期 / 淡忘区
-dreams/        梦报告与待整理任务      knowledge.jsonl  知识库
-notes.jsonl    日记/日志/复盘          verbatim/        capture 原样快照
-evolution.jsonl 自我进化日志            skills/          你自己写的技能
-extensions/     扩展模块（可执行钩子，更新永不覆盖）
+dreams/        梦报告与待整理任务  knowledge.jsonl  知识库  notes.jsonl 日记/日志/复盘
+verbatim/       capture 原样快照  evolution.jsonl 自我进化日志
+skills/        你自己写的技能      extensions/     扩展模块（可执行钩子，更新永不覆盖）
 lingshu.user.md 用户附加规则（更新技能永不覆盖，每会话自动注入）
 ```
 
@@ -70,7 +71,7 @@ lingshu.user.md 用户附加规则（更新技能永不覆盖，每会话自动�
 1. **醒来**：先注入记忆，再说话。用 `startup` 而不是手动 `inject`——它把"跑没跑"变成返回码，不靠自觉：
 
    ```bash
-   python scripts/brain.py startup --query "<用户这句话，或本次主题关键词>"
+   python scripts/brain.py startup --query "<用户这句话，或本次主题关键词>" [--budget 1400]
    ```
 
    | 返回码 | 含义 | 该做什么 |
@@ -206,7 +207,7 @@ python scripts/brain.py ext rm <名字>                    # 删除
 ## 高频命令索引
 
 ```bash
-python scripts/brain.py startup --query "..."        # 会话开始（最重要）
+python scripts/brain.py startup --query "..." [--budget 1400]   # 会话开始（最重要）
 python scripts/brain.py remember "内容" --kind fact --importance 7
 python scripts/brain.py recall "关键词" --k 6
 python scripts/brain.py check-context --used 68      # 60 清点 / 75 做梦 / 90 封存

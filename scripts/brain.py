@@ -111,11 +111,23 @@ def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if path.exists():
         try:
-            cfg.update(json.loads(path.read_text(encoding="utf-8")))
+            cfg.update(json.loads(path.read_text(encoding="utf-8-sig")))
         except Exception:
             pass
     cfg["weights"] = dict(DEFAULT_CONFIG["weights"], **(cfg.get("weights") or {}))
     return cfg
+
+
+def _slurp_json(path, default=None):
+    """读本地 JSON：兼容 BOM（记事本存的档带 BOM，裸 utf-8 会解析失败）；坏了返回 default，
+    绝不当作"档案丢了"去覆盖写盘。"""
+    p = Path(path)
+    if not p.exists():
+        return default
+    try:
+        return json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return default
 
 
 def load_loose_json(path, label: str = "JSON") -> dict | list:
@@ -314,7 +326,8 @@ def ai_persona_changes(days: int = 7) -> list:
         if float(h.get("ts", 0)) < cutoff:
             continue
         why = str(h.get("why", ""))
-        if why.startswith("用户") or why in ("手动编辑", "回滚"):
+        # 用户自己说的（初识回答、手动编辑、回滚、面板保存）不算 AI 私改
+        if ("用户" in why) or why in ("手动编辑", "回滚", "persona restore"):
             continue
         out.append(h)
     return out
@@ -505,7 +518,9 @@ def load_all() -> list:
 def save_all(records: list) -> None:
     groups = {"hippo": [], "cortex": [], "dust": []}
     for r in records:
-        groups.setdefault(r.get("layer", "hippo"), []).append(r)
+        layer = r.get("layer", "hippo")
+        # 未知层名（损坏的手改数据）归入海马回，绝不静默丢弃
+        groups[layer if layer in groups else "hippo"].append(r)
     write_jsonl(HOME / "hippocampus.jsonl", groups["hippo"])
     write_jsonl(HOME / "cortex.jsonl", groups["cortex"])
     write_jsonl(HOME / "dust.jsonl", groups["dust"])
@@ -1135,10 +1150,7 @@ def desire_state(at: float | None = None) -> dict:
     """六欲当前水平（0-100）。读取时按时间自然回落，不写盘。"""
     now = at or now_ts()
     path = HOME / "desires.json"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except Exception:
-        raw = {}
+    raw = _slurp_json(path, {}) or {}
     levels = dict(raw.get("levels") or {})
     last = float(raw.get("updated") or now)
     days = max(0.0, (now - last) / DAY)
@@ -1186,31 +1198,34 @@ def emotion_modify(n: int, emotion: str = "", intensity: float | None = None,
     if READONLY:
         raise PermissionError("记忆库当前只读，无法修改情绪事件。")
     path = HOME / "emotions.jsonl"
-    rows = read_jsonl(path)
-    desc = sorted(rows, key=lambda r: r.get("ts", 0), reverse=True)
-    if n < 1 or n > len(desc):
-        raise ValueError(f"序号越界：情绪事件共 {len(rows)} 条，调整写 1..{len(rows)}。")
-    ev = desc[n - 1]
-    changed = {}
-    if emotion and emotion in EMOTIONS:
-        v, a = _emotion_coord(emotion)
-        ev["emotion"], ev["valence"], ev["arousal"] = emotion, v, a
-        changed["emotion"] = emotion
-    if intensity is not None:
-        eff = max(0.0, min(1.0, float(intensity)))
-        ev["intensity"] = round(eff, 3)
-        changed["intensity"] = ev["intensity"]
-    if why is not None:
-        ev["why"] = why.strip()
-        changed["why"] = ev["why"]
-    if about is not None:
-        ev["about"] = about.strip()
-        changed["about"] = ev["about"]
-    if decay_hours is not None:
-        ev["decay_hours"] = max(0.5, min(720.0, float(decay_hours)))
-        changed["decay_hours"] = ev["decay_hours"]
-    ev["adjusted"] = now_ts()
-    write_jsonl(path, rows)
+    with _locked(path):
+        rows = read_jsonl(path)
+        desc = sorted(rows, key=lambda r: r.get("ts", 0), reverse=True)
+        if n < 1 or n > len(desc):
+            raise ValueError(f"序号越界：情绪事件共 {len(rows)} 条，调整写 1..{len(rows)}。")
+        ev = desc[n - 1]
+        changed = {}
+        if emotion:
+            if emotion not in EMOTIONS:
+                raise ValueError(f"没有这个情绪名：{emotion}（可选：{'、'.join(EMOTIONS)}）")
+            v, a = _emotion_coord(emotion)
+            ev["emotion"], ev["valence"], ev["arousal"] = emotion, v, a
+            changed["emotion"] = emotion
+        if intensity is not None:
+            eff = max(0.0, min(1.0, float(intensity)))
+            ev["intensity"] = round(eff, 3)
+            changed["intensity"] = ev["intensity"]
+        if why is not None:
+            ev["why"] = why.strip()
+            changed["why"] = ev["why"]
+        if about is not None:
+            ev["about"] = about.strip()
+            changed["about"] = ev["about"]
+        if decay_hours is not None:
+            ev["decay_hours"] = max(0.5, min(720.0, float(decay_hours)))
+            changed["decay_hours"] = ev["decay_hours"]
+        ev["adjusted"] = now_ts()
+        write_jsonl(path, rows)
     return {"index": n, "changed": changed, "event": ev}
 
 
@@ -1219,13 +1234,14 @@ def emotion_delete(n: int) -> dict:
     if READONLY:
         raise PermissionError("记忆库当前只读，无法删除情绪事件。")
     path = HOME / "emotions.jsonl"
-    rows = read_jsonl(path)
-    desc = sorted(rows, key=lambda r: r.get("ts", 0), reverse=True)
-    if n < 1 or n > len(desc):
-        raise ValueError(f"序号越界：情绪事件共 {len(rows)} 条，删除写 1..{len(rows)}。")
-    ev = desc[n - 1]
-    rows = [r for r in rows if r is not ev]
-    write_jsonl(path, rows)
+    with _locked(path):
+        rows = read_jsonl(path)
+        desc = sorted(rows, key=lambda r: r.get("ts", 0), reverse=True)
+        if n < 1 or n > len(desc):
+            raise ValueError(f"序号越界：情绪事件共 {len(rows)} 条，删除写 1..{len(rows)}。")
+        ev = desc[n - 1]
+        rows = [r for r in rows if r is not ev]
+        write_jsonl(path, rows)
     return {"deleted": ev, "remaining": len(rows)}
 
 
@@ -1234,18 +1250,19 @@ def emotion_cool(factor: float = 0.15) -> dict:
     if READONLY:
         raise PermissionError("记忆库当前只读，无法冷却情绪。")
     path = HOME / "emotions.jsonl"
-    rows = read_jsonl(path)
-    horizon = now_ts() - 24 * HOUR
-    cooled = 0
-    for ev in rows:
-        if float(ev.get("ts", 0)) < horizon:
-            continue
-        entry_w = float(ev.get("intensity", 0))
-        if entry_w >= 0.25:
-            ev["intensity"] = round(max(0.03, entry_w * factor), 3)
-            ev["cooled_at"] = now_ts()
-            cooled += 1
-    write_jsonl(path, rows)
+    with _locked(path):
+        rows = read_jsonl(path)
+        horizon = now_ts() - 24 * HOUR
+        cooled = 0
+        for ev in rows:
+            if float(ev.get("ts", 0)) < horizon:
+                continue
+            entry_w = float(ev.get("intensity", 0))
+            if entry_w >= 0.25:
+                ev["intensity"] = round(max(0.03, entry_w * factor), 3)
+                ev["cooled_at"] = now_ts()
+                cooled += 1
+        write_jsonl(path, rows)
     m = mood_now()
     return {"cooled": cooled, "mood": m["label"], "intensity": round(m["intensity"], 3)}
 
@@ -1809,10 +1826,14 @@ def compile_persona() -> dict:
         HOME.mkdir(parents=True, exist_ok=True)
     old = None
     if (HOME / "persona.json").exists():
-        try:
-            old = json.loads((HOME / "persona.json").read_text(encoding="utf-8"))
-        except Exception:
-            old = None
+        old = _slurp_json(HOME / "persona.json")
+        if old is None and not READONLY:
+            # 档案存在但读不出来（真损坏，不是 BOM）：先留一份副本再重建，绝不静默丢人格
+            try:
+                shutil.copy2(HOME / "persona.json",
+                             HOME / f"persona.json.corrupt-{int(now_ts())}")
+            except OSError:
+                pass
     p = default_persona()
     if old:
         for key, val in old.items():
@@ -1829,9 +1850,8 @@ def load_persona() -> dict:
     ensure_home()
     path = HOME / "persona.json"
     if path.exists():
-        try:
-            p = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+        p = _slurp_json(path)
+        if not isinstance(p, dict):
             p = compile_persona()
     else:
         # 只读且档案缺失：给一份内存默认值，不影响读取已有记忆
@@ -1866,7 +1886,7 @@ def _is_locked(p: dict, label: str) -> bool:
     return False
 
 
-def persona_brief(p: dict) -> str:
+def persona_brief(p: dict, mood: bool = True) -> str:
     ident = p.get("identity", {})
     name = ident.get("名字") or ident.get("name")
     if name:
@@ -1905,12 +1925,12 @@ def persona_brief(p: dict) -> str:
     if p.get("relationship"):
         lines.append("关系：" + "；".join(p["relationship"][:4]) + "。")
     st = p.get("state", {})
-    mb = mood_brief()
+    mb = mood_brief() if mood else ""
     if mb:
         tone = mood_tone_hint()
         lines.append(f"此刻心情：{mb}。" + (f"{tone}。" if tone else "")
                      + "它会自然回落，也会影响你说话的语气。")
-    elif st.get("mood"):
+    elif mood and st.get("mood"):
         lines.append(f"此刻情绪：{st['mood']}" + (f"（{st['mood_note']}）" if st.get("mood_note") else "") + "。")
     habits = p.get("evolved", {}).get("habits", [])
     if habits:
@@ -2060,6 +2080,10 @@ def persona_rollback(index: int | None = None) -> dict:
                             if (x.get("name") if isinstance(x, dict) else x) != to]
     elif frm is None:
         node.pop(leaf, None)
+    elif isinstance(node.get(leaf), dict) and isinstance(frm, str):
+        # 目标叶子是 dict（如 onboarding），而历史里的 from 是字符串（初识标记），
+        # 直接替换会把它变成字符串导致后续注入崩溃 → 只回滚 dict 内部的初识标记。
+        node[leaf] = {"stage": frm}
     else:
         node[leaf] = frm
     hist.append({"ts": now_ts(), "field": field,
@@ -2090,9 +2114,8 @@ def persona_snapshots(limit: int = 30) -> list:
         return []
     rows = []
     for f in PERSONA_SNAP_DIR.glob("*.json"):
-        try:
-            d = json.loads(f.read_text(encoding="utf-8"))
-        except Exception:
+        d = _slurp_json(f)
+        if not isinstance(d, dict):
             continue
         rows.append({"name": f.stem, "ts": int(d.get("ts", 0)),
                      "label": d.get("label", f.stem)})
@@ -2105,13 +2128,23 @@ def persona_restore(name: str) -> dict:
     if READONLY:
         raise PermissionError("记忆库当前只读，无法恢复快照。")
     import re as _re
-    safe = _re.sub(r"[^\w\u4e00-\u9fff-]+", "", name or "")
+    safe = _re.sub(r"[^\w\u4e00-\u9fff-]+", "_", name or "")
     path = PERSONA_SNAP_DIR / f"{safe}.json"
     if not path.exists():
         names = "、".join(r["name"] for r in persona_snapshots(10)) or "（还没有快照）"
         raise ValueError(f"没有快照：{name}。现有：{names}")
-    d = json.loads(path.read_text(encoding="utf-8"))
+    d = _slurp_json(path)
+    if not isinstance(d, dict):
+        raise ValueError(f"快照文件损坏，读不出来：{name}")
     persona = d.get("persona") or {}
+    # 恢复前先给"当前状态"留一张自动快照（可随时反悔），并记一条历史，保证恢复动作可溯源
+    try:
+        persona_snapshot("restore前自动备份")
+    except Exception:
+        pass
+    persona.setdefault("history", []).append(
+        {"ts": now_ts(), "field": "persona", "from": "(自动备份)",
+         "to": name, "why": "persona restore"})
     save_persona(persona)
     return {"restored": name, "ts": d.get("ts", 0), "label": d.get("label", name)}
 
@@ -2591,10 +2624,9 @@ def write_dream_report(report: dict) -> Path:
 def load_dream_state() -> dict:
     path = HOME / "dream_state.json"
     if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        d = _slurp_json(path)
+        if isinstance(d, dict):
+            return d
     return {"last_dream": 0, "last_task": None}
 
 
@@ -2687,13 +2719,12 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
     budget = budget_tokens or int(cfg.get("budget_tokens", 1400))
     char_budget = int(budget * 1.8)
     p = load_persona()
+    session_mode = resolve_mode(query)
 
     out = ["===== 长期记忆注入（灵枢）=====",
            "算力给我思考，人格给我灵魂，记忆给我生命。",
-           "## 我是谁", persona_brief(p)]
-    used = len(persona_brief(p)) + 60
-
-    session_mode = resolve_mode(query)
+           "## 我是谁", persona_brief(p, mood=(session_mode != "work"))]
+    used = len(persona_brief(p, mood=(session_mode != "work"))) + 60
 
     if model_tier() == "small":
         out.append("\n## 小模型模式（当前模型档位 = small）")
@@ -2962,7 +2993,7 @@ def _extract_ro(argv: list) -> tuple:
 def _override_home(argv: list) -> list:
     """提取 --home <目录>/--home=<目录>，全局切换数据目录（任意位置均可）。
     同时写入环境变量，保证之后 import 的 growth 子系统读到同一个 HOME。"""
-    global HOME, WORKING_FILE, VERBATIM_DIR
+    global HOME, WORKING_FILE, VERBATIM_DIR, ASSOC_FILE, PERSONA_SNAP_DIR, DAILY_FILE
     out, i, home = [], 0, None
     while i < len(argv):
         a = argv[i]
@@ -2980,6 +3011,9 @@ def _override_home(argv: list) -> list:
         HOME = Path(home).expanduser()
         WORKING_FILE = HOME / "working.jsonl"
         VERBATIM_DIR = HOME / "verbatim"
+        ASSOC_FILE = HOME / "assoc.jsonl"
+        PERSONA_SNAP_DIR = HOME / "persona_snapshots"
+        DAILY_FILE = HOME / "daily_state.json"
         os.environ["BRAIN_MEMORY_HOME"] = str(HOME)
     return out
 
@@ -3132,6 +3166,19 @@ def cmd_home(action: str = "show", dest: str = "") -> int:
         if not HOME.exists():
             print(f"[错误] 源记忆库不存在：{HOME}", file=sys.stderr)
             return 2
+        try:
+            dst_res, home_res = dst.resolve(), HOME.resolve()
+        except OSError:
+            dst_res, home_res = dst, HOME
+        if dst_res == home_res:
+            print("目标目录就是当前记忆库，已是最新。")
+            return 0
+        try:
+            dst_res.relative_to(home_res)
+            print(f"[错误] 目标目录不能是记忆库内部（会边复制边膨胀）：{dst}", file=sys.stderr)
+            return 2
+        except ValueError:
+            pass
         if dst.exists():
             if any(dst.iterdir()) and not (dst / "persona.json").exists():
                 print(f"[错误] 目标目录非空且不像记忆库：{dst}", file=sys.stderr)
@@ -3156,9 +3203,6 @@ def cmd_home(action: str = "show", dest: str = "") -> int:
         except PermissionError as exc:
             print(f"[错误] 迁移失败（目标不可写？）：{exc}", file=sys.stderr)
             return 2
-        if Path(dst) == HOME:
-            print("目标目录就是当前记忆库，已是最新。")
-            return 0
         print(f"已复制 {n} 个文件 → {dst}")
         print("之后用这个目录（二选一）：")
         print(f"  setx BRAIN_MEMORY_HOME \"{dst}\"   # 永久，新终端生效")
@@ -3341,10 +3385,9 @@ DAILY_FILE = HOME / "daily_state.json"
 
 def _daily_state() -> dict:
     if DAILY_FILE.exists():
-        try:
-            return json.loads(DAILY_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        d = _slurp_json(DAILY_FILE)
+        if isinstance(d, dict):
+            return d
     return {"last_run": 0, "last_date": ""}
 
 
@@ -3686,13 +3729,19 @@ def _main(argv=None) -> int:
         writing = (
             args.cmd in ("remember", "init", "restore", "forget", "capture")
             or (args.cmd == "dream" and not args.dry_run)
-            or (args.cmd == "work" and action in ("add", "flush", "clear"))
+            or (args.cmd == "work" and action in ("add", "done", "flush", "clear"))
             or (args.cmd == "persona" and action not in ("show", "path", "onboarding",
                                                          "history", "snapshots", "drift"))
             or (args.cmd == "mind" and action in ("set", "tune"))
-            or (args.cmd == "emotion" and action in ("feel", "evaluate", "mirror", "config",
-                                                     "desire", "adjust", "del", "cool"))
+            or (args.cmd == "emotion" and action in ("feel", "evaluate", "mirror",
+                                                     "adjust", "del", "cool"))
+            or (args.cmd == "emotion" and action == "desire" and bool(args.emotion))
+            or (args.cmd == "emotion" and action == "config"
+                and any([args.empathy, args.gain is not None, args.max_intensity is not None,
+                         args.suppress, args.notes]))
             or (args.cmd == "mode" and action != "show")
+            or (args.cmd == "config" and action in ("set", "unset"))
+            or (args.cmd == "sync" and not args.dry_run)
             or (args.cmd == "review" and action in ("confirm", "discard"))
             or (args.cmd == "assoc" and action in ("link", "unlink") )
             or (args.cmd == "assoc" and action == "auto" and not args.dry_run)
@@ -3774,6 +3823,9 @@ def _main(argv=None) -> int:
                 print("做梦完成，但没有需要压缩的碎片（梦很安静）。")
             return 0
         if args.apply:
+            if READONLY:
+                print("[只读] 记忆库当前只读，无法沉淀梦境结果。", file=sys.stderr)
+                return 3
             path = Path(args.apply)
             if not path.exists():
                 print(f"找不到整理结果文件：{path}", file=sys.stderr)
@@ -3783,6 +3835,10 @@ def _main(argv=None) -> int:
             except ValueError as e:
                 print(str(e), file=sys.stderr)
                 return 2
+            if args.dry_run:
+                print(json.dumps(result, ensure_ascii=False, indent=2)[:4000])
+                print("\n（--dry-run：只预览将沉淀的内容，未落盘）")
+                return 0
             applied = apply_dream(result)
             print(f"梦已沉淀：新增长期记忆 {applied['memories']} 条，遗忘 {applied['forgotten']} 条")
             if applied["rejected"]:
@@ -4559,8 +4615,15 @@ def _main(argv=None) -> int:
                       file=sys.stderr)
                 return 2
             ensure_home()
+            need_nl = False
+            if path.exists():
+                try:
+                    tail = path.read_text(encoding="utf-8-sig")
+                    need_nl = bool(tail) and not tail.endswith("\n")
+                except OSError:
+                    need_nl = False
             with open(path, "a", encoding="utf-8") as f:
-                f.write(text + "\n")
+                f.write(("\n" if need_nl else "") + text + "\n")
             print(f"已追加规则（{path}）：{text}")
             print("从下一个会话注入开始生效；当前可用 `inject` 立即看到。")
             return 0

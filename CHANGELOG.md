@@ -2,6 +2,47 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.7 — 全面审查完善：健壮性 + 只读门控统一 + 错误修复
+
+对全部脚本与文档做了一次系统的自我审查，按"真影响使用"筛选修复：
+
+**换库与档案安全**
+
+- `--home` 换数据目录时，`assoc` / 人格快照 / `daily` 状态随新目录重算（此前会写错旧库）。
+- 本地 JSON 统一用 `utf-8-sig` 兼容 BOM；`persona.json` 损坏时先备份 `.corrupt-{时间戳}` 再重建，绝不静默覆盖。
+- `persona rollback` 对 onboarding 这类字典字段做类型保护（防注入崩溃）；`persona restore` 快照名清洗统一、恢复前自动备份当前人格。
+- `home move` 提前拒绝与当前目录相同 / 搬到当前目录内部的请求（防边复制边膨胀）。
+
+**只读门控（readonly）三处统一**
+
+- brain.py 写命令列表补全：`work done`、`config set/unset`、`sync`（非 dry-run）、带名字的 `emotion desire`、带参数的 `emotion config`。
+- growth.py 加统一只读门控：knowledge / note / skill / ext / evolve / learn 的写命令在只读时统一返回 3（此前只有 ext 单独挡）。
+- panel_server.py 22 个写端点加只读 403 拦截；启动时探测只读 + 端口占用友好报错。
+
+**行为修复**
+
+- `_is_lingshu` 只认名字叫「灵枢」的技能才是本体（不再因 `origin` 含"灵枢"误判），AI 自建技能安装不再被风险确认卡死。
+- `dream --apply` 只读时返回 3、`--dry-run` 只预览不落盘。
+- work 模式情绪隔离修复：只读身份注入不再带情绪段。
+- `add_knowledge` 合并时跳过已废弃条目；`tidy` 去重防误删基础记录。
+- `emotion adjust/del/cool` 统一走并发锁；非法情绪名报错不静默。
+- `save_all` 未知层归入海马体；`user-rules add` 末尾补换行防粘连。
+- `skill use --auto` 只装一次（此前重复二次 install）；`skill/knowledge rm` 缺失时错误码统一。
+- `startup` 等提取最近条目按时间倒序（此前显示最旧）；成长指标同理。
+
+**扩展模块**
+
+- 扩展模块注册进 `sys.modules`（@dataclass/pickle 可跨模块用）；语法检查改用内置 `compile`，不再落 `__pycache__`；`inject` 输出截断 800 字符；捕获 `BaseException` 防 `sys.exit` 杀进程。
+- `ext new` 模板的 DESC 引号转义（不再生成坏 Python）。
+
+**文档同步**
+
+- `docs/commands.md`：删幽灵命令 `persona edit` / `config get`；补 `user-rules` / `ext` / `assoc unlink` / `work status|list` / `note list|show`。
+- `README.md`：更新 persona 行、补数据目录树（assoc/desires/快照等）、标注版本。
+- `SKILL-lite.md` / `SKILL-tiny.md`：`persona edit`→`set`、补审核闸提示、版本同步、修正漏字。
+- `docs/mechanics.md`：删掉不存在的"新增记忆 ≥15 条"做梦触发条件、TOC 补扩展模块。
+- `SKILL.md`：版本号 2.6→2.7、数据位置清单补全、`startup --budget` 注明。
+
 ## v2.6 — 扩展模块：AI 自己写进灵枢的可执行钩子
 
 技能（`skill`）= 说明书（给别人复用）；扩展模块（`ext`）= 代码（AI 自己写进灵枢引擎的 Python 钩子），更自由：
