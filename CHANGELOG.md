@@ -2,6 +2,12 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.2 — 技能自更新流程
+
+- 新增「更新灵枢技能」：SKILL.md 内置一键更新流程（gitee 仓库拉取 → 版本对照 → 覆盖技能文件 → 自检），对 AI 说「更新灵枢技能」即可执行。
+- 主仓库：<https://gitee.com/htmcwy_0/lingshu-skill>　镜像：<https://github.com/266767398/lingshu-skill>。
+- 更新只替换技能本体文件，记忆数据（`~/.brain-memory/`）不受影响。
+
 ## v2.0 — 类人机制 + 工程化补强
 
 ### 新的核心机制（"更像人"）

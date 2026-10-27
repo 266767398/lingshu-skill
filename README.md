@@ -30,6 +30,7 @@
 - [模型适配与档位](#模型适配与档位)
 - [接入大模型（Ollama 示例）](#接入大模型ollama-示例)
 - [规模上限与归档](#规模上限与归档)
+- [如何更新灵枢](#如何更新灵枢)
 - [快速开始](#快速开始)
 - [命令速查](#命令速查)
 - [项目结构](#项目结构)
@@ -215,6 +216,22 @@ SYSTEM """你运行在本地，有记忆系统「灵枢」。每轮先按需执�
 - `dream` 会自动把一批短期记忆打包喂给模型，短期记忆越多，当次 token 消耗越大。
 
 **建议的养生方案**：每周一次 `backup`（默认保留最近 20 份，自动修剪）；长期不用的旧记忆用 `forget` 移入淡忘区（只留残余轮廓，不占活跃匹配）；知识库定期 `knowledge review` 确认。真到数据膨胀影响手感的层级，把 `--home` 指向新目录再 `restore` 最近备份，旧目录留档。
+
+## 如何更新灵枢
+
+**主仓库：<https://gitee.com/htmcwy_0/lingshu-skill>**　镜像：<https://github.com/266767398/lingshu-skill>
+
+对 AI 说一句「**更新灵枢技能**」即可，它会按 `SKILL.md` 的「更新灵枢技能」流程执行。手动更新也简单：
+
+```bash
+DIR="$HOME/.cache/灵枢-skill"
+if [ -d "$DIR/.git" ]; then git -C "$DIR" pull; else git clone --depth 1 https://gitee.com/htmcwy_0/lingshu-skill.git "$DIR"; fi
+# 然后把这些覆盖到技能目录：SKILL.md SKILL-lite.md SKILL-tiny.md README.md CHANGELOG.md assets/ scripts/ start-panel.bat
+```
+
+- 更新只替换**技能本体文件**；记忆数据在 `~/.brain-memory/`，**不会动**。
+- 更新前可对照 `CHANGELOG.md` 看这次改了什么；更新后跑一次 `python scripts/brain.py stats` 自检。
+- 没有 git 的机器：到仓库页面下载 ZIP，解压后手动覆盖同名文件即可。
 
 ## 快速开始
 
