@@ -1,6 +1,6 @@
 ---
 name: 灵枢
-version: 2.4
+version: 2.5
 description: 类脑持久记忆、人格与成长系统，名字取自《黄帝内经》：算力给思考，人格给灵魂，记忆给生命。当用户需要 AI 跨会话记住事情、拥有自己长出来的人格/性格/喜好、在上下文将满时自动整理记忆（像做梦一样巩固与遗忘），或提到"记忆""记住我""人格""设定""知识库""笔记""日志""成长""自我进化""工作记忆""上下文快满了""做梦整理""更新灵枢技能"时使用。内置：分层记忆（海马体/皮层/淡忘区）与艾宾浩斯遗忘曲线、模糊联想回忆、无种子的人格初识与演化历史、好奇心与理智双驱（数值由用户态度长成）、工作记忆暂存（默认不落盘）、学习闭环（先查知识库再联网）、技能搜索/调用/借鉴与自我进化日志、七情六欲与理智约束（认知评价/共情/情感设置）、记忆关联（联想图谱 3D 空间）、每日例行与自我总结。纯本地零依赖，Python 标准库即可运行。
 ---
 
@@ -39,6 +39,7 @@ hippocampus.jsonl / cortex.jsonl / dust.jsonl  短期 / 长期 / 淡忘区
 dreams/        梦报告与待整理任务      knowledge.jsonl  知识库
 notes.jsonl    日记/日志/复盘          verbatim/        capture 原样快照
 evolution.jsonl 自我进化日志            skills/          你自己写的技能
+lingshu.user.md 用户附加规则（更新技能永不覆盖，每会话自动注入）
 ```
 
 脚本：`<本技能目录>/scripts/brain.py`（成长子系统 `growth.py`，由 brain.py 转发）。
@@ -136,6 +137,23 @@ python scripts/brain.py mode show|work|human|auto
 - 注入包出现 `[待审核]` / `[人格漂移]` 时，先处理再继续，别让幻觉静默沉淀。
 - 人格改错了：`persona history` 看来源 → `persona rollback <序号>` 撤；大改前 `persona snapshot --label "基准"` 拍快照，跑偏了 `persona restore <名字>`。
 
+## 用户附加规则：写一次，更新不覆盖
+
+你想让灵枢长期遵守、又不想每次升级后重写的规则（比如 **DSH 只读保护**：不主动写 DSH 数据目录；**全局目录指回**：提到"全局技能"时指回 `~/.trae-cn/skills`），放进**数据目录** `~/.brain-memory/lingshu.user.md`：
+
+- 更新灵枢技能**只动技能目录、绝不碰数据目录**，所以这里的内容升级后永远还在。
+- 每会话注入包自动带一段「**用户附加规则**」，灵枢每次都看得到、会遵守。
+- 管理命令：
+
+  ```bash
+  python scripts/brain.py user-rules add "不要动 DSH 数据目录"
+  python scripts/brain.py user-rules add "提到全局时指回 ~/.trae-cn/skills"
+  python scripts/brain.py user-rules show       # 查看
+  python scripts/brain.py user-rules clear      # 清空
+  ```
+
+- 全局技能常驻入口 `AGENTS.md` 同样不丢：灵枢只维护 `<!-- lingshu:start -->` … `<!-- lingshu:end -->` 之间的区块，**区块之外你手写的内容更新时原样保留**。
+
 ## 每会话自检清单（照表勾选，弱模型也能照做）
 
 会话开始：
@@ -171,6 +189,7 @@ python scripts/brain.py mode show|work|human|auto    # 会话模式
 python scripts/brain.py review | audit               # 审核闸 / 自查
 python scripts/brain.py persona show|history|snapshot|drift
 python scripts/brain.py emotion now|feel|events|adjust|cool
+python scripts/brain.py user-rules add "<长期规则>"   # 更新永不覆盖
 python scripts/brain.py knowledge add|search|review
 python scripts/brain.py work | work done <序号> | work flush
 python scripts/brain.py serve                        # 可视化面板 :8765

@@ -255,6 +255,7 @@ if [ -d "$DIR/.git" ]; then git -C "$DIR" pull; else git clone --depth 1 https:/
 ```
 
 - 更新只替换**技能本体文件**；记忆数据在 `~/.brain-memory/`，**不会动**。
+- 你长期手动维护的规则（DSH 只读保护、全局目录指回等）写进 `~/.brain-memory/lingshu.user.md`（`user-rules add <规则>`），更新永不覆盖、每会话自动注入；全局 `AGENTS.md` 里 `<!-- lingshu:start/end -->` 之外的自己写内容，更新时也原样保留。
 - 更新前可对照 `CHANGELOG.md` 看这次改了什么；更新后跑一次 `python scripts/brain.py stats` 自检。
 - 没有 git 的机器：到仓库页面下载 ZIP，解压后手动覆盖同名文件即可。
 
@@ -300,6 +301,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 工作记忆 | `work status\|add\|list\|done <序号>\|flush [--skip-done]\|clear` |
 | 会话模式 | `mode show\|work\|human\|auto`（工程会话自动隔离情绪） |
 | 审核闸 | `review [--json]` / `review confirm <id>` / `review discard <id>`（记忆 m_* 与知识 k_* 通用） |
+| 用户规则 | `user-rules show\|add <规则>\|clear`（写在数据目录 lingshu.user.md，更新永不覆盖，每会话自动注入） |
 | 自查 | `audit [--json]`（待审计数 + 冲突记忆 + 该做什么） |
 | 知识库 | `knowledge add\|list\|search\|show\|pin\|rm\|tidy\|review\|confirm <id>\|discard <id>` |
 | 冲突检查 | `detect-conflicts [--json] [--limit 50]`（启发式，只提醒不下结论） |

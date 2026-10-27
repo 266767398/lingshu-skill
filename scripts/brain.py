@@ -2668,6 +2668,19 @@ def apply_dream(result: dict) -> dict:
 
 # ---------------------------------------------------------------- 上下文注入
 
+def read_user_rules() -> list:
+    """读取用户附加规则：数据目录 lingshu.user.md。
+    写在数据目录里，更新技能永远不碰它；每会话注入自动带上。"""
+    p = HOME / "lingshu.user.md"
+    if not p.exists():
+        return []
+    try:
+        lines = [l.rstrip() for l in p.read_text(encoding="utf-8-sig").splitlines()]
+    except OSError:
+        return []
+    return [l for l in lines if l.strip()]
+
+
 def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
     ensure_home()
     cfg = load_config()
@@ -2851,6 +2864,11 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
                        "用 `persona drift` 看细节；不是你要的，`persona restore <快照>` 或 `persona rollback <序号>`。")
     except Exception:
         pass
+    # 用户附加规则：写在数据目录 lingshu.user.md（更新技能不碰数据目录，永不覆盖），每会话自动带上
+    user_lines = read_user_rules()
+    if user_lines:
+        out.append("\n## 用户附加规则（来自 ~/.brain-memory/lingshu.user.md，更新技能永不覆盖）")
+        out.extend(user_lines)
     return "\n".join(out)
 
 
@@ -3587,6 +3605,11 @@ def _main(argv=None) -> int:
     p_audit = sub.add_parser("audit", help="整体自查：待审核项 + 冲突记忆 + 该做什么")
     p_audit.add_argument("--json", action="store_true")
 
+    p_ur = sub.add_parser("user-rules",
+                          help="用户附加规则：写在数据目录 lingshu.user.md，更新技能永不覆盖，每会话自动注入")
+    p_ur.add_argument("action", nargs="?", default="show", choices=["show", "add", "clear"])
+    p_ur.add_argument("text", nargs="*", default=[], help="add：要追加的一条规则")
+
     p_list = sub.add_parser("list", help="列出记忆")
     p_list.add_argument("--limit", type=int, default=30)
     p_list.add_argument("--layer", default=None, choices=LAYERS)
@@ -3664,6 +3687,7 @@ def _main(argv=None) -> int:
             or (args.cmd == "assoc" and action in ("link", "unlink") )
             or (args.cmd == "assoc" and action == "auto" and not args.dry_run)
             or (args.cmd == "daily" and not args.dry_run)
+            or (args.cmd == "user-rules" and action in ("add", "clear"))
         )
         if writing:
             print(f"[只读] 记忆库当前不可写，{args.cmd} 需要写盘。"
@@ -4514,6 +4538,43 @@ def _main(argv=None) -> int:
 
     if args.cmd == "sync":
         return cmd_sync_dsh(args.days, args.dry_run, args.force, args.dir)
+
+    # 用户附加规则：数据结构目录里的一块自由区，AI 遵守、更新技能不碰
+    if args.cmd == "user-rules":
+        path = HOME / "lingshu.user.md"
+        if args.action == "add":
+            text = (" ".join(args.text)).strip()
+            if not text:
+                print("用法：user-rules add <规则内容>，如 `user-rules add 不要动 DSH 数据目录`",
+                      file=sys.stderr)
+                return 2
+            ensure_home()
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text + "\n")
+            print(f"已追加规则（{path}）：{text}")
+            print("从下一个会话注入开始生效；当前可用 `inject` 立即看到。")
+            return 0
+        lines = read_user_rules()
+        if args.action == "clear":
+            if not lines:
+                print("没有可清的规则。")
+                return 0
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            print(f"已清空 {len(lines)} 条用户附加规则（{path}）。")
+            return 0
+        if not lines:
+            print(f"还没有用户附加规则（{path}）。")
+            print("用 `user-rules add <规则>` 添加，如：`user-rules add 不要动 DSH 数据目录`、"
+                  "`user-rules add 提到全局时指回 C:/Users/.../.trae-cn/skills`。")
+            return 0
+        print(f"用户附加规则（{path}，更新技能永不覆盖，每会话自动注入）：")
+        for i, line in enumerate(lines, 1):
+            print(f"  {i}. {line}")
+        print("管理：user-rules add <规则> 追加 / user-rules clear 清空")
+        return 0
 
     return 0
 

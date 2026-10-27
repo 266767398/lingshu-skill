@@ -793,9 +793,14 @@ def list_skills() -> list:
     return sorted(out, key=lambda x: x["updated"], reverse=True)
 
 
-def _agents_md(name: str, description: str, meta: dict) -> str:
-    """给全局技能生成 AGENTS.md：DSH/DeepSeek 生态的常驻入口。
-    只写「何时用 / 怎么调 / 在哪」，不复制 SKILL.md 正文。"""
+AGENTS_BLOCK_START = "<!-- lingshu:start -->"
+AGENTS_BLOCK_END = "<!-- lingshu:end -->"
+# 旧版（无区块标记）生成文件的可识别签名：命中说明整文件都是灵枢生成的，没有用户手写内容
+_LEGACY_AGENTS_SIGNATURE = "由灵枢在全局化时生成"
+
+
+def _agents_rules(name: str, description: str, meta: dict) -> str:
+    """AGENTS.md 里由灵枢维护的规则正文（区块内部，不含标题与标记）。"""
     entry = ""
     src_dir = SKILLS_DIR / name
     if (src_dir / "scripts").is_dir():
@@ -805,10 +810,6 @@ def _agents_md(name: str, description: str, meta: dict) -> str:
     elif any(src_dir.glob("*.py")):
         entry = "、".join(f"`python {p.name}`" for p in sorted(src_dir.glob("*.py"))[:4])
     lines = [
-        f"# {name}",
-        "",
-        f"<!-- 常驻层：由灵枢在全局化时生成。规则 1-3 行、自包含。正文见同目录 SKILL.md。 -->",
-        "",
         f"**何时用**：{description}",
         "",
         "**怎么用**：先读同目录 `SKILL.md`，按其中的步骤执行；有 `scripts/` 就直接调用。",
@@ -816,7 +817,72 @@ def _agents_md(name: str, description: str, meta: dict) -> str:
     if entry:
         lines.append(f"**入口**：{entry}")
     lines += ["", f"**来源**：{meta.get('origin', '灵枢')}　**版本**：{meta.get('version', 1)}"]
+    return "\n".join(lines)
+
+
+def _agents_md(name: str, description: str, meta: dict) -> str:
+    """给全局技能生成 AGENTS.md：DSH/DeepSeek 生态的常驻入口。
+    只写「何时用 / 怎么调 / 在哪」，不复制 SKILL.md 正文。
+    生成内容用 <!-- lingshu:start/end --> 区块包裹：更新时只替换这个区块，
+    区块之外的用户手写内容（如 DSH 只读保护、全局目录指回）永远保留。"""
+    rules = _agents_rules(name, description, meta)
+    lines = [
+        f"# {name}",
+        "",
+        "<!-- 常驻层：由灵枢在全局化时生成。两条注释标记之间的内容每次更新会整块替换；",
+        "     标记之外的部分是你自己的，更新永不覆盖（可写 DSH 只读保护、全局目录指回等）。 -->",
+        "",
+        AGENTS_BLOCK_START,
+        rules,
+        AGENTS_BLOCK_END,
+    ]
     return "\n".join(lines) + "\n"
+
+
+def _looks_generated(text: str) -> bool:
+    """旧版无标记文件是否「整份都是灵枢生成的」——只有这样才能安全整体替换。
+    任何一行不属于生成结构，就说明用户手写过，必须保留。"""
+    if _LEGACY_AGENTS_SIGNATURE not in text:
+        return False
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if (s.startswith("#") or s.startswith("**何时用**") or s.startswith("**怎么用**")
+                or s.startswith("**入口**") or s.startswith("**来源**") or s.startswith("**版本**")
+                or _LEGACY_AGENTS_SIGNATURE in s):
+            continue
+        return False
+    return True
+
+
+def _upsert_agents_block(path: Path, generated: str) -> str:
+    """区块化更新 AGENTS.md，返回 'written' / 'updated' / 'merged'。
+
+    - 文件不存在：直接写生成版。
+    - 有 <!-- lingshu:start/end --> 标记：只替换标记之间的内容，标记外原样保留。
+    - 无标记但整份可识别为旧版生成文件：整体替换（里面没有用户内容）。
+    - 无标记且含用户手写：把灵枢区块插到最前面，原内容整体保留在下方。
+    """
+    if not path.exists():
+        path.write_text(generated, encoding="utf-8")
+        return "written"
+    old = path.read_text(encoding="utf-8")
+    i = old.find(AGENTS_BLOCK_START)
+    if i >= 0:
+        j = old.find(AGENTS_BLOCK_END, i + len(AGENTS_BLOCK_START))
+        if j >= 0:
+            block = generated[generated.find(AGENTS_BLOCK_START):]
+            new = old[:i] + block.rstrip("\n") + old[j + len(AGENTS_BLOCK_END):]
+            if new != old:
+                path.write_text(new, encoding="utf-8")
+            return "updated"
+    # 旧版无标记：整份都是生成的才整体替换；否则视为含用户手写，插在最前面
+    if _looks_generated(old):
+        path.write_text(generated, encoding="utf-8")
+        return "updated"
+    path.write_text(generated.rstrip("\n") + "\n\n" + old.lstrip("\n"), encoding="utf-8")
+    return "merged"
 
 
 def _is_lingshu(name: str, meta: dict, from_dir: str | None = None) -> bool:
@@ -902,10 +968,15 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
         target = dst_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(item, target)
-    # AGENTS.md：DSH/DeepSeek 常驻入口（不覆盖用户已有的同名文件，除非 force）
+    # AGENTS.md：DSH/DeepSeek 常驻入口。
+    # 区块化维护：灵枢只写 <!-- lingshu:start/end --> 之间的规则，
+    # 用户手写部分（DSH 只读保护、全局目录指回等）更新永不覆盖。
     agents = dst_dir / "AGENTS.md"
-    if force or not agents.exists():
-        agents.write_text(_agents_md(name, meta.get("description", ""), meta), encoding="utf-8")
+    generated = _agents_md(name, meta.get("description", ""), meta)
+    if not agents.exists():
+        agents.write_text(generated, encoding="utf-8")
+    elif force:
+        _upsert_agents_block(agents, generated)
 
     reg = load_registry()
     reg.setdefault(name, {})["installed_at"] = brain.now_ts()
