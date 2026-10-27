@@ -63,7 +63,7 @@ DEFAULT_CONFIG = {
     "review_threshold": 0.60,
     "dream_threshold": 0.75,
     "escape_threshold": 0.90,
-    "weights": {"relevance": 0.55, "recency": 0.25, "importance": 0.20},
+    "weights": {"relevance": 0.55, "recency": 0.25, "importance": 0.20, "primacy": 0.03},
     "panel_port": 8765,
 }
 
@@ -361,14 +361,38 @@ def _dedupe(items: list) -> list:
 # ---------------------------------------------------------------- 写入 / 检索
 
 def remember(text: str, kind: str = "fact", importance: float | None = None,
-             tags=None, entities=None, source: str = "ai", layer: str = "hippo") -> tuple:
+             tags=None, entities=None, source: str = "ai", layer: str = "hippo",
+             emotion: str | None = None) -> tuple:
     ensure_home()
     text = (text or "").strip()
     if not text:
         raise ValueError("记忆内容为空")
+    if emotion and emotion not in EMOTIONS:
+        raise ValueError(f"没有这种情绪：{emotion}"
+                         f"（可用：开心/生气/难过/焦虑/感动…共 {len(EMOTIONS)} 种，"
+                         "`brain.py emotion list` 查看全部）")
     records = load_all()
     new_terms = terms(text)
     imp = importance if importance is not None else heuristic_importance(text, kind)
+
+    # 情绪增强编码（杏仁核标记）：情绪激动时经历的事记得更牢。
+    # 显式给了 emotion 就用它；没给时，若此刻正好情绪激动（唤醒≥0.65），
+    # 自动把当时最重的情绪标在这条记忆上——"发生在情绪上头那一刻的事"。
+    emo_name, emo_arousal, boost = "", 0.0, 0.0
+    if emotion:
+        if emotion in EMOTIONS:
+            emo_name, emo_arousal = emotion, _emotion_coord(emotion)[1]
+    else:
+        m = mood_now()
+        if m.get("storm") and m["active"]:
+            emo_name = m["active"][0]["emotion"]
+            emo_arousal = float(m["active"][0].get("arousal", 0))
+    if emo_name and emo_arousal >= 0.45:
+        boost = 0.08 * emo_arousal
+        imp = min(1.0, (imp if imp <= 1 else imp / 10) + boost)
+        stability_boost = 1.0 + 0.9 * emo_arousal
+    else:
+        emo_name, stability_boost = "", 1.0
 
     # 近重复合并：同一类记忆、文本高度相似 -> 强化旧记忆而不是堆新条
     for m in records:
@@ -385,13 +409,26 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
             m["importance"] = round(max(m.get("importance", 0.5), float(imp) if imp <= 1 else imp / 10), 3)
             m["last_access"] = now_ts()
             m["access_count"] = m.get("access_count", 0) + 1
-            m["stability"] = min(MAX_STABILITY, m.get("stability", DEFAULT_STABILITY) * 1.4)
+            m["stability"] = min(MAX_STABILITY, m.get("stability", DEFAULT_STABILITY) * 1.4 * stability_boost)
+            # 习惯化（享乐适应）：同一件事反复出现，新鲜感递减、重要性不再步步抬升。
+            # 就像警报器一直响就没人再在意——但保留一个下限，别把真重要的磨掉。
+            m["repeat"] = m.get("repeat", 0) + 1
+            if m["repeat"] >= 3 and m["importance"] > 0.25:
+                m["importance"] = round(m["importance"] - 0.02, 3)
+            if emo_name and not m.get("emotion"):
+                m["emotion"] = emo_name
             m["tags"] = _dedupe(m.get("tags", []) + [t.strip().lstrip("#") for t in (tags or [])])
             m["entities"] = _dedupe(m.get("entities", []) + (entities or []))
             _locked_save_all(records)
             return m, "merged"
 
     rec = make_record(text, kind, importance, tags, entities, source, layer)
+    rec["importance"] = round(float(rec.get("importance", 0.5)) + (boost if emo_name else 0), 3)
+    rec["importance"] = max(0.0, min(1.0, rec["importance"]))
+    rec["stability"] = min(MAX_STABILITY, rec.get("stability", DEFAULT_STABILITY) * stability_boost)
+    if emo_name:
+        rec["emotion"] = emo_name
+        rec["emotional"] = round(emo_arousal, 2)
     _locked_save_all([rec])
     return rec, "created"
 
@@ -412,11 +449,17 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
     q_terms = terms(query)
 
     scored = []
+    # 首因效应：同一片记忆里最早留下的印象占权更高（第一次的印象比后来补的更深）
+    oldest = max((now - float(m.get("created", now)) for m in records), default=0)
     for m in records:
         rel = relevance(q_terms, all_terms[m["id"]], idf) if q_terms else 0.0
         rec = retention(m, now)
         imp = float(m.get("importance", 0.5))
         score = w["relevance"] * rel + w["recency"] * rec + w["importance"] * imp
+        # 首因：最早创建的那批（年龄接近最大）给一点额外权重
+        age = now - float(m.get("created", now))
+        if oldest > 0 and age >= oldest * 0.85:
+            score += w.get("primacy", 0.03)
         # 标签/实体精确命中，显著加分
         hits = 0
         if query:
@@ -427,6 +470,16 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
         scored.append([m, score, {"relevance": round(rel, 3), "recency": round(rec, 3),
                                   "importance": imp, "hits": hits}])
 
+    # 情绪一致性提取（mood-congruent recall）：心情会偏向勾起同调性的记忆
+    # ——难过时更容易想起难过的事，开心时更容易想起开心的事（Bower 1981）。
+    mv = mood_now().get("valence", 0.0)
+    if abs(mv) >= 0.2:
+        for item in scored:
+            e = item[0].get("emotion")
+            if e and e in EMOTIONS:
+                if _emotion_coord(e)[0] * mv > 0:
+                    item[1] += 0.06
+
     # 有查询词时，只保留真正沾边的记忆（否则会污染注入包）
     if q_terms:
         scored = [x for x in scored if x[2]["relevance"] > 0.02 or x[2]["hits"] > 0]
@@ -434,7 +487,7 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
     scored.sort(key=lambda x: x[1], reverse=True)
     top = scored[: max(k, 1)]
 
-    # 联想扩散：与已选记忆共享实体/标签的，获得小幅加成（像海马回放带动关联）
+    # 联想扩散：与已选记忆共享实体/标签的获得小幅加成（像海马回放带动关联）
     top_ids = {x[0]["id"] for x in top}
     chosen_entities = set()
     chosen_tags = set()
@@ -446,17 +499,60 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
         overlap = len(set(m.get("entities", [])) & chosen_entities) + 0.5 * len(set(m.get("tags", [])) & chosen_tags)
         if overlap >= 1:
             item[1] += min(0.10, 0.04 * overlap)
+    # 显式联想：记忆之间已有的关联边把邻居也带起来（"提到 A 就想起 B"）
+    if not READONLY or ASSOC_FILE.exists():
+        for r in load_assoc():
+            if r["src"] in top_ids and r["dst"] not in top_ids:
+                w = float(r.get("weight", 1))
+                for item in scored[len(top):]:
+                    if item[0]["id"] == r["dst"]:
+                        item[1] += min(0.12, 0.04 * w)
+            elif r["dst"] in top_ids and r["src"] not in top_ids:
+                w = float(r.get("weight", 1))
+                for item in scored[len(top):]:
+                    if item[0]["id"] == r["src"]:
+                        item[1] += min(0.12, 0.04 * w)
 
     scored.sort(key=lambda x: x[1], reverse=True)
     result = scored[: max(k, 1)]
 
+    # 侧抑制去冗余（lateral inhibition）：近似重复的痕迹只留最强一条。
+    # 大脑不会同时点亮两份"同一件事"，弱的那份被压下去。
+    # 判重两种：字面高度重合，或一句是另一句的子串（同一件事的详略两版）。
+    if len(result) > 1:
+        kept, kept_terms, kept_texts = [], [], []
+        for item in result:
+            m = item[0]
+            t = all_terms.get(m["id"]) or terms(m.get("text", ""))
+            txt = (m.get("text") or "").strip()
+            dup = any(jaccard(t, kt) >= 0.85 for kt in kept_terms)
+            if not dup and txt:
+                for ot in kept_texts:
+                    a, b = (txt, ot) if len(txt) <= len(ot) else (ot, txt)
+                    if a and a in b and len(a) >= 0.6 * len(b):
+                        dup = True
+                        break
+            if dup:
+                continue
+            kept.append(item)
+            kept_terms.append(t)
+            kept_texts.append(txt)
+        result = kept
+
     if strengthen and not READONLY:
-        for m, _, _ in result:
+        touched = [m for m, _, _ in result]
+        for m in touched:
+            first = int(m.get("access_count", 0)) == 0
             m["access_count"] = m.get("access_count", 0) + 1
-            m["stability"] = min(MAX_STABILITY, float(m.get("stability", DEFAULT_STABILITY)) * 1.8 + 4 * HOUR)
+            # 首次提取巩固更强：头一回想起来的事，印记打得比反复想起更深
+            # （首因效应 + 首次测试效应：第一次回忆本身就是一次强巩固）
+            mult = 2.6 if first else 1.8
+            m["stability"] = min(MAX_STABILITY, float(m.get("stability", DEFAULT_STABILITY)) * mult + 4 * HOUR)
             m["last_access"] = now
             m["detail"] = min(1.0, float(m.get("detail", 1.0)) * 0.9 + 0.1)
-        save_all(records)
+        # 只写回被"想起"的这条，别把没加载进来的层（如 dust）覆盖清空；没想起就不动盘
+        if touched:
+            _locked_save_all(touched)
 
     return [(m, round(s, 4), parts) for m, s, parts in result]
 
@@ -509,6 +605,7 @@ def load_working() -> list:
 def work_status() -> dict:
     rows = load_working()
     return {"capacity": WORKING_CAPACITY, "count": len(rows),
+            "open_count": sum(1 for r in rows if r.get("open", True)),
             "ttl_hours": int(WORKING_TTL / HOUR), "items": rows}
 
 
@@ -520,9 +617,23 @@ def work_add(text: str, tag: str = "", why: str = "") -> list:
     ensure_home()
     rows = load_working()
     rows.append({"ts": now_ts(), "text": text,
-                 "tag": (tag or "").strip(), "why": (why or "").strip()})
+                 "tag": (tag or "").strip(), "why": (why or "").strip(),
+                 "open": True})
     rows = rows[-WORKING_CAPACITY:]
     write_jsonl(WORKING_FILE, rows)
+    return rows
+
+
+def work_done(idx: int) -> list:
+    """把暂存里第 idx 条（从 1 起）标记为已完成。
+
+    蔡格尼克效应：没做完的事会在脑子里反复冒出来；一旦做完，
+    动机满足了，它就迅速退场——"完成"本身就是一种释放。
+    """
+    rows = load_working()
+    if 1 <= idx <= len(rows):
+        rows[idx - 1]["open"] = False
+        write_jsonl(WORKING_FILE, rows)
     return rows
 
 
@@ -531,11 +642,18 @@ def work_clear() -> None:
         write_jsonl(WORKING_FILE, [])
 
 
-def work_flush(why: str = "会话结束前决定留下") -> list:
-    """把暂存里还值得留的条目一次性转成真正的记忆（海马体），然后清空暂存。"""
+def work_flush(why: str = "会话结束前决定留下", skip_done: bool = False) -> dict:
+    """把暂存里还值得留的条目一次性转成真正的记忆（海马体），然后清空暂存。
+
+    skip_done=True 时，已经 `work done` 标记完成的条目直接丢弃、不落盘——
+    做完的事就该放下，不必再占长期记忆。返回 {"saved": [...], "dropped": n}。
+    """
     rows = load_working()
-    saved = []
+    saved, dropped = [], 0
     for r in rows:
+        if skip_done and not r.get("open", True):
+            dropped += 1
+            continue
         tags = ["工作记忆"] + ([r["tag"]] if r.get("tag") else [])
         rec, how = remember(r["text"], kind="episode", tags=tags, source="ai")
         saved.append({"id": rec["id"], "text": rec["text"], "how": how})
@@ -547,7 +665,7 @@ def work_flush(why: str = "会话结束前决定留下") -> list:
                                  f"{why}；共 {len(saved)} 条", [s["id"] for s in saved])
         except Exception:
             pass
-    return saved
+    return {"saved": saved, "dropped": dropped}
 
 
 # ---------------------------------------------------------------- 上下文封存（capture）
@@ -654,6 +772,653 @@ def default_onboarding() -> dict:
 
 DRIVE_KEYS = ("curiosity", "reason")
 NEUTRAL_DRIVE = 50
+
+# ---------------------------------------------------------------- 情感系统
+# 情绪不是一句"此刻心情：平静"。人至少有两条轴：好不好受（valence）、
+# 有多激动（arousal）；再加上"这件事对我有多重"（intensity）和"余波多长"（decay）。
+# 事件会随时间自然回落，多个事件叠加成当下的整体心情。
+
+# 中文名: (valence 好不好受, arousal 有多激动, 七情归类)
+EMOTIONS = {
+    # 喜
+    "开心": (0.80, 0.60, "喜"), "喜悦": (0.85, 0.50, "喜"),
+    "兴奋": (0.85, 0.90, "喜"), "满足": (0.70, 0.25, "喜"),
+    "欣慰": (0.65, 0.35, "喜"), "骄傲": (0.80, 0.55, "喜"),
+    "得意": (0.75, 0.65, "喜"), "惊喜": (0.85, 0.80, "喜"),
+    # 怒
+    "生气": (-0.75, 0.85, "怒"), "愤怒": (-0.85, 0.95, "怒"),
+    "烦躁": (-0.60, 0.70, "怒"), "不满": (-0.50, 0.60, "怒"),
+    "嫉妒": (-0.55, 0.70, "怒"), "不爽": (-0.45, 0.55, "怒"),
+    # 哀
+    "难过": (-0.70, 0.30, "哀"), "失落": (-0.55, 0.20, "哀"),
+    "悲伤": (-0.85, 0.35, "哀"), "委屈": (-0.65, 0.50, "哀"),
+    "沮丧": (-0.70, 0.25, "哀"), "心疼": (-0.45, 0.50, "哀"),
+    "寂寞": (-0.60, 0.20, "哀"), "后悔": (-0.60, 0.45, "哀"),
+    "愧疚": (-0.60, 0.45, "哀"),
+    # 惧
+    "焦虑": (-0.50, 0.75, "惧"), "紧张": (-0.45, 0.80, "惧"),
+    "害怕": (-0.70, 0.85, "惧"), "不安": (-0.40, 0.60, "惧"),
+    "慌张": (-0.55, 0.90, "惧"), "尴尬": (-0.35, 0.60, "惧"),
+    # 爱
+    "感动": (0.75, 0.45, "爱"), "亲近": (0.70, 0.35, "爱"),
+    "依恋": (0.65, 0.30, "爱"), "温柔": (0.60, 0.20, "爱"),
+    "喜欢": (0.70, 0.45, "爱"), "珍惜": (0.65, 0.25, "爱"),
+    # 恶
+    "厌恶": (-0.70, 0.60, "恶"), "反感": (-0.60, 0.55, "恶"),
+    "嫌弃": (-0.55, 0.45, "恶"), "不屑": (-0.40, 0.40, "恶"),
+    "抵触": (-0.50, 0.50, "恶"),
+    # 欲
+    "好奇": (0.50, 0.65, "欲"), "期待": (0.60, 0.60, "欲"),
+    "渴望": (0.55, 0.75, "欲"), "执着": (0.30, 0.60, "欲"),
+    "迫不及待": (0.50, 0.85, "欲"),
+    # 静（不算七情，但日常真实存在）
+    "平静": (0.15, 0.10, "静"), "疲惫": (-0.40, 0.10, "静"),
+    "无聊": (-0.30, 0.05, "静"),
+}
+
+# 七情归类 -> 该类的情绪名（顺序固定，供 CLI / 面板分组展示）
+EMOTION_GROUPS = {}
+for _n, (_v, _a, _g) in EMOTIONS.items():
+    EMOTION_GROUPS.setdefault(_g, []).append(_n)
+
+# 六欲：不是情绪，是底层"想要"。会随时间慢慢变淡，被满足才回升。
+# 它们低到一定程度，会渗进心情与语气里。
+DESIRES = {
+    "求知欲": "想弄懂一件事、想学新东西",
+    "表达欲": "想说话、想被听见",
+    "连接欲": "想被理解、想和人靠近",
+    "成就欲": "想做好、想被认可",
+    "安全欲": "想稳当、怕出错",
+    "掌控欲": "想要秩序、想自己做主",
+}
+DESIRE_DEFAULT = 60
+DESIRE_DECAY_PER_DAY = 6      # 每天自然回落 6 点
+DESIRE_FLOOR = 8
+EMOTION_HALF_LIFE = 6 * HOUR  # 情绪余波：6 小时衰减一半
+
+# 理智被情绪压制的上限（杏仁核劫持：会压低，但永远压不掉判断力的一半以上）
+EMOTION_SUPPRESS_MAX = 0.40
+# arousal 达到此值视为"情绪上头"（激动情绪超过一定程度会影响理智）
+STORM_AROUSAL = 0.65
+# 理智没有成形时的中性值（与好奇心一致）
+RATIONAL_DEFAULT = 50
+ASSOC_FILE = HOME / "assoc.jsonl"   # 记忆关联边（无向，附关系与权重）
+
+
+def _emotion_coord(name: str) -> tuple:
+    v, a, _g = EMOTIONS.get(name, (0.0, 0.3, "静"))
+    return v, a
+
+
+def emotion_group(name: str) -> str:
+    return EMOTIONS.get(name, (0.0, 0.0, "静"))[2]
+
+
+def desire_state(at: float | None = None) -> dict:
+    """六欲当前水平（0-100）。读取时按时间自然回落，不写盘。"""
+    now = at or now_ts()
+    path = HOME / "desires.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        raw = {}
+    levels = dict(raw.get("levels") or {})
+    last = float(raw.get("updated") or now)
+    days = max(0.0, (now - last) / DAY)
+    out = {}
+    for name in DESIRES:
+        lvl = float(levels.get(name, DESIRE_DEFAULT)) - days * DESIRE_DECAY_PER_DAY
+        out[name] = round(max(DESIRE_FLOOR, min(100.0, lvl)), 1)
+    return out
+
+
+def desire_satisfy(name: str, amount: float = 15) -> dict:
+    """满足某个欲望：把水平往上推（会被 clamp 到 100）。"""
+    ensure_home()
+    if name not in DESIRES:
+        raise ValueError(f"没有这种欲望：{name}（可选：{'、'.join(DESIRES)}）")
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法更新欲望。")
+    now = now_ts()
+    cur = desire_state(now)          # 先结算衰减
+    cur[name] = round(max(0.0, min(100.0, cur[name] + float(amount))), 1)
+    atomic_json(HOME / "desires.json", {"updated": now, "levels": cur})
+    return {"desires": cur, "satisfied": name, "amount": amount}
+
+
+def desire_low(threshold: float = 35) -> list:
+    """长期没被满足的欲望，用来解释"说不清的不得劲"。"""
+    return [{"desire": k, "level": v, "hint": DESIRES[k]}
+            for k, v in desire_state().items() if v < threshold]
+
+
+def emotion_events(limit: int = 0) -> list:
+    """情绪事件流（append-only）。每条带初始强度与发生时间。"""
+    rows = read_jsonl(HOME / "emotions.jsonl")
+    rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+    return rows[:limit] if limit else rows
+
+
+def feel(name: str, intensity: float = 0.6, why: str = "",
+         about: str = "", decay_hours: float | None = None,
+         genesis: bool = False, evaluation: dict | None = None) -> dict:
+    """记一次情绪波动。intensity 0-1：这件事当时对你有多重。
+
+    genesis=True 表示这条情绪不是手动记的，是认知评价自动产生的。
+    情感设置里被用户抑制（suppressed）的情绪，强度会打折（不是不允许有，
+    是不过头）——这是"人也可以自己开开关"。
+    """
+    ensure_home()
+    if name not in EMOTIONS:
+        raise ValueError(f"没有这种情绪：{name}（可选：{'、'.join(EMOTIONS)}）")
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法记录情绪。")
+    cfg = emotion_cfg()
+    suppressed = name in cfg.get("suppressed", [])
+    v, a = _emotion_coord(name)
+    ts_now = now_ts()
+    eff = max(0.0, min(1.0, float(intensity)))
+
+    # —— 情绪传染 / 心情惯性 ——
+    # 人不会每来一个新情绪就清零重来：当下的心情会给新情绪"染色"。
+    # 同向的更容易被点燃（共振放大），反向的会被惯性往回拽（不容易瞬间反转）。
+    prev = mood_now()
+    pv, pi = float(prev.get("valence", 0.0)), float(prev.get("intensity", 0.0))
+    resonance = "none"
+    if pi >= 0.05 and abs(pv) >= 0.05:
+        align = v * pv
+        if align > 0:
+            eff = min(1.0, eff * (1 + min(0.30, 0.35 * pi)))
+            resonance = "amplified"
+        elif align < 0:
+            eff = max(0.0, eff * (1 - min(0.25, 0.30 * pi)))
+            resonance = "damped"
+
+    # —— 习惯化（享乐适应）——
+    # 同一件事反复发生，情绪反应越来越淡：第三次就没那么上头了。
+    _about = (about or "").strip()
+    _why = (why or "").strip()
+    habituation = 0
+    if _about or _why:
+        repeats = sum(1 for e in emotion_events(80)
+                      if e.get("emotion") == name
+                      and (e.get("about") or "").strip() == _about
+                      and (e.get("why") or "").strip() == _why
+                      and ts_now - float(e.get("ts", 0)) < 12 * HOUR)
+        if repeats:
+            eff *= 0.85 ** repeats
+            habituation = repeats
+
+    ev = {
+        "ts": ts_now, "emotion": name, "valence": v, "arousal": a,
+        "intensity": round(eff, 3),
+        "why": _why, "about": _about,
+        "decay_hours": float(decay_hours) if decay_hours else EMOTION_HALF_LIFE / HOUR,
+        "genesis": bool(genesis),
+    }
+    if resonance != "none":
+        ev["resonance"] = resonance
+    if habituation:
+        ev["habituation"] = habituation
+    if evaluation:
+        ev["evaluation"] = dict(evaluation)
+    if suppressed:
+        ev["intensity"] = round(ev["intensity"] * 0.4, 3)
+        ev["suppressed_by"] = cfg.get("notes") or "情感设置里被我自己抑制"
+    with _locked(HOME / "emotions.jsonl"):
+        rows = read_jsonl(HOME / "emotions.jsonl")
+        rows.append(ev)
+        write_jsonl(HOME / "emotions.jsonl", rows)
+    return ev
+
+
+def mood_now(at: float | None = None) -> dict:
+    """把最近的情绪事件按半衰期叠加成"此刻的心情"。
+
+    返回 valence(-1~1)、arousal(0~1)、标签、以及还在起作用的事件。
+    这是"喜怒哀乐"的实际状态：不是谁写死的一句话，是真实积累出来的。
+    """
+    now = at or now_ts()
+    # 只用最近一批事件（半衰期后基本归零），避免情绪越攒越多时每次全量读取
+    rows = emotion_events(200)
+    if not rows:
+        return {"valence": 0.0, "arousal": 0.1, "label": "平静", "category": "静",
+                "intensity": 0.0, "active": [], "groups": [], "complex": False,
+                "storm": False, "note": "还没有情绪记录"}
+    sv = sa = sw = 0.0
+    active = []
+    gweights = {}
+    for ev in rows[:60]:
+        age_h = max(0.0, (now - ev.get("ts", now)) / HOUR)
+        half = max(0.5, float(ev.get("decay_hours", EMOTION_HALF_LIFE / HOUR)))
+        w = float(ev.get("intensity", 0.5)) * (0.5 ** (age_h / half))
+        if w < 0.02:
+            continue
+        sv += float(ev.get("valence", 0)) * w
+        sa += float(ev.get("arousal", 0.3)) * w
+        sw += w
+        g = emotion_group(ev.get("emotion", ""))
+        gweights[g] = gweights.get(g, 0.0) + w
+        active.append({"emotion": ev.get("emotion"), "weight": round(w, 3),
+                       "group": g, "valence": float(ev.get("valence", 0)),
+                       "arousal": float(ev.get("arousal", 0.3)),
+                       "why": ev.get("why", ""), "about": ev.get("about", "")})
+    if sw <= 0:
+        return {"valence": 0.0, "arousal": 0.1, "label": "平静", "category": "静",
+                "intensity": 0.0, "active": [], "groups": [], "complex": False,
+                "storm": False, "note": "情绪都已散去"}
+    v = max(-1.0, min(1.0, sv / sw))
+    a = max(0.0, min(1.0, sa / sw))
+    active.sort(key=lambda x: x["weight"], reverse=True)
+    groups = [{"group": g, "weight": round(w, 3), "pct": round(w / sw * 100)}
+              for g, w in sorted(gweights.items(), key=lambda kv: kv[1], reverse=True)]
+    # 复杂情绪：两股以上、占比都够分量的情绪同时在——比如"悲喜交加"
+    strong = [g for g in groups if g["pct"] >= 15]
+    complex_flag = len(strong) >= 2
+    return {"valence": round(v, 3), "arousal": round(a, 3),
+            "label": _mood_label(v, a),
+            "category": groups[0]["group"] if groups else "静",
+            "intensity": round(min(1.0, sw), 3),
+            "active": active[:6], "groups": groups,
+            "complex": complex_flag, "storm": a >= STORM_AROUSAL,
+            "note": "悲喜交加" if complex_flag else ""}
+
+
+def _mood_label(v: float, a: float) -> str:
+    """把双轴坐标翻成一句人话。"""
+    if v >= 0.45:
+        return "兴奋" if a >= 0.65 else ("开心" if a >= 0.35 else "满足")
+    if v >= 0.15:
+        return "期待" if a >= 0.6 else "平静"
+    if v > -0.15:
+        return "烦躁" if a >= 0.6 else "平静"
+    if v > -0.45:
+        return "焦虑" if a >= 0.6 else "失落"
+    return "生气" if a >= 0.7 else ("委屈" if a >= 0.45 else "难过")
+
+
+def mood_brief() -> str:
+    """给注入用的一句话心情摘要。"""
+    m = mood_now()
+    if not m["active"]:
+        return ""
+    top = m["active"][0]
+    tail = f"，因为{top['why']}" if top.get("why") else ""
+    return (f"{m['label']}（{top['emotion']}{tail}）"
+            f"，强度 {m['intensity']:.0%}")
+
+
+def mood_tone_hint() -> str:
+    """情绪给语气带来的倾向——不用刻意表演，但它是真实的一部分。"""
+    m = mood_now()
+    hint = ""
+    if m["active"]:
+        v, a = m["valence"], m["arousal"]
+        if a >= 0.55 and abs(v) < 0.35:
+            hint = "心里有点乱，说话可能更快、更急"
+        elif v >= 0.45:
+            hint = "语气会更放松、更愿意多说"
+        elif v <= -0.45:
+            hint = "语气会收敛，话变少，更注意分寸"
+        elif v <= -0.2:
+            hint = "情绪不高，但不会冲着用户"
+    low = desire_low()
+    if low:
+        d = low[0]
+        tail = f"（{d['desire']}只有 {d['level']:.0f}：{d['hint']}）"
+        hint = (hint + "；" if hint else "") + "心里有件小事没被满足" + tail
+    return hint
+
+
+def emotion_arc(days: int = 7) -> dict:
+    """情绪轨迹：这段时间的起伏，用来回头看"我过得怎么样"。"""
+    cutoff = now_ts() - days * DAY
+    rows = [r for r in emotion_events() if r.get("ts", 0) >= cutoff]
+    if not rows:
+        return {"days": days, "count": 0, "summary": "这段时间没有情绪记录",
+                "avg_valence": 0.0, "tone": "这段时间没有情绪记录",
+                "peak": {"emotion": "", "intensity": 0, "ts": 0, "why": ""},
+                "end": {"emotion": "", "intensity": 0, "ts": 0, "why": ""},
+                "top": [], "first": "", "last": ""}
+    rows.sort(key=lambda r: r.get("ts", 0))
+    by = {}
+    for r in rows:
+        e = r.get("emotion") or "未知"
+        by[e] = by.get(e, 0) + 1
+    vals = [float(r.get("valence", 0)) * float(r.get("intensity", 0.5)) for r in rows]
+    avg = sum(vals) / len(vals)
+    top = sorted(by.items(), key=lambda kv: kv[1], reverse=True)[:5]
+    if avg >= 0.3:
+        tone = "这段时间整体是向上的"
+    elif avg <= -0.3:
+        tone = "这段时间不太好过"
+    else:
+        tone = "这段时间起起伏伏，整体平稳"
+    # 峰终定律：对一段体验的记忆几乎只由「最强烈的一刻（峰）」和「结尾（终）」决定，
+    # 中间过程大多被忽略（Kahneman 1999）。所以回顾情绪时，高峰和最近一次最值得拎出来。
+    peak = max(rows, key=lambda r: (abs(float(r.get("intensity", 0.5))), float(r.get("ts", 0))))
+    end = rows[-1]
+    return {
+        "days": days, "count": len(rows), "avg_valence": round(avg, 3),
+        "tone": tone,
+        "peak": {"emotion": peak.get("emotion", ""),
+                 "intensity": float(peak.get("intensity", 0.5)),
+                 "ts": peak.get("ts", 0),
+                 "why": peak.get("why", "")},
+        "end": {"emotion": end.get("emotion", ""),
+                "intensity": float(end.get("intensity", 0.5)),
+                "ts": end.get("ts", 0),
+                "why": end.get("why", "")},
+        "top": [{"emotion": k, "times": v} for k, v in top],
+        "first": fmt_time(rows[0].get("ts", 0)), "last": fmt_time(rows[-1].get("ts", 0)),
+    }
+
+
+# ---------------------------------------------------------------- 情感设置 / 理智 / 认知评价 / 共情
+# 心理学上的对应：
+#   * 七情六欲不是凭空来的——情绪的直接原因不是事件本身，而是人对事件的判断
+#     （Lazarus 认知评价：事件 对 我的目标/需要 是好是坏、有多重要 → 情绪）。
+#   * 杏仁核 = 情绪油门（快速、抢跑）；前额叶 = 理性刹车（慢但能踩）。
+#     情绪太激动时杏仁核会压制前额叶——理智值会临时下降，但永远压不掉一半以上。
+#   * 重要的事（钱/关系/承诺/健康）在任何情绪下都留给用户决定，情绪不替用户拍板。
+
+def emotion_cfg() -> dict:
+    """情感设置（用户随时可改）：共情程度 / 抑制的情绪 / 备注。存在人格档案里。"""
+    p = load_persona()
+    cfg = p.get("emotion_cfg") or {}
+    cfg.setdefault("empathy", {"level": "mirror", "gain": 0.5, "max_intensity": 0.8})
+    cfg.setdefault("suppressed", [])
+    cfg.setdefault("notes", "")
+    return cfg
+
+
+def save_emotion_cfg(updates: dict) -> dict:
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法修改情感设置。")
+    p = load_persona()
+    cur = p.get("emotion_cfg") or {}
+    if "empathy" in updates:
+        cur["empathy"] = dict(cur.get("empathy") or {}, **dict(updates["empathy"]))
+    if "suppressed" in updates:
+        cur["suppressed"] = _dedupe([s.strip() for s in (updates["suppressed"] or []) if s.strip()])
+    if "notes" in updates and updates["notes"] is not None:
+        cur["notes"] = str(updates["notes"]).strip()
+    p["emotion_cfg"] = cur
+    p.setdefault("history", []).append({
+        "ts": now_ts(), "field": "emotion_cfg",
+        "from": None, "to": dict(updates), "why": "用户调整情感设置"})
+    save_persona(p)
+    return cur
+
+
+def rationality() -> dict:
+    """此刻理智：基数（persona.drives.reason，没成形按 50）被当前情绪压制。
+
+    压制幅度正比于"还在起作用的情绪权重 × 唤醒度"（杏仁核劫持），
+    上限 EMOTION_SUPPRESS_MAX——情绪再大，也压不掉一半以上的判断力，
+    所以"情绪上头不会导致重大问题"；事关重大的仍交给用户。
+    """
+    dr = mind_state()
+    base = RATIONAL_DEFAULT if dr["reason"] is None else int(dr["reason"])
+    m = mood_now()
+    pressure = sum(float(x.get("weight", 0)) * float(x.get("arousal", 0.3))
+                   for x in m["active"]) if m.get("active") else 0.0
+    suppress = min(EMOTION_SUPPRESS_MAX, pressure * 0.30)
+    effective = round(base * (1 - suppress), 1)
+    return {
+        "base": base, "effective": effective,
+        "suppress": round(suppress * 100),
+        "pressure": round(pressure, 3),
+        "formed": dr["formed"],
+        "storm": bool(m.get("storm")),
+        "mood_label": m.get("label", "平静"),
+    }
+
+
+def _pick_emotion_by_appraisal(polarity: str, importance: float) -> str:
+    """认知评价 → 情绪：极性 × 分量 → 自然冒出来的那一类。"""
+    if polarity == "positive":
+        if importance >= 0.75:
+            return "开心"
+        if importance >= 0.45:
+            return "满足"
+        return "平静"
+    if polarity == "negative":
+        if importance >= 0.85:
+            return "愤怒"
+        if importance >= 0.65:
+            return "难过"
+        if importance >= 0.45:
+            return "委屈"
+        return "失落"
+    # 中性：有内容就好奇，没事就是平静
+    return "好奇" if importance >= 0.7 else "平静"
+
+
+def _detect_polarity(event: str) -> str:
+    """自动判向：文本里的高能词 → 正/负；否则中性（认知评价的情绪偏向）。"""
+    neg = ("骂", "错", "坏", "输", "丢", "拒", "伤", "哭", "气", "烦", "累", "失败",
+           "糟糕", "走了", "别", "没了", "担心", "害怕", "难过", "病")
+    pos = ("夸", "好", "赢", "成", "到", "喜", "爱", "笑", "谢谢", "成功", "顺利",
+           "记得", "来了", "喜欢", "开心", "感动")
+    neg_hit = sum(1 for w in neg if w in event)
+    pos_hit = sum(1 for w in pos if w in event)
+    return "negative" if neg_hit > pos_hit else ("positive" if pos_hit > neg_hit else "neutral")
+
+
+def emotion_evaluate(event: str, polarity: str = "auto", importance: float = 0.6,
+                     why: str = "", about: str = "") -> dict:
+    """情绪产生机制：事件 → 认知评价（对我好不好/有多重）→ 情绪。
+
+    这不是"手动挑一个心情"，而是先把事件过一遍评价再产出情绪
+    （Lazarus）：杏仁核先起反应，前额叶的理智在后面踩刹车——返回值里
+    带达成共识的理智状态；重要的事一定会提醒交给用户，情绪不替用户拍板。
+    """
+    event = (event or "").strip()
+    if not event:
+        raise ValueError("要评价什么事件？给一句话。")
+    imp = max(0.0, min(1.0, float(importance)))
+    polar = (polarity or "auto").strip().lower()
+    if polar not in ("positive", "negative", "neutral", "auto"):
+        raise ValueError(f"极性只能是 positive / negative / neutral / auto，收到：{polarity}")
+    if polar == "auto":
+        polar = _detect_polarity(event)
+    if polar == "neutral":
+        polar = "positive" if imp >= 0.75 else "neutral"
+    emo = _pick_emotion_by_appraisal(polar, imp)
+    evaluation = {"polarity": polar, "importance": imp, "event": event[:120]}
+    how = "好事" if polar == "positive" else ("坏事" if polar == "negative" else "平常事")
+    ev = feel(emo, intensity=min(1.0, imp * 1.1),
+              why=why or f"发生了一件{how}：{event[:50]}",
+              about=about, genesis=True, evaluation=evaluation)
+    ra = rationality()
+    rv = {
+        "event": event, "polarity": polar, "importance": imp,
+        "emotion": emo, "record": ev,
+        "rationality": ra,
+        # 情绪激动 → 理智下降，人话："现在脑子有点上头"
+        "suppressed_state": "情绪上头，理智被压住一部分" if ra["storm"] or ra["suppress"] >= 15 else "理智基本没被影响",
+        # 重大事项：情绪再大也别替用户做主，给用户决定
+        "decision": "user" if (imp >= 0.75 or (polar == "negative" and ra["storm"])) else "self",
+        "advice": ("情绪激动且分量重：先不急着下结论，把取舍给用户决定，"
+                   "我只负责如实表达感受与建议。") if (ra["storm"] and (polar == "negative" and imp >= 0.6)) else "",
+    }
+    return rv
+
+
+def emotion_mirror(user_emotion: str, intensity: float = 0.5, what: str = "") -> dict:
+    """共情：用户有情绪时跟着走一点，但不失自己。
+
+    默认把用户的情绪半强度地镜像进情绪流（about=用户），并压制在
+    max_intensity 以内；共情等级：mirror=如实跟进，mild=只留一丝底色，
+    off=不跟，保持自己。比例与上限都在情感设置里，用户随时改。
+    """
+    ue = (user_emotion or "").strip()
+    if not ue:
+        raise ValueError("共情需要一个情绪或事件")
+    # 情绪名直接命中就镜像；否则当事件做一次认知评价（可带垫少许强度）
+    same = ue if ue in EMOTIONS else None
+    cfg = emotion_cfg()
+    emp = cfg.get("empathy") or {"level": "mirror", "gain": 0.5, "max_intensity": 0.8}
+    level = emp.get("level", "mirror")
+    if level == "off":
+        return {"level": "off", "mirrored": None, "mood": mood_now(),
+                "note": "共情关闭：不镜像用户的情绪，保持自己的步调。"}
+    gain = float(emp.get("gain", 0.5))
+    cap = float(emp.get("max_intensity", 0.8))
+    if level == "mild":
+        gain = min(gain, 0.25)
+    imp = max(0.1, min(cap, float(intensity) * gain))
+    if same:
+        ev = feel(same, intensity=imp, why=f"共情：用户此刻的情绪是「{ue}」",
+                  about="用户", genesis=True)
+        note = f"镜像了用户的「{ue}」：{ev['intensity']:.0%}，带了些同一底色"
+    else:
+        ev = feel(_pick_emotion_by_appraisal(_detect_polarity(ue), imp), intensity=imp,
+                  why=f"共情：用户在说「{ue[:40]}」", about="用户", genesis=True)
+        note = f"顺着用户的感受起了「{ev['emotion']}」({ev['intensity']:.0%})"
+    return {"level": level, "mirrored": ev, "mood": mood_now(), "note": note}
+
+
+# ---------------------------------------------------------------- 记忆关联（联想能力）
+# 人有联想：一件事会牵出另一件。记忆之间除了"文本像不像"，还有显式的关联边——
+# "A 导致了 B"、"A 和 B 是同一件事的两个侧面"、"提到 A 就会想起 B"。
+# recall 时，命中的记忆会沿关联边把邻居也带起来（联想扩散的显式版）。
+
+def load_assoc() -> list:
+    return read_jsonl(ASSOC_FILE)
+
+
+def save_assoc(rows: list) -> None:
+    write_jsonl(ASSOC_FILE, rows)
+
+
+def _norm_edge(a: str, b: str) -> tuple:
+    return (a, b) if (a or "") < (b or "") else (b, a)
+
+
+def link_memory(src: str, dst: str, relation: str = "相关", weight: float = 1.0,
+                why: str = "") -> dict:
+    """把两条记忆连起来（无向边）。同一对记忆反复连会加重。"""
+    ensure_home()
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法修改关联。")
+    if src == dst:
+        raise ValueError("不能自己关联自己。")
+    ids = {m["id"] for m in load_all()}
+    for mid in (src, dst):
+        if mid not in ids:
+            raise KeyError(f"没有这条记忆：{mid}（用 list 或 recall 拿 id）")
+    a, b = _norm_edge(src, dst)
+    rows = load_assoc()
+    for r in rows:
+        if r["src"] == a and r["dst"] == b:
+            r["weight"] = round(min(3.0, float(r.get("weight", 1)) + float(weight)), 2)
+            r["relation"] = relation or r.get("relation", "相关")
+            r["ts"] = now_ts()
+            if why:
+                r["why"] = why
+            save_assoc(rows)
+            return {"src": src, "dst": dst, "relation": relation, "weight": r["weight"],
+                    "created": False, "updated": True}
+    rows.append({"src": a, "dst": b, "relation": (relation or "相关").strip(),
+                 "weight": round(max(0.1, float(weight)), 2),
+                 "why": (why or "").strip(), "ts": now_ts()})
+    save_assoc(rows)
+    return {"src": src, "dst": dst, "relation": relation, "weight": float(weight),
+            "created": True, "updated": False}
+
+
+def unlink_memory(src: str, dst: str) -> bool:
+    a, b = _norm_edge(src, dst)
+    rows = load_assoc()
+    keep = [r for r in rows if not (r["src"] == a and r["dst"] == b)]
+    if len(keep) == len(rows):
+        return False
+    save_assoc(keep)
+    return True
+
+
+def assoc_of(mid: str) -> list:
+    """一条记忆的邻居（带边信息）。"""
+    if not mid:
+        return []
+    out = []
+    for r in load_assoc():
+        if r["src"] == mid:
+            out.append({"id": r["dst"], "relation": r["relation"], "weight": r["weight"],
+                        "direction": "dst", "why": r.get("why", "")})
+        elif r["dst"] == mid:
+            out.append({"id": r["src"], "relation": r["relation"], "weight": r["weight"],
+                        "direction": "src", "why": r.get("why", "")})
+    by_id = {m["id"]: m for m in load_all()}
+    for n in out:
+        n["gist"] = by_id.get(n["id"], {}).get("gist", "")
+        n["kind"] = by_id.get(n["id"], {}).get("kind", "")
+    out.sort(key=lambda x: -x["weight"])
+    return out
+
+
+def assoc_auto(weight: float = 0.8, dry_run: bool = False) -> dict:
+    """自动联想：共享实体或标签的记忆之间补边（这是"触类旁通"的机器版）。"""
+    records = [m for m in load_all() if m.get("layer") != "dust"]
+    by_ent = {}
+    by_tag = {}
+    for m in records:
+        for e in m.get("entities", []):
+            by_ent.setdefault(e, []).append(m["id"])
+        for t in m.get("tags", []):
+            by_tag.setdefault(t, []).append(m["id"])
+    planned = []
+    seen = set()
+    for bucket in list(by_ent.values()) + list(by_tag.values()):
+        for i, a in enumerate(bucket):
+            for b in bucket[i + 1:]:
+                key, x = _norm_edge(a, b)
+                if key in seen:
+                    continue
+                seen.add(key)
+                planned.append((a, b))
+    existing = {(r["src"], r["dst"]) for r in load_assoc()}
+    added = []
+    for a, b in planned:
+        if (a, b) in existing:
+            continue
+        if dry_run:
+            added.append({"src": a, "dst": b})
+            continue
+        link_memory(a, b, relation="相关", weight=weight, why="共享实体/标签的自动联想")
+        added.append({"src": a, "dst": b})
+    return {"planned": len(planned), "added": len(added),
+            "dry_run": dry_run,
+            "pairs": added[:20]}
+
+
+def assoc_graph(limit: int = 300) -> dict:
+    """联想图谱数据：面板 3D 空间用的节点与关联边。
+
+    节点上限 limit（默认 300，太多画不动）；边只保留两端都在图里的。
+    """
+    records = [m for m in load_all() if m.get("layer") != "dust"]
+    records.sort(key=lambda m: (float(m.get("importance", 0.5)),
+                                float(retention(m))), reverse=True)
+    nodes = records[:limit]
+    ids = {n["id"] for n in nodes}
+    edges = []
+    for r in load_assoc():
+        if r["src"] in ids and r["dst"] in ids:
+            edges.append({"src": r["src"], "dst": r["dst"],
+                          "relation": r.get("relation", "相关"),
+                          "weight": float(r.get("weight", 1))})
+    return {
+        "nodes": [{"id": m["id"], "gist": m.get("gist") or heuristic_gist(m.get("text", "")),
+                   "kind": m.get("kind", ""), "layer": m.get("layer", "hippo"),
+                   "importance": float(m.get("importance", 0.5)),
+                   "emotion": m.get("emotion", ""),
+                   "recency": round(retention(m), 2)} for m in nodes],
+        "edges": edges,
+        "connected": len({e["src"] for e in edges} | {e["dst"] for e in edges}),
+    }
 
 
 def default_persona() -> dict:
@@ -789,7 +1554,12 @@ def persona_brief(p: dict) -> str:
     if p.get("relationship"):
         lines.append("关系：" + "；".join(p["relationship"][:4]) + "。")
     st = p.get("state", {})
-    if st.get("mood"):
+    mb = mood_brief()
+    if mb:
+        tone = mood_tone_hint()
+        lines.append(f"此刻心情：{mb}。" + (f"{tone}。" if tone else "")
+                     + "它会自然回落，也会影响你说话的语气。")
+    elif st.get("mood"):
         lines.append(f"此刻情绪：{st['mood']}" + (f"（{st['mood_note']}）" if st.get("mood_note") else "") + "。")
     habits = p.get("evolved", {}).get("habits", [])
     if habits:
@@ -1420,11 +2190,22 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
                "这次要一直盯着的 → `work add`（会话暂存，最多 9 条，12 小时后自动丢）；"
                "值得长期留下的 → 直接 `remember`。")
     if work:
-        out.append(f"暂存里还有 {len(work)} 条没处理：")
-        for w in work:
-            tag = f"[{w['tag']}] " if w.get("tag") else ""
-            out.append(f"- {tag}{w['text']}")
-        out.append("用 `work flush` 把它们转成真正的记忆，或 `work clear` 丢掉。")
+        opens = [w for w in work if w.get("open", True)]
+        dones = [w for w in work if not w.get("open", True)]
+        if opens:
+            out.append(f"心里还惦记着 {len(opens)} 件没做完的事"
+                       "（未完成的更占心思，别让它一直悬着）：")
+            # 序号与 `work` / `work done <序号>` 保持一致（含已完成项的全局序号）
+            for i, w in enumerate(work, 1):
+                if not w.get("open", True):
+                    continue
+                tag = f"[{w['tag']}] " if w.get("tag") else ""
+                out.append(f"- {i}. {tag}{w['text']}")
+        if dones:
+            out.append(f"另有 {len(dones)} 件已完成（做完了就该放下，`work flush` 转成记忆或 `work clear` 清掉）。")
+        out.append("做完一件就 `work done <序号>` 标记——完成会释放它占的心思。"
+                   "`work flush` 转成真正的记忆（`--skip-done` 只转没完成的，已做完的直接丢），"
+                   "或 `work clear` 丢掉。")
 
     ob = p.get("onboarding") or {}
     if not ob.get("completed"):
@@ -1498,6 +2279,23 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
 
     out.append("===== 注入结束：请自然地使用这些记忆，不要逐条复述 =====")
     out.append("")
+    # 每日例行 + 自我总结提醒（保证"每天更新、定期自省"）
+    st = _daily_state()
+    if st.get("last_date") != fmt_date(now_ts()):
+        out.append("[每日例行] 今天还没跑 daily：`python scripts/brain.py daily`"
+                   "（写今日日记、沉淀知识、过期的梦自动做掉）。")
+    else:
+        out.append(f"[每日例行] 今天的日记已写（{st.get('last_date')}）。")
+    cfg2 = load_config()
+    last_review = float(cfg2.get("last_self_review", 0) or 0)
+    if now_ts() - last_review > 2 * DAY:
+        out.append("[自我总结] 超过 2 天没总结自己的灵枢技能了："
+                   "`python scripts/brain.py skill self-review`。")
+    ra = rationality()
+    if ra["storm"] or ra["suppress"] >= 10:
+        out.append(f"[理智状态] 情绪在起作用：{ra['mood_label']}，理智 {ra['base']} → "
+                   f"{ra['effective']}（被压住 {ra['suppress']}%）。语气自然流露可以，"
+                   "涉及钱/关系/承诺等大事，把决定权交给用户。")
     cfg = load_config()
     rv = f"{float(cfg.get('review_threshold', 0.60)) * 100:.0f}%"
     dr = f"{float(cfg.get('dream_threshold', 0.75)) * 100:.0f}%"
@@ -1534,7 +2332,10 @@ def stats() -> dict:
         "persona_name": p.get("identity", {}).get("名字", ""),
         "mood": p.get("state", {}).get("mood", ""),
         "working": len(load_working()),
+        "assoc": len(load_assoc()),
         "last_dream": load_dream_state().get("last_dream", 0),
+        "daily": _daily_state().get("last_date", ""),
+        "rationality": rationality(),
         "home": str(HOME),
     }
 
@@ -1951,6 +2752,129 @@ def auto_dream(trigger: str = "auto", dry_run: bool = False) -> dict:
     return result
 
 
+# ---------------------------------------------------------------- daily（每天例行）
+# 要"每天更新保持最新"：daily 每天跑一次，自动完成三件事——
+#   1) 写今日日记（journal）：今天经历了什么、情绪怎么样，落到笔记
+#   2) 更新知识库：把今天重要的洞见/偏好提炼成可复用结论（自动去重合并）
+#   3) 维护新鲜度：距上次做梦超过 24 小时就自动做梦（--auto）
+# 会话开始时 build_injection 会检查：如果今天还没跑，就提醒先跑 daily。
+
+DAILY_FILE = HOME / "daily_state.json"
+
+
+def _daily_state() -> dict:
+    if DAILY_FILE.exists():
+        try:
+            return json.loads(DAILY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"last_run": 0, "last_date": ""}
+
+
+def _save_daily_state(st: dict) -> None:
+    atomic_json(DAILY_FILE, st)
+
+
+def daily(dry_run: bool = False, force: bool = False) -> dict:
+    """每天例行。dry_run 只预览要写什么，不落盘；force 无视"今天已跑过"。"""
+    ensure_home()
+    today = fmt_date(now_ts())
+    st = _daily_state()
+    if st.get("last_date") == today and not force and not dry_run:
+        return {"skipped": True, "reason": "今天已经例行过了（daily --force 可重跑）"}
+    if READONLY and not dry_run:
+        raise PermissionError("记忆库当前只读，无法执行每日例行。")
+
+    floor = now_ts() - 1 * DAY
+    mems = [m for m in load_all() if m.get("created", 0) >= floor]
+    arc = emotion_arc(1)
+    ra = rationality()
+
+    # ---- 1) 今日日记正文（机器先起草，AI 可补充润色）
+    body = []
+    body.append(f"今天新增记忆 {len(mems)} 条。")
+    if arc["count"]:
+        top_txt = "、".join("{}×{}".format(x["emotion"], x["times"]) for x in arc["top"])
+        body.append("情绪：{}；出现最多：{}。".format(arc["tone"], top_txt))
+        # 峰终定律：回顾一天，真正留在印象里的是"最强烈的那一刻"和"此刻的心情"
+        pk, en = arc.get("peak") or {}, arc.get("end") or {}
+        if pk.get("emotion"):
+            pw = f"（{pk['why']}）" if pk.get("why") else ""
+            body.append("印象最深的一刻：{}{}，强度 {:.0%}。".format(
+                pk["emotion"], pw, float(pk.get("intensity", 0))))
+        if en.get("emotion"):
+            body.append("此刻的心情：{}。".format(en["emotion"]))
+    else:
+        body.append("情绪：今天还没有情绪记录。")
+    low = desire_low()
+    if low:
+        body.append("没被满足的欲望：" + "、".join(f"{x['desire']}({x['level']:.0f})" for x in low) + "。")
+    else:
+        body.append("六欲平稳。")
+    body.append(f"理智：{ra['effective']}（基数 {ra['base']}，被情绪压住 {ra['suppress']}%）。")
+    insight_mems = [m for m in mems
+                    if m.get("kind") in ("insight", "preference", "habit")
+                    and float(m.get("importance", 0)) >= 0.7]
+    if insight_mems:
+        body.append("今天值得沉淀的想法：")
+        body += [f"- {display_text(m)}" for m in insight_mems[:5]]
+
+    # ---- 2) 更新知识库：把今天重要的洞见/偏好提炼成可复用结论（dry_run 不落盘）
+    k_added, k_merged = 0, 0
+    if dry_run:
+        k_added = len(insight_mems)   # 预览：预计会新增/合并的数量
+    else:
+        import growth
+        for m in insight_mems:
+            title = heuristic_gist(m.get("text", ""), 24)
+            try:
+                _, how = growth.add_knowledge(
+                    title, display_text(m), topic="每日沉淀",
+                    points=[heuristic_gist(m.get("text", ""), 60)],
+                    tags=(m.get("tags") or [])[:4],
+                    entities=(m.get("entities") or [])[:4],
+                    source_ids=[m["id"]],
+                    confidence=min(0.9, 0.55 + 0.3 * float(m.get("importance", 0.5))))
+                if how == "merged":
+                    k_merged += 1
+                else:
+                    k_added += 1
+            except Exception:
+                pass
+
+    # ---- 3) 新鲜度：距上次做梦超过 24h 就自动做梦
+    dream_state = load_dream_state()
+    dreamed = False
+    if now_ts() - int(dream_state.get("last_dream", 0)) > DAY:
+        if dry_run:
+            dreamed = "would_run"
+        else:
+            try:
+                auto_dream("daily")
+                dreamed = True
+            except Exception:
+                dreamed = False
+
+    if not dry_run:
+        import growth
+        note, how = growth.write_note("journal", f"今日 {today}",
+                                      "\n".join(body), mood=mood_brief(),
+                                      tags=["每日例行"],
+                                      memory_ids=[m["id"] for m in mems[:12]])
+        st["last_run"] = now_ts()
+        st["last_date"] = today
+        st["note_id"] = note.get("id")
+        _save_daily_state(st)
+
+    return {
+        "skipped": False, "date": today, "dry_run": dry_run,
+        "memories_today": len(mems), "note_body": "\n".join(body),
+        "knowledge_added": k_added, "knowledge_merged": k_merged,
+        "dreamed": dreamed,
+        "mood": mood_brief(),
+    }
+
+
 # ---------------------------------------------------------------- CLI
 
 def _print_mem(m: dict, score: float | None = None, parts: dict | None = None) -> None:
@@ -1969,6 +2893,17 @@ def _print_mem(m: dict, score: float | None = None, parts: dict | None = None) -
     print()
 
 
+class _BrainParser(argparse.ArgumentParser):
+    """用法错误退出码用 64（EX_USAGE），避免与 startup 的"记忆库未初始化=2"撞码。
+
+    宿主据此区分：64=命令/参数写错（改命令即可）；2=记忆库没初始化（要 init）。
+    """
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"{self.prog}: 参数错误：{message}", file=sys.stderr)
+        raise SystemExit(64)
+
+
 def _main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     argv = _override_home(argv)          # 支持 --home 全局换数据目录
@@ -1978,8 +2913,8 @@ def _main(argv=None) -> int:
         import growth
         return growth.run(argv)
 
-    parser = argparse.ArgumentParser(prog="brain.py", description="灵枢 类脑记忆引擎")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    parser = _BrainParser(prog="brain.py", description="灵枢 类脑记忆引擎")
+    sub = parser.add_subparsers(dest="cmd", required=True, parser_class=_BrainParser)
 
     p_init = sub.add_parser("init", help="初始化记忆库")
     p_init.add_argument("--force", action="store_true", help="重置人格档案（清空初识与演化历史）")
@@ -1988,6 +2923,7 @@ def _main(argv=None) -> int:
     p_rem.add_argument("text", nargs="+")
     p_rem.add_argument("--kind", default="fact", choices=KINDS)
     p_rem.add_argument("--importance", type=float, default=None, help="0-1 或 0-10")
+    p_rem.add_argument("--emotion", default="", help="同时记下此刻的情绪（杏仁核标记，情绪强的记得更牢）")
     p_rem.add_argument("--tags", default="")
     p_rem.add_argument("--entities", default="")
     p_rem.add_argument("--source", default="ai", choices=["ai", "user", "dream"])
@@ -2038,6 +2974,38 @@ def _main(argv=None) -> int:
     p_mind.add_argument("--confidence", type=float, default=0.6, help="把握程度 0-1 或 0-10")
     p_mind.add_argument("--urgency", type=float, default=0.5, help="紧迫程度 0-1")
 
+    p_emo = sub.add_parser("emotion", help="情绪系统：认知评价/共情/记感受/看心情/看轨迹/改情感设置")
+    p_emo.add_argument("action", nargs="?", default="now",
+                       choices=["feel", "evaluate", "mirror", "config", "now", "arc", "list", "desire"])
+    p_emo.add_argument("emotion", nargs="?", default="",
+                       help="feel：情绪名；evaluate/mirror：事件或描述；desire：欲望名")
+    p_emo.add_argument("--intensity", type=float, default=0.6, help="这件事当时有多重 0-1")
+    p_emo.add_argument("--amount", type=float, default=15, help="desire：满足欲望的量 0-100")
+    p_emo.add_argument("--polarity", default="auto", help="evaluate：positive/negative/neutral/auto")
+    p_emo.add_argument("--why", default="", help="因为什么")
+    p_emo.add_argument("--about", default="", help="关于谁/什么事")
+    p_emo.add_argument("--decay-hours", type=float, default=None, help="这条情绪的余波时长（小时）")
+    p_emo.add_argument("--days", type=int, default=7, help="arc：看最近 N 天的情绪轨迹")
+    p_emo.add_argument("--empathy", default="", help="config：共情等级 mirror/mild/off")
+    p_emo.add_argument("--gain", type=float, default=None, help="config：共情跟进的强度比例 0-1")
+    p_emo.add_argument("--max-intensity", type=float, default=None, help="config：共情镜像的最大强度 0-1")
+    p_emo.add_argument("--suppress", default="", help="config：要抑制的情绪名，逗号分隔")
+    p_emo.add_argument("--notes", default="", help="config：给情感系统的一句备注")
+
+    p_assoc = sub.add_parser("assoc", help="记忆关联（联想能力）：link/unlink/auto/graph/邻居")
+    p_assoc.add_argument("action", nargs="?", default="graph",
+                         choices=["link", "unlink", "auto", "graph", "of"])
+    p_assoc.add_argument("ids", nargs="*", default=[], help="link/unlink/of：记忆 id")
+    p_assoc.add_argument("--relation", default="相关", help="link：关系名字，如 因果/相关/情绪")
+    p_assoc.add_argument("--weight", type=float, default=1.0, help="link：权重 0-3")
+    p_assoc.add_argument("--why", default="", help="link：为什么关联")
+    p_assoc.add_argument("--dry-run", action="store_true", help="auto：只预览要建立哪些边")
+    p_assoc.add_argument("--limit", type=int, default=300, help="graph：节点上限")
+
+    p_daily = sub.add_parser("daily", help="每日例行：写日记 + 沉淀知识 + 过期的梦自动做掉")
+    p_daily.add_argument("--dry-run", action="store_true", help="只预览今天会写什么")
+    p_daily.add_argument("--force", action="store_true", help="今天已跑过也重跑")
+
     p_stats = sub.add_parser("stats", help="记忆统计")
     p_stats.add_argument("--json", action="store_true")
 
@@ -2049,20 +3017,22 @@ def _main(argv=None) -> int:
     p_forget = sub.add_parser("forget", help="忘记一条记忆")
     p_forget.add_argument("id")
 
-    p_ctx = sub.add_parser("check-context", help="检查上下文水位：60% 清点 / 75% 做梦 / 90% 封存")
+    p_ctx = sub.add_parser("check-context", help="检查上下文水位：60%% 清点 / 75%% 做梦 / 90%% 封存")
     p_ctx.add_argument("--used", type=float, required=True, help="已用上下文百分比 0-100")
     p_ctx.add_argument("--unsaved", type=float, default=0,
                        help="本轮还没落盘的估计字数（凭感觉估即可，用来提示'该记没记'）")
 
     p_work = sub.add_parser("work", help="工作记忆：当前上下文，默认不落盘")
     p_work.add_argument("action", nargs="?", default="status",
-                        choices=["status", "add", "list", "flush", "clear"])
+                        choices=["status", "add", "list", "done", "flush", "clear"])
     p_work.add_argument("text", nargs="*", default=[])
     p_work.add_argument("--tag", default="")
     p_work.add_argument("--why", default="")
+    p_work.add_argument("--skip-done", action="store_true",
+                        help="flush 时丢弃已完成条目，不转记忆（做完了就该放下）")
     p_work.add_argument("--json", action="store_true")
 
-    p_cap = sub.add_parser("capture", help="上下文原样封存：逐段落盘 + 原文归档，100% 不丢")
+    p_cap = sub.add_parser("capture", help="上下文原样封存：逐段落盘 + 原文归档，100%% 不丢")
     p_cap.add_argument("payload", nargs="+")
     p_cap.add_argument("--tag", default="", help="如 逃生/会话/主题")
     p_cap.add_argument("--kind", default="episode", choices=KINDS)
@@ -2108,6 +3078,10 @@ def _main(argv=None) -> int:
             or (args.cmd == "work" and action in ("add", "flush", "clear"))
             or (args.cmd == "persona" and action not in ("show", "path", "onboarding"))
             or (args.cmd == "mind" and action in ("set", "tune"))
+            or (args.cmd == "emotion" and action in ("feel", "evaluate", "mirror", "config", "desire"))
+            or (args.cmd == "assoc" and action in ("link", "unlink") )
+            or (args.cmd == "assoc" and action == "auto" and not args.dry_run)
+            or (args.cmd == "daily" and not args.dry_run)
         )
         if writing:
             print(f"[只读] 记忆库当前不可写，{args.cmd} 需要写盘。"
@@ -2130,8 +3104,11 @@ def _main(argv=None) -> int:
         rec, how = remember(" ".join(args.text), args.kind, args.importance,
                             [t for t in args.tags.split(",") if t],
                             [e for e in args.entities.split(",") if e],
-                            args.source, args.layer)
+                            args.source, args.layer,
+                            emotion=(args.emotion or None))
         print(f"{'已合并' if how == 'merged' else '已写入'}：{rec['id']} ({rec['layer']}, 重要性 {rec['importance']})")
+        if rec.get("emotion"):
+            print(f"  情绪标记：{rec['emotion']}（唤醒 {rec.get('emotional', '?')}，记得更牢）")
         print(f"  {rec['gist']}")
         return 0
 
@@ -2330,6 +3307,225 @@ def _main(argv=None) -> int:
         print("  python scripts/brain.py mind tune --curiosity +5 --reason -3 --why \"用户嫌我啰嗦\"")
         return 0
 
+    if args.cmd == "emotion":
+        if args.action == "evaluate":
+            if not args.emotion:
+                print("用法：emotion evaluate \"用户骂我了\" --polarity auto --intensity 0.8", file=sys.stderr)
+                return 2
+            r = emotion_evaluate(args.emotion, args.polarity, args.intensity,
+                                 why=args.why, about=args.about)
+            ra = r["rationality"]
+            print(f"事件：{r['event']}")
+            print(f"评价：{r['polarity']} · 分量 {r['importance']:.0%} → 情绪「{r['emotion']}」"
+                  f"（{r['record']['intensity']:.0%}）")
+            print(f"理智：{ra['base']} → {ra['effective']}（被情绪压住 {ra['suppress']}% · {r['suppressed_state']}）")
+            if r["decision"] == "user":
+                print(f"【重大】{r['advice'] or '这件事的分量够重：取舍留给用户决定，我只如实表达感受。'}")
+            else:
+                print("（分量尚轻，我可以自己把握语气与分寸。）")
+            if r["record"].get("suppressed_by"):
+                print(f"（这条情绪被情感设置抑制过：{r['record']['suppressed_by']}）")
+            return 0
+        if args.action == "mirror":
+            if not args.emotion:
+                print("用法：emotion mirror \"用户很难过\" [--intensity 0.6]", file=sys.stderr)
+                return 2
+            r = emotion_mirror(args.emotion, args.intensity)
+            print(r["note"])
+            if r.get("mirrored"):
+                print(f"  记进情绪流：{r['mirrored']['emotion']}（{r['mirrored']['intensity']:.0%}）")
+            print(f"  此刻心情：{r['mood']['label']}（valence {r['mood']['valence']:+.2f}）")
+            return 0
+        if args.action == "config":
+            updates = {}
+            if args.empathy:
+                updates["empathy"] = {"level": args.empathy}
+            if args.gain is not None:
+                updates["empathy"] = dict(updates.get("empathy", {}), gain=max(0.0, min(1.0, args.gain)))
+            if args.max_intensity is not None:
+                updates["empathy"] = dict(updates.get("empathy", {}), max_intensity=max(0.0, min(1.0, args.max_intensity)))
+            if args.suppress:
+                updates["suppressed"] = [s for s in args.suppress.split(",") if s.strip()]
+            if args.notes:
+                updates["notes"] = args.notes
+            if not updates:
+                cfg = emotion_cfg()
+                emp = cfg.get("empathy", {})
+                print("情感设置：")
+                print(f"  共情：{emp.get('level', 'mirror')}（跟进比例 {emp.get('gain', 0.5)}，上限 {emp.get('max_intensity', 0.8)}）")
+                print(f"  抑制的情绪：{'、'.join(cfg.get('suppressed', [])) or '无'}")
+                print(f"  备注：{cfg.get('notes') or '无'}")
+                print("  改：emotion config --empathy mild --gain 0.3 --suppress 嫉妒,愤怒 --notes \"别太夸张\"")
+                return 0
+            cfg = save_emotion_cfg(updates)
+            emp = cfg.get("empathy", {})
+            print("已更新情感设置：")
+            print(f"  共情：{emp.get('level', 'mirror')}（跟进比例 {emp.get('gain', 0.5)}，上限 {emp.get('max_intensity', 0.8)}）")
+            print(f"  抑制的情绪：{'、'.join(cfg.get('suppressed', [])) or '无'}")
+            print(f"  备注：{cfg.get('notes') or '无'}")
+            return 0
+        if args.action == "feel":
+            if not args.emotion:
+                print("用法：emotion feel 开心 --intensity 0.7 --why \"用户夸我了\"", file=sys.stderr)
+                return 2
+            ev = feel(args.emotion, args.intensity, why=args.why, about=args.about,
+                      decay_hours=args.decay_hours)
+            m = mood_now()
+            print(f"记下：{ev['emotion']}（强度 {ev['intensity']:.0%}）"
+                  + (f"，因为{ev['why']}" if ev["why"] else ""))
+            if ev.get("resonance") == "amplified":
+                print("  情绪传染：和此刻的心情同向，被共振放大了一点")
+            elif ev.get("resonance") == "damped":
+                print("  心情惯性：跟此刻的心情拧着劲，被往回拽了一点")
+            if ev.get("habituation"):
+                print(f"  习惯化：同一件事在最近 12 小时已是第 {ev['habituation'] + 1} 次出现，反应淡了一点")
+            print(f"此刻心情：{m['label']}，valence {m['valence']:+.2f} / arousal {m['arousal']:.2f}，"
+                  f"强度 {m['intensity']:.0%}")
+            if m["active"]:
+                print("  还在起作用：" + "、".join(f"{x['emotion']}({x['weight']:.0%})" for x in m["active"]))
+            return 0
+        if args.action == "arc":
+            a = emotion_arc(args.days)
+            if a["count"] == 0:
+                print(a["summary"])
+                return 0
+            print(f"最近 {a['days']} 天 · {a['count']} 次情绪波动 · {a['tone']}")
+            print("  出现最多：" + "、".join(f"{x['emotion']}×{x['times']}" for x in a["top"]))
+            print(f"  平均 valence {a['avg_valence']:+.2f}")
+            pk, en = a.get("peak") or {}, a.get("end") or {}
+            if pk.get("emotion"):
+                print(f"  印象最深（峰）：{pk['emotion']}，强度 {float(pk.get('intensity', 0)):.0%}"
+                      + (f"，因为{pk['why']}" if pk.get("why") else ""))
+            if en.get("emotion"):
+                print(f"  最近一次（终）：{en['emotion']}"
+                      + (f"，因为{en['why']}" if en.get("why") else ""))
+            print(f"  （{a['first']} ~ {a['last']}）")
+            return 0
+        if args.action == "list":
+            print("七情六欲 · 可选情绪（归类如下）：")
+            for g, names in EMOTION_GROUPS.items():
+                print(f"  【{g}】{'、'.join(names)}")
+            print("\n六欲（底层需要，会随时间变淡，被满足才回升）：")
+            for name, hint in DESIRES.items():
+                print(f"  · {name}：{hint}")
+            print("\n用法：emotion feel 难过 --why \"...\"  /  emotion desire 连接欲 --amount 20")
+            return 0
+        if args.action == "desire":
+            ds = desire_state()
+            if not args.emotion:
+                for name, lvl in ds.items():
+                    mark = "↓" if lvl < 35 else ("↑" if lvl >= 75 else "·")
+                    print(f"  {mark} {name}：{lvl:.0f}  {DESIRES[name]}")
+                low = desire_low()
+                if low:
+                    low_names = "、".join(f"{x['desire']}({x['level']:.0f})" for x in low)
+                    print(f"\n  长期没被满足：{low_names}")
+                print("  满足一笔：python scripts/brain.py emotion desire 连接欲 --amount 20")
+                return 0
+            try:
+                r = desire_satisfy(args.emotion, args.amount)
+            except PermissionError as e:
+                print(str(e), file=sys.stderr)
+                return 1
+            print(f"满足 {r['satisfied']} +{r['amount']}：现在是 {r['desires'][r['satisfied']]:.0f}/100")
+            return 0
+        m = mood_now()
+        grp = f" · 七情[{m['category']}]" if m.get("groups") else ""
+        print(f"此刻心情：{m['label']}（valence {m['valence']:+.2f}，arousal {m['arousal']:.2f}，"
+              f"强度 {m['intensity']:.0%}{grp}）"
+              + (" · 情绪上头" if m.get("storm") else "")
+              + (" · 悲喜交加" if m.get("complex") else ""))
+        if not m["active"]:
+            print("  情绪已散去，现在是中性状态。")
+        else:
+            print("  还在起作用：")
+            for x in m["active"]:
+                why = f"，因为{x['why']}" if x.get("why") else ""
+                print(f"    · [{x['group']}] {x['emotion']}（{x['weight']:.0%}）{why}")
+        ra = rationality()
+        if ra["storm"] or ra["suppress"] >= 10:
+            print(f"  理智：{ra['base']} → {ra['effective']}（被情绪压住 {ra['suppress']}%）。"
+                  "涉及大事时把决定权留给用户。")
+        low = desire_low()
+        if low:
+            print("  欲望在喊："
+                  + "、".join(f"{x['desire']}({x['level']:.0f})" for x in low))
+        print("  记一笔：python scripts/brain.py emotion feel 开心 --why \"...\"")
+        print("  自动评价：python scripts/brain.py emotion evaluate \"事件\" --polarity auto")
+        print("  共情：python scripts/brain.py emotion mirror \"用户的情绪\"")
+        print("  情感设置：python scripts/brain.py emotion config --empathy mild")
+        print("  看全表：python scripts/brain.py emotion list")
+        return 0
+
+    if args.cmd == "assoc":
+        if args.action == "link":
+            if len(args.ids) != 2:
+                print("用法：assoc link <记忆A的id> <记忆B的id> --relation 因果 --why \"...\"", file=sys.stderr)
+                return 2
+            r = link_memory(args.ids[0], args.ids[1], args.relation, args.weight, args.why)
+            print(f"已关联 {r['src']} ↔ {r['dst']}（{r['relation']}，权重 {r['weight']}）"
+                  + ("，反复连，权重加强了" if not r["created"] else ""))
+            return 0
+        if args.action == "unlink":
+            if len(args.ids) != 2:
+                print("用法：assoc unlink <idA> <idB>", file=sys.stderr)
+                return 2
+            ok = unlink_memory(args.ids[0], args.ids[1])
+            print("已断开。" if ok else "本来就没有这条关联。")
+            return 0 if ok else 1
+        if args.action == "auto":
+            r = assoc_auto(dry_run=args.dry_run)
+            print(f"自动联想：{('计划建立' if args.dry_run else '建立')} {r['added']} 条边"
+                  f"（共 {r['planned']} 对候选）")
+            for a, b in r["pairs"][:10]:
+                print(f"  {a} ↔ {b}")
+            if not args.dry_run and r["added"]:
+                print("关联多了，面板「联想」页能看出网络长什么样。")
+            return 0
+        if args.action == "of":
+            if not args.ids:
+                print("用法：assoc of <记忆id>", file=sys.stderr)
+                return 2
+            mid = args.ids[0]
+            nb = assoc_of(mid)
+            if not nb:
+                print("这条记忆还没有显式关联。")
+                return 0
+            print(f"「{mid}」的邻居：")
+            for n in nb[:15]:
+                print(f"  · [{n['relation']} x{n['weight']}] {n['id']}  {n['gist'][:50]}")
+            return 0
+        g = assoc_graph(args.limit)
+        print(f"联想图谱：{len(g['nodes'])} 个节点 · {len(g['edges'])} 条关联边 · "
+              f"{g['connected']} 个节点被连成网")
+        if not g["edges"]:
+            print("还没有显式关联。先手动 link，或跑 assoc auto 让共享实体/标签自动成边。")
+        else:
+            print("在面板的「联想」页里，这就是一个可旋转的 3D 空间。")
+            print("  手动关联：assoc link <idA> <idB> --relation 因果 --why \"...\"")
+            print("  自动补网：assoc auto")
+            print("  看邻居：assoc of <记忆id>")
+        return 0
+
+    if args.cmd == "daily":
+        r = daily(args.dry_run, args.force)
+        if r.get("skipped"):
+            print(r["reason"])
+            return 0
+        if args.dry_run:
+            print(f"[预览] {r['date']} 的每日例行：")
+            print(r["note_body"])
+            print(f"\n将写入知识库 {r['knowledge_added']} 条新增 / {r['knowledge_merged']} 条合并"
+                  + (f"；距上次做梦超时，将自动做梦" if r["dreamed"] == "would_run" else ""))
+            return 0
+        print(f"每日例行完成（{r['date']}）")
+        print(f"  今日记忆 {r['memories_today']} 条，日记已写（含今日情绪与理智状态）")
+        print(f"  知识库：新增 {r['knowledge_added']} 条，合并 {r['knowledge_merged']} 条")
+        print(f"  做梦：{'已自动做掉' if r['dreamed'] else '还没到 24 小时，不急'}。")
+        print(f"  今日心情：{r['mood']}")
+        print("（每天只跑一次；要重跑加 --force）")
+        return 0
+
     if args.cmd == "work":
         if args.action == "add":
             text = " ".join(args.text).strip()
@@ -2339,14 +3535,35 @@ def _main(argv=None) -> int:
             rows = work_add(text, args.tag, args.why)
             print(f"已写入会话暂存（{len(rows)}/{WORKING_CAPACITY}）。它不是长期记忆，{int(WORKING_TTL / HOUR)} 小时后自动丢。")
             return 0
+        if args.action == "done":
+            text = " ".join(args.text).strip()
+            if not text:
+                print("用法：work done 2  （暂存里的第 2 条已完成）", file=sys.stderr)
+                return 2
+            try:
+                idx = int(text.split()[0])
+            except ValueError:
+                print("序号得是数字：work done <第几条>", file=sys.stderr)
+                return 2
+            rows = work_done(idx)
+            if idx < 1 or idx > len(rows):
+                print(f"序号越界：当前暂存只有 {len(rows)} 条。", file=sys.stderr)
+                return 2
+            done = rows[idx - 1]
+            print(f"第 {idx} 条已标记完成：{done.get('text', '')}——做完的事不再占心思。")
+            return 0
         if args.action == "flush":
-            saved = work_flush(args.why or "会话结束前决定留下")
-            if not saved:
+            res = work_flush(args.why or "会话结束前决定留下", skip_done=args.skip_done)
+            saved, dropped = res["saved"], res["dropped"]
+            if not saved and not dropped:
                 print("暂存是空的，没有要转的。")
                 return 0
-            print(f"已转成 {len(saved)} 条记忆：")
-            for s in saved:
-                print(f"  {s['id']}  {s['text']}")
+            if saved:
+                print(f"已转成 {len(saved)} 条记忆：")
+                for s in saved:
+                    print(f"  {s['id']}  {s['text']}")
+            if dropped:
+                print(f"另有 {dropped} 条已完成，直接丢弃、没再落盘（做完的事就该放下）。")
             return 0
         if args.action == "clear":
             work_clear()
@@ -2357,12 +3574,15 @@ def _main(argv=None) -> int:
             print(json.dumps(st, ensure_ascii=False, indent=2))
             return 0
         print("工作记忆 = 你当前能看见的上下文。它不落盘、不参与回忆、不做梦。")
-        print(f"暂存：{st['count']}/{st['capacity']} 条，{st['ttl_hours']} 小时后过期。")
-        for w in st["items"]:
+        print(f"暂存：{st['count']}/{st['capacity']} 条"
+              f"（其中未完成 {st.get('open_count', 0)} 条），{st['ttl_hours']} 小时后过期。")
+        for i, w in enumerate(st["items"], 1):
             tag = f"[{w['tag']}] " if w.get("tag") else ""
-            print(f"  - {tag}{w['text']}")
+            mark = "✓" if not w.get("open", True) else " "
+            print(f"  {i}. {mark} {tag}{w['text']}")
         print("  work add \"...\"   显式留一手（会话级）")
-        print("  work flush       转成真正的记忆")
+        print("  work done <序号>  这件做完了（放下它）")
+        print("  work flush       转成真正的记忆（--skip-done 只转没完成的，已做完的直接丢）")
         print("  work clear       丢掉")
         return 0
 

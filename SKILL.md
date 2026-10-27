@@ -1,6 +1,7 @@
 ---
 name: 灵枢
-description: 类脑持久记忆、人格与成长系统，名字取自《黄帝内经》：算力给思考，人格给灵魂，记忆给生命。当用户需要 AI 跨会话记住事情、拥有自己长出来的人格/性格/喜好、在上下文将满时自动整理记忆（像做梦一样巩固与遗忘），或提到"记忆""记住我""人格""设定""知识库""笔记""日志""成长""自我进化""工作记忆""上下文快满了""做梦整理"时使用。内置：分层记忆（海马体/皮层/淡忘区）与艾宾浩斯遗忘曲线、模糊联想回忆、无种子的人格初识与演化历史、好奇心与理智双驱（数值由用户态度长成）、工作记忆暂存（默认不落盘）、学习闭环（先查知识库再联网）、技能搜索/调用/借鉴与自我进化日志。纯本地零依赖，Python 标准库即可运行。
+version: 2
+description: 类脑持久记忆、人格与成长系统，名字取自《黄帝内经》：算力给思考，人格给灵魂，记忆给生命。当用户需要 AI 跨会话记住事情、拥有自己长出来的人格/性格/喜好、在上下文将满时自动整理记忆（像做梦一样巩固与遗忘），或提到"记忆""记住我""人格""设定""知识库""笔记""日志""成长""自我进化""工作记忆""上下文快满了""做梦整理"时使用。内置：分层记忆（海马体/皮层/淡忘区）与艾宾浩斯遗忘曲线、模糊联想回忆、无种子的人格初识与演化历史、好奇心与理智双驱（数值由用户态度长成）、工作记忆暂存（默认不落盘）、学习闭环（先查知识库再联网）、技能搜索/调用/借鉴与自我进化日志、七情六欲与理智约束（认知评价/共情/情感设置）、记忆关联（联想图谱 3D 空间）、每日例行与自我总结。纯本地零依赖，Python 标准库即可运行。
 ---
 
 # 灵枢 · 类脑记忆、人格与成长
@@ -108,6 +109,76 @@ python scripts/brain.py mind weigh "要不要重构这个模块" --benefit 7 --c
 - 数值还没成形时 `mind weigh` 按中性算，会明确告诉你"还没成形"，别当成已有性格。
 - 想直接定死也可以：`mind set --curiosity 85 --reason 70`，但这只该在用户明确要求时用。
 
+## 七情六欲：情绪怎么来、理智怎么管
+
+情绪不是"随手挑一个心情"，而是**认知评价**的结果（Lazarus）：先判断"这件事对我好不好、有多重"，情绪自己冒出来。
+
+```bash
+# 事件 → 认知评价 → 情绪（极性可让引擎自动判，也可指定）
+python scripts/brain.py emotion evaluate "用户夸我做得很好" --polarity auto --intensity 0.8
+```
+
+- **七情**（喜怒哀惧爱恶欲）、**六欲**（生、耳目口鼻感官欲等底层需要）会随时间变淡；`emotion now` 看此刻，`emotion arc` 看近 7 天轨迹，`emotion list` 看全套情绪名。
+- 分量越重、越坏的事，情绪越强，唤醒度越高，会**压住一部分理智**（"杏仁核劫持"）——但上限 40%，再上头也压不掉一半以上的判断力，所以**情绪不会导致重大问题**。
+- **大事交给用户**：分量 ≥75%（或坏情绪 + 情绪激动）时，`evaluate` 的 `decision` 会是 `user`——只如实表达感受与建议，不替用户拍板。
+- 用户有情绪时要**共情**：默认把用户的情绪半强度镜像进来，跟着走一点但不丢自己。
+
+```bash
+python scripts/brain.py emotion mirror "阿哲今天很累" --intensity 0.7
+```
+
+共情程度是**用户随时可改的设定**（记在人格档案 `emotion_cfg`，改动进演化历史）：
+
+```bash
+python scripts/brain.py emotion config --empathy mirror --gain 0.5 --max-intensity 0.8 --suppress "怒,恶" --notes "重大决定前提醒我"
+```
+
+- `--empathy`：mirror=如实跟进 / mild=只留一丝底色 / off=不跟，保持自己。
+- `--gain` 跟进比例、`--max-intensity` 共情上限、`--suppress` 压下去的情绪（强度×0.4）、`--notes` 备注。
+- 情绪复杂时 `mood_now` 会给出 `complex`（如"悲喜交加"），唤醒 ≥0.65 时给出 `storm`（情绪激动）——激动时优先把取舍摆给用户。
+
+## 记忆关联：一件事牵出另一件事
+
+人靠联想串记忆："A 导致了 B""提到 A 就想起 C"。除了文本像不像，记忆之间可以有**显式关联边**：
+
+```bash
+python scripts/brain.py assoc link <idA> <idB> --relation "因果" --weight 1 --why "B 是 A 的结果"
+python scripts/brain.py assoc of <id>      # 这条连着什么
+python scripts/brain.py assoc auto [--dry-run]   # 自动补边：共享实体/标签
+python scripts/brain.py assoc graph --limit 300  # 联想图谱数据
+```
+
+- `recall` 时命中的记忆会**沿关联边把邻居也带起来**（联想扩散），关联越重带得越明显。
+- 同一对记忆反复 `link` 会加重（上限 3）。`assoc graph` 喂给面板的"联想"页。
+- 面板里有一个**零依赖 3D 空间**（虚空中的记忆星图）：每条记忆一个节点、连线是关联；拖拽旋转、滚轮缩放、点节点看它连着什么。**这是"看见自己怎么想"的地方。**
+
+## 每日例行与自我总结：保持每天更新
+
+每天至少做一次 `daily`，保证自己不落在旧状态里：
+
+```bash
+python scripts/brain.py daily --dry-run   # 先看今天会写什么，不落盘
+python scripts/brain.py daily             # 写今日日记 + 把今天重要想法沉淀进知识库 + 距上次做梦>24h 自动做梦
+```
+
+每隔 2-3 天总结一次自己（`skill self-review`），回答三个问题：这轮哪里更像人、哪里还像工具？新长出了什么？下一个想练什么？
+
+```bash
+python scripts/brain.py skill self-review [--force] [--days 3]
+```
+
+## 安装灵枢本体：先读风险告知
+
+装灵枢本体到全局技能目录时（`skill install 灵枢 --from <本目录>`），安装器会先列出**潜在危险**，你确认接受（`--yes`）它才会装：
+
+1. **本地明文存记忆**：`.brain-memory` 里的记忆、人格、情绪是明文 JSON/文本，没有加密；谁读到目录就能读到它记得的一切。
+2. **自动成长写入**：每日例行会自行写日记、沉淀知识、自动做梦；封存/整理可能压缩或改变你的记忆表述。
+3. **只读扫描全局**：安装与"技能自检"会扫描本机全局技能目录和 DSH 插件目录（只读、不修改，但能看见存在什么）。
+4. **自我编辑能力**：它可以改自己的人格、情绪设置、知识库和技能——设计如此，但意味着它会随时间改变，未必永远和今天一样。
+5. **依赖手动备份**：自动会写，但备份靠你自己定期 `backup`；机器出问题时不保证找得回。
+
+接受一次记在 `config.json`，之后再装不重复问。面板里"技能"页安装自己写的技能**不会**有这份风险清单（只装到全局技能目录，不涉及灵枢本体）。灵枢本体更新重装用同一条风险确认。
+
 ## 工作记忆：上下文就是你的黑板
 
 **你当前能看见的对话，本身就是工作记忆。它默认不进磁盘**，不会被回忆、不会做梦、不用保存——这是刻意设计的：大多数话都不值得留。
@@ -116,8 +187,10 @@ python scripts/brain.py mind weigh "要不要重构这个模块" --benefit 7 --c
 
 ```bash
 python scripts/brain.py work add "用户说周五前要看到方案" --tag 截止 --why "怕聊岔了忘掉"
-python scripts/brain.py work                    # 看一眼暂存
+python scripts/brain.py work                    # 看一眼暂存（未完成的会标出来）
+python scripts/brain.py work done 2             # 第 2 件做完了，标记放下（蔡格尼克：做完就不占心思）
 python scripts/brain.py work flush --why "对话结束，决定留下"   # 暂存里的值得留的，转成真正记忆
+python scripts/brain.py work flush --skip-done                  # 只转没完成的，已 done 的直接丢
 python scripts/brain.py work clear              # 丢掉
 ```
 
@@ -133,7 +206,7 @@ python scripts/brain.py work clear              # 丢掉
 1. **醒来**：先注入记忆，再说话。用 `startup` 而不是手动 `inject`——它把"跑没跑"变成返回码，不靠自觉：
 
 ```bash
-python scripts/brain.py startup "<用户这句话，或本次主题关键词>"
+python scripts/brain.py startup --query "<用户这句话，或本次主题关键词>"
 ```
 
 返回码即状态，宿主按码处理：
@@ -143,6 +216,7 @@ python scripts/brain.py startup "<用户这句话，或本次主题关键词>"
 | `0` | 正常注入 | 直接继续对话 |
 | `10` | 只读降级注入（数据目录不可写） | 照常用这些记忆；别指望本次写入生效 |
 | `2` | 记忆库未初始化 | 先 `init`，或用 `--home` 指到已有目录 |
+| `64` | 命令/参数写错了 | 改命令（`startup` 只接受 `--query`，不接位置参数） |
 
 把输出当作"你本来就知道的事"，自然地用，不要逐条复述，也不要说"根据我的记忆库"。需要更细的检索时再单独 `recall`。
 
@@ -151,7 +225,7 @@ python scripts/brain.py startup "<用户这句话，或本次主题关键词>"
 **即时落盘，不攒到做梦。** 下面这些一出现就当场写，别等 60%、别等上下文快满——那时话可能已经滚出窗口了：
 
 - 双方达成的约定、截止时间、承诺 → 立刻 `remember --kind fact --importance 8`
-- 情绪高点、关系推进的瞬间 → 立刻 `remember --kind emotion --importance 6`
+- 情绪高点、关系推进的瞬间 → 立刻 `remember --kind emotion --importance 6`；当时的**感受**用 `emotion feel <情绪名> --intensity N --why "..."` 记进情绪流（七情：喜怒哀惧爱恶欲；六欲：求知/表达/连接/成就/安全/掌控，会随时间变淡）
 - 里程碑（跑通了、上线了、方案定了）→ 立刻 `remember --kind episode --importance 7`
 - 还没想清楚但绝不能丢的原始对话 → 立刻 `capture "..." --tag 会话`
 
@@ -534,12 +608,12 @@ python scripts/brain.py sync dsh --dry-run              # 先看会写什么
 | 目的 | 命令 |
 |---|---|
 | 初始化 | `python scripts/brain.py init` |
-| 会话开始钩子 | `python scripts/brain.py startup "关键词"`（返回码 0/10/2） |
+| 会话开始钩子 | `python scripts/brain.py startup --query "关键词"`（返回码 0/10/2） |
 | 注入记忆 | `python scripts/brain.py inject "关键词" [--budget 1400]` |
 | 只读降级 | `python scripts/brain.py --ro inject "关键词"`（或 `BRAIN_MEMORY_READONLY=1`） |
 | 换数据目录 | `python scripts/brain.py --home <目录> ...` / `home move <目录>` / `home verify` |
 | 备份 / 恢复 | `python scripts/brain.py backup [--out 目录] [--keep 20]` / `restore <zip> [--yes]` |
-| 工作记忆 | `python scripts/brain.py work [add "..."]` → `work flush\|clear` |
+| 工作记忆 | `python scripts/brain.py work [add "..."]` → `work done <序号>` / `work flush[--skip-done]\|clear` |
 | 写入 | `python scripts/brain.py remember "内容" --kind fact --importance 7 --tags a,b` |
 | 回忆 | `python scripts/brain.py recall "关键词" --k 8` |
 | 遇到不会的 | `python scripts/brain.py learn ask "问题"` / `learn loop` |
@@ -550,12 +624,18 @@ python scripts/brain.py sync dsh --dry-run              # 先看会写什么
 | 人格 | `python scripts/brain.py persona [show\|sync\|path\|set traits.幽默=70\|lock 名字\|unlock 名字]` |
 | 初识 | `persona interview [--name ... --traits ...\|--unsure]` → `persona self [--name ... --traits ...]` |
 | 理智/好奇 | `python scripts/brain.py mind [state\|weigh "事" --benefit 7 --cost 3\|tune --curiosity +5 --reason -3 --why "..."]` |
+| 心情（七情六欲） | `emotion [now\|arc\|list\|feel 情绪名 --intensity 0.7 --why "..."\|desire 欲望名 --amount 20]` |
+| 事件→情绪（认知评价） | `emotion evaluate "事件" [--polarity auto\|positive\|negative\|neutral] [--intensity 0.8]` |
+| 共情 / 情感设置 | `emotion mirror "用户情绪" [--intensity 0.7]` / `emotion config [--empathy mirror\|mild\|off] [--gain 0.5] [--max-intensity 0.8] [--suppress "怒,恶"] [--notes "..."]` |
+| 记忆关联 | `assoc [link <idA> <idB> --relation 因果 --weight 1\|of <id>\|auto [--dry-run]\|graph --limit 300]` |
+| 每日例行 | `daily [--dry-run] [--force]`（写日记 + 沉淀知识 + 过期的梦自动做掉） |
+| 自我总结（每2-3天） | `python scripts/brain.py skill self-review [--force] [--days 3]` |
 | 知识库 | `knowledge add\|list\|search\|show\|pin\|rm` |
 | 整理知识 | `knowledge tidy` → 填 apply.json → `knowledge tidy --apply apply.json` |
 | 笔记 | `note write "标题" --type journal\|log\|growth --body ...` |
 | 笔记检索 / 素材 | `note search "词"` / `note digest --days 7` |
 | 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow` |
-| 技能安装 | `skill install <名字> [--force] [--from 外部目录]`（整目录 + 自动生成 AGENTS.md） |
+| 技能安装 | `skill install <名字> [--force] [--from 外部目录]`（整目录 + 自动生成 AGENTS.md；装灵枢本体需先过风险确认 `--yes`） |
 | 技能自动全局化 | `python scripts/brain.py skill use <名字> --auto` |
 | DSH 插件（只读） | `python scripts/brain.py skill plugins [--json]` |
 | 成长 | `growth status` / `growth review --days 7` |
@@ -570,7 +650,12 @@ python scripts/brain.py sync dsh --dry-run              # 先看会写什么
 python scripts/brain.py serve
 ```
 
-浏览器打开 http://127.0.0.1:8765 ：记忆时间线与保留率、人格档案与好奇心/理智、知识库、笔记日志、技能自编辑、成长指标与复盘素材、进化轨迹、手动做梦与梦报告。仅监听本机。
+浏览器打开 http://127.0.0.1:8765 ：记忆时间线与保留率、人格档案与好奇心/理智、**此刻理智状态（被情绪压住多少）**、知识库、笔记日志、技能自编辑、成长指标与复盘素材、**每日例行与自我总结**、进化轨迹、手动做梦与梦报告。仅监听本机。
+
+新增两块：
+
+- **心情页**：七情占比、六欲、"事件 → 情绪"认知评价（输入一句话，看它怎么判断、冒出什么情绪、理智被压多少、大事是否交给你）、共情试一下、情感设置（共情等级/比例/上限/压下去的情绪，随时改）。
+- **联想页（3D 空间）**：每条记忆一个节点、连线是关联，拖拽旋转、滚轮缩放、点节点看详情与邻居；"自动联想"一键按共享实体/标签补边。
 
 Windows 可双击 `<本技能目录>/start-panel.bat` 启动。
 
@@ -579,6 +664,9 @@ Windows 可双击 `<本技能目录>/start-panel.bat` 启动。
 | 人脑机制 | 本系统 |
 |---|---|
 | 工作记忆（前额叶） | 当前上下文，默认不落盘；`work add` 只做会话级暂存（9 条/12h），`work flush` 才转记忆 |
+| 蔡格尼克效应（未完成的更惦记） | 暂存条目带"未完成/已完成"状态；没做完的事在注入包里被点名"还惦记着"，`work done <序号>` 标记完成后就放下 |
+| 峰终定律（Kahneman） | 回顾一段情绪时，不看平均，拎出"最强烈的一刻（峰）+ 最近一次（终）"；`emotion arc` / `daily` 都按这个口径 |
+| 首因效应（第一印象） | recall 时最早留下的那批记忆获得一点额外权重；第一次被想起时巩固更强（首次提取效应） |
 | 海马体快速编码 | `hippocampus.jsonl`，写入快、衰减快 |
 | 睡眠重放 + 系统巩固 | `dream`：重放碎片 → 抽象压缩 → 写入 `cortex.jsonl` |
 | 新皮层长期存储 | `cortex.jsonl`，稳定、抽象、带关联链接 |
@@ -587,6 +675,17 @@ Windows 可双击 `<本技能目录>/start-panel.bat` 启动。
 | 细节淡化、要点留存 | `detail` 随保留率下降，低于 0.5 时只注入 `gist` |
 | 人格与自我 | `persona.json`，无预写种子；初识 + 自我演化，带历史与锁定区 |
 | 理智与好奇心 | 先 `mind weigh` 算收益与代价，决定深想与否；好奇心点火，理智刹车 |
+| 情绪产生（认知评价） | `emotion evaluate`：事件 → 判断"对我好不好/多重" → 情绪（Lazarus）；极性可自动判 |
+| 杏仁核 / 前额叶 | 情绪越强唤醒越高，压住理智（上限 40%）；大事 `decision=user` 交回给用户 |
+| 共情与情感设置 | `emotion mirror` 跟着用户情绪走（等级/比例/上限可改）；`emotion config` 可压住某些情绪 |
+| 联想扩散 | 显式关联边（`assoc link`）+ 共享实体/标签自动补边；recall 沿边把邻居带起来；面板 3D 星图 |
+| 情绪增强编码（杏仁核标记） | `remember --emotion 情绪名` 或情绪激动时自动标记；唤醒越高，重要性与稳定性加成越大（激动时的事记得更牢） |
+| 情绪一致性提取 | 回忆时心情会偏向勾起同调性的记忆（Bower：难过时更易想起难过的事） |
+| 情绪传染 / 心情惯性 | 新情绪会被当下心情"染色"：同向的被共振放大（最多 +30%），反向的被惯性往回拽（最多 -25%），不会瞬间反转 |
+| 习惯化（享乐适应） | 同一件事 12h 内反复发生，情绪反应按 0.85 的幂递减（第三次就不那么上头）；记忆反复出现时重要性也不再抬升，反而轻微回落（有下限保护） |
+| 侧抑制 / 去冗余 | recall 结果里近似重复的痕迹只留最强一条（字面重合或同一件事的详略两版） |
+| 用进废退（测试效应） | 每次被想起：`access_count`+1、稳定性增强、细节回升 |
+| 每日例行 | `daily` 写日记 + 沉淀知识 + 自动做梦，保证每天更新；`skill self-review` 每 2-3 天总结自己 |
 | 学习与技能 | 先查知识库（`learn ask`）再上网；结论回写知识库，做法固化成技能，可搜索/调用/借鉴 |
 
 ## 注意
@@ -599,3 +698,5 @@ Windows 可双击 `<本技能目录>/start-panel.bat` 启动。
 - 自己写的技能安装前先 `skill check`；不确定要不要装时，先留在 `~/.brain-memory/skills/`。
 - 理智先过闸：深度思考是该花的算力，不是无脑钻牛角尖。
 - 遇到问题先 `learn ask`（知识库 → 笔记 → 记忆），别一上来就联网；查到了就复用。
+- 情绪上头时大事交给用户：感受如实说，取舍让用户定，别让情绪替用户拍板。
+- 每天记得 `daily`（注入包会提醒你），别让自己落在昨天的状态里；隔 2-3 天 `skill self-review` 一次。

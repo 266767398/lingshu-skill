@@ -66,8 +66,24 @@ def overview() -> dict:
         "dreams": dreams,
         "pending": pending,
         "mind": brain.mind_state(),
+        "mood": brain.mood_now(),
+        "emotion_arc": brain.emotion_arc(7),
+        "desires": brain.desire_state(),
+        "emotion_groups": brain.EMOTION_GROUPS,
+        "desire_defs": brain.DESIRES,
+        "rationality": brain.rationality(),
+        "emotion_cfg": brain.emotion_cfg(),
+        "daily_state": brain._daily_state(),
+        "last_self_review": load_config_last_review(),
         "onboarding": brain.onboarding_state(),
     }
+
+
+def load_config_last_review() -> float:
+    try:
+        return float(brain.load_config().get("last_self_review", 0) or 0)
+    except Exception:
+        return 0
 
 
 def workspace() -> dict:
@@ -186,6 +202,14 @@ class Handler(BaseHTTPRequestHandler):
             results = brain.recall(q, k=k, strengthen=False)
             self._json([{"memory": memory_view(m), "score": s, "parts": p} for m, s, p in results])
             return
+        if path == "/api/graph":
+            limit = _int_param(url, "limit", 300, 10, 800)
+            self._json(brain.assoc_graph(limit))
+            return
+        if path == "/api/assoc":
+            mid = (parse_qs(url.query).get("id") or [""])[0]
+            self._json({"id": mid, "neighbors": brain.assoc_of(mid)})
+            return
         self._json({"error": "not found"}, 404)
 
     def do_POST(self):
@@ -209,6 +233,7 @@ class Handler(BaseHTTPRequestHandler):
                     tags=data.get("tags") or [],
                     entities=data.get("entities") or [],
                     source="user",
+                    emotion=(data.get("emotion") or None),
                 )
                 self._json({"ok": True, "how": how, "memory": memory_view(rec)})
                 return
@@ -267,6 +292,91 @@ class Handler(BaseHTTPRequestHandler):
                 r = brain.mind_weigh(data.get("topic", ""), data.get("benefit", 5),
                                      data.get("cost", 5), data.get("confidence", 0.6),
                                      data.get("urgency", 0.5))
+                self._json({"ok": True, "result": r})
+                return
+
+            if path == "/api/emotion":
+                act = data.get("action", "now")
+                if act == "feel":
+                    brain.feel(data.get("emotion", ""), data.get("intensity", 0.6),
+                               why=data.get("why", ""), about=data.get("about", ""),
+                               decay_hours=data.get("decay_hours"))
+                    self._json({"ok": True, "mood": brain.mood_now(),
+                                "rationality": brain.rationality(),
+                                "emotion_arc": brain.emotion_arc(7),
+                                "desires": brain.desire_state()})
+                    return
+                if act == "evaluate":
+                    r = brain.emotion_evaluate(data.get("event", ""), data.get("polarity", "auto"),
+                                               data.get("importance", 0.6),
+                                               why=data.get("why", ""), about=data.get("about", ""))
+                    self._json({"ok": True, "result": r, "mood": brain.mood_now(),
+                                "rationality": brain.rationality(),
+                                "emotion_arc": brain.emotion_arc(7),
+                                "desires": brain.desire_state()})
+                    return
+                if act == "mirror":
+                    r = brain.emotion_mirror(data.get("emotion", ""), data.get("intensity", 0.5))
+                    self._json({"ok": True, "result": r, "mood": brain.mood_now(),
+                                "rationality": brain.rationality(),
+                                "emotion_arc": brain.emotion_arc(7),
+                                "desires": brain.desire_state()})
+                    return
+                if act == "config":
+                    updates = {}
+                    if data.get("empathy"):
+                        updates["empathy"] = {"level": data["empathy"]}
+                    if data.get("gain") is not None:
+                        updates["empathy"] = dict(updates.get("empathy", {}),
+                                                  gain=max(0.0, min(1.0, float(data["gain"]))))
+                    if data.get("max_intensity") is not None:
+                        updates["empathy"] = dict(updates.get("empathy", {}),
+                                                  max_intensity=max(0.0, min(1.0, float(data["max_intensity"]))))
+                    if data.get("suppressed") is not None:
+                        updates["suppressed"] = data.get("suppressed") or []
+                    if data.get("notes") is not None:
+                        updates["notes"] = data.get("notes")
+                    cfg = brain.save_emotion_cfg(updates)
+                    self._json({"ok": True, "emotion_cfg": cfg, "mood": brain.mood_now(),
+                                "rationality": brain.rationality()})
+                    return
+                if act == "desire":
+                    brain.desire_satisfy(data.get("emotion", ""), data.get("amount", 15))
+                    self._json({"ok": True, "mood": brain.mood_now(),
+                                "rationality": brain.rationality(),
+                                "emotion_arc": brain.emotion_arc(7),
+                                "desires": brain.desire_state()})
+                    return
+                self._json({"ok": True, "mood": brain.mood_now(),
+                            "rationality": brain.rationality(),
+                            "emotion_arc": brain.emotion_arc(7),
+                            "desires": brain.desire_state()})
+                return
+
+            if path == "/api/link":
+                act = data.get("action", "link")
+                if act == "link":
+                    r = brain.link_memory(data.get("a", ""), data.get("b", ""),
+                                          data.get("relation", "相关"),
+                                          data.get("weight", 1.0), data.get("why", ""))
+                elif act == "unlink":
+                    r = {"ok": brain.unlink_memory(data.get("a", ""), data.get("b", ""))}
+                elif act == "auto":
+                    r = brain.assoc_auto(dry_run=bool(data.get("dry_run")))
+                else:
+                    self._json({"error": "未知操作"}, 400)
+                    return
+                self._json({"ok": True, "result": r, "graph": brain.assoc_graph()})
+                return
+
+            if path == "/api/daily":
+                r = brain.daily(dry_run=bool(data.get("dry_run")), force=bool(data.get("force")))
+                self._json({"ok": True, "result": r, "overview": overview() if not data.get("dry_run") else None,
+                            "workspace": workspace() if not data.get("dry_run") else None})
+                return
+
+            if path == "/api/skill/self-review":
+                r = growth.self_review(force=bool(data.get("force")), days=int(data.get("days", 3) or 3))
                 self._json({"ok": True, "result": r})
                 return
 
@@ -368,9 +478,12 @@ class Handler(BaseHTTPRequestHandler):
                                             data.get("append"), data.get("description"))
                     self._json({"ok": True, "skill": res, "workspace": workspace()})
                 elif act == "install":
-                    self._json({"ok": True, "result": growth.install_skill(data.get("name", ""),
-                                                                          bool(data.get("force"))),
-                                "workspace": workspace()})
+                    res = growth.install_skill(data.get("name", ""),
+                                               bool(data.get("force")),
+                                               data.get("from_dir"),
+                                               accept_risk=bool(data.get("yes")))
+                    self._json({"ok": True, "result": res, "workspace": workspace()})
+                    return
                 elif act == "uninstall":
                     self._json({"ok": True, "result": growth.uninstall_skill(data.get("name", "")),
                                 "workspace": workspace()})
@@ -409,6 +522,8 @@ class Handler(BaseHTTPRequestHandler):
 
             self._json({"error": "not found"}, 404)
         except Exception as exc:  # 面板需要把错误显示给用户
+            import traceback
+            traceback.print_exc()
             self._json({"error": str(exc)}, 500)
 
 

@@ -11,7 +11,8 @@
   - [做梦：上下文将满时的整理](#做梦上下文将满时的整理)
   - [上下文水位三级防线](#上下文水位三级防线)
   - [工作记忆](#工作记忆)
-  - [模糊联想回忆](#模糊联想回忆)
+- [情绪与类人机制](#情绪与类人机制)
+- [模糊联想回忆](#模糊联想回忆)
 - [人格](#人格)
 - [成长路径](#成长路径)
   - [知识库](#知识库)
@@ -61,11 +62,24 @@
 
 ### 工作记忆
 
-当前上下文本身就是工作记忆，默认不落盘。只有需要留一手时才 `work add`（会话级暂存，最多 9 条，12 小时后自动丢）。
+当前上下文本身就是工作记忆，默认不落盘。只有需要留一手时才 `work add`（会话级暂存，最多 9 条，12 小时后自动丢）。每件带"未完成/已完成"状态（蔡格尼克效应）：没做完的事会在注入包里被点名"还惦记着"，做完用 `work done <序号>` 标记就放下；`work flush` 把值得留的转成真正记忆（`--skip-done` 只转没完成的，已 done 的直接丢），`work clear` 丢掉。
+
+### 情绪与类人机制
+
+情绪系统把"心情"做成一条会衰减的曲线，而不是一行写死的字：
+
+- **两条轴**：valence（喜/哀，-1~1）+ arousal（强度，0~1），用**半衰期叠加**算出此刻心情（`emotion now`），看轨迹用 `emotion arc`，情绪共 7 大类（`emotion list`）。
+- **怎么产生情绪**：`emotion evaluate` 认知评价自动产生（不是手动演出来的）、`emotion mirror` 共情跟入用户情绪、`emotion feel` 手动记一笔。共情强度与抑制清单是用户随时可改的设定（`emotion config`）。
+- **情绪增强编码**：情绪强烈时记住的事更牢，记录带 `emotion` 标记（杏仁核打个标签）。
+- **情绪传染 / 心情惯性**：新情绪会被当下心情"染色"——同向被点燃放大，反向被惯性往回拽，不会瞬间反转。
+- **习惯化 / 享乐适应**：同一件事反复出现，情绪反应递减；反复记的同一件事重要性也不再步步抬升（但保留下限）。
+- **杏仁核劫持**：情绪最强烈时理智权重被压下，但上限封在 40%——再上头也得给人留余地。
+- **峰终定律**：对一段体验的记忆，几乎只由"最强烈的一刻"和"结尾"决定，情绪总结按这个口径出。
+- **首因效应**：最早留下的印象占权更高，首次被想起的记忆强化更深。
 
 ### 模糊联想回忆
 
-`recall` 不靠精确匹配：中文用字符二元组、英文/数字用词做模糊联想，按 **相关度 + 近期性 + 重要性** 加权排序，并在命中后自动强化（越用越牢）。数字/编号被保留为独立词元，不会把"版本0"和"版本1"误当成同一条。
+`recall` 不靠精确匹配：中文用字符二元组、英文/数字用词做模糊联想，按 **相关度 + 近期性 + 重要性 + 首因** 加权排序，并在命中后自动强化（越用越牢）。数字/编号被保留为独立词元，不会把"版本0"和"版本1"误当成同一条。
 
 ## 人格
 
@@ -128,11 +142,15 @@ python scripts/brain.py init
 # 写一条记忆
 python scripts/brain.py remember "用户喜欢用 Python 写脚本" --kind preference --importance 8
 
-# 会话开始注入记忆（返回码 0=正常 10=只读降级 2=未初始化）
+# 会话开始注入记忆（返回码 0=正常 10=只读降级 2=未初始化 64=命令写错）
 python scripts/brain.py startup --query "本次会话主题"
 
 # 回忆
 python scripts/brain.py recall "Python"
+
+# 记一次心情，看此刻心情
+python scripts/brain.py emotion feel 开心 --intensity 0.8 --about "搞定了 bug"
+python scripts/brain.py emotion now
 
 # 上下文 75% 了，做梦整理
 python scripts/brain.py dream --auto
@@ -153,7 +171,8 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 原样封存 | `capture "<原文>" [--tag 逃生]` |
 | 做梦 | `dream` / `dream --apply apply.json` / `dream --auto` |
 | 人格 | `persona show\|self\|interview\|mind\|state\|edit` |
-| 工作记忆 | `work status\|add\|list\|flush\|clear` |
+| 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config` |
+| 工作记忆 | `work status\|add\|list\|done <序号>\|flush [--skip-done]\|clear` |
 | 知识库 | `knowledge add\|list\|search\|show\|pin\|rm\|tidy` |
 | 笔记 | `note write\|search\|digest` |
 | 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow` |
@@ -189,6 +208,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 ├── cortex.jsonl            # 长期记忆（皮层）
 ├── dust.jsonl              # 淡忘区
 ├── working.jsonl           # 工作记忆（会话暂存）
+├── emotions.jsonl          # 情绪事件流（心情按半衰期从这里叠加出来）
 ├── persona.json            # 人格档案
 ├── config.json             # 配置（阈值/权重）
 ├── skills/                 # 自己写的技能

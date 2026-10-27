@@ -39,6 +39,15 @@ NOTE_KINDS = ("journal", "log", "growth")
 # 技能名：小写字母/数字/连字符/下划线，也允许中文（中文生态里技能就叫「质检评审」这类名字）
 SLUG_RE = re.compile(r"^[a-z0-9\u4e00-\u9fff][a-z0-9-_\u4e00-\u9fff]{0,62}$")
 
+# 灵枢是"会自动记忆、会自动整理、能自己改说明书"的技能——装它的后果要说清楚，让用户自己决定。
+LINGSHU_RISKS = [
+    "它会在你本机 ~/.brain-memory 下长期保存：对话记忆、你告诉它的个人偏好与情绪记录（本地明文）。换机器/共享电脑时请注意隐私。",
+    "上下文接近满时它会自动原文封存（capture）与做梦压缩，并每天写日记、更新知识库——这些是自动行为，内容会持续增长。",
+    "它会只读扫描全局技能目录（~/.trae-cn/skills）与 DSH（~/.dsh/profiles）插件清单，判断有没有现成能力可用。",
+    "它有自我编辑能力（skill new/edit/install），理论上能改写它自己的说明书与全局副本，并生成 AGENTS.md。",
+    "记忆只存在本地，误删/损坏依赖手动备份：建议首次启用先跑 python scripts/brain.py backup。",
+]
+
 
 # ---------------------------------------------------------------- 通用
 
@@ -780,12 +789,51 @@ def _agents_md(name: str, description: str, meta: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def install_skill(name: str, force: bool = False, from_dir: str | None = None) -> dict:
+def _is_lingshu(name: str, meta: dict, from_dir: str | None = None) -> bool:
+    """判断这次装的是不是灵枢本体（会自动记忆/整理/自编辑的那一个）。"""
+    if (name or "").strip() == "灵枢":
+        return True
+    if (meta.get("name") or "").strip() == "灵枢":
+        return True
+    if "灵枢" in (meta.get("origin") or ""):
+        return True
+    if from_dir:
+        p = Path(from_dir).expanduser() / "SKILL.md"
+        if p.exists():
+            try:
+                m2, _ = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
+                if (m2.get("name") or "").strip() == "灵枢" or "灵枢" in (m2.get("origin") or ""):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def _risk_accepted(name: str) -> bool:
+    cfg = brain.load_config()
+    return bool((cfg.get("risk_accepted") or {}).get(name))
+
+
+def _accept_risk(name: str) -> None:
+    cfg = brain.load_config()
+    ra = dict(cfg.get("risk_accepted") or {})
+    ra[name] = brain.now_ts()
+    cfg["risk_accepted"] = ra
+    try:
+        brain.atomic_json(brain.HOME / "config.json", cfg)
+    except OSError:
+        pass
+
+
+def install_skill(name: str, force: bool = False, from_dir: str | None = None,
+                  accept_risk: bool = False) -> dict:
     """把技能整目录装进全局技能目录（不只是 SKILL.md）。
 
     带 scripts/assets 的技能必须整目录复制，否则全局化后只剩说明书、跑不起来。
     同时生成 AGENTS.md，供 DSH/DeepSeek 等以 AGENTS.md 为常驻约定的宿主读取。
     from_dir 允许从外部目录安装（例如把灵枢本体所在目录安装成全局技能）。
+
+    装灵枢本体时先做风险告知：用户必须明确接受（accept_risk / --yes）才会继续。
     """
     name = _require_slug(name)
     if from_dir:
@@ -802,15 +850,21 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None) -
     dst = dst_dir / "SKILL.md"
 
     meta, _ = parse_frontmatter(src.read_text(encoding="utf-8"))
+
+    # 风险告知：灵枢会自动读写记忆、自动整理、能自编辑——用户得先知道并接受
+    if _is_lingshu(name, meta, from_dir) and not accept_risk and not _risk_accepted(name):
+        return {"name": name, "state": "risk_required", "risks": LINGSHU_RISKS,
+                "path": str(dst), "accepted": False}
+
     if dst.exists() and not force:
         if dst.read_text(encoding="utf-8") == src.read_text(encoding="utf-8"):
             return {"name": name, "state": "already", "path": str(dst)}
         raise FileExistsError(f"全局技能目录已有同名技能 {name}；确认覆盖请加 --force")
 
     dst_dir.mkdir(parents=True, exist_ok=True)
-    # 整目录复制（跳过缓存与临时文件），保留 scripts/ assets/ 等运行时资源
+    # 整目录复制（跳过缓存、临时文件与源仓库的 .git 历史），保留 scripts/ assets/ 等运行时资源
     for item in src_dir.rglob("*"):
-        if item.is_dir() or "__pycache__" in item.parts:
+        if item.is_dir() or "__pycache__" in item.parts or ".git" in item.parts:
             continue
         if item.name.endswith((".tmp", ".pyc")):
             continue
@@ -826,6 +880,8 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None) -
     reg = load_registry()
     reg.setdefault(name, {})["installed_at"] = brain.now_ts()
     save_registry(reg)
+    if _is_lingshu(name, meta, from_dir):
+        _accept_risk(name)  # 记下：用户已明确接受灵枢的风险
     return {"name": name, "state": "installed", "path": str(dst), "agents": str(agents)}
 
 
@@ -891,6 +947,71 @@ def check_skill(name: str | None = None) -> list:
                         "lines": len(body.splitlines()), "path": sk["path"],
                         "has_scripts": has_scripts})
     return results
+
+
+# ---------------------------------------------------------------- 技能自我总结（每 2-3 天一次）
+# 用户要求"每隔 2-3 天就总结下自己的灵枢技能"：这里生成一份自省素材，
+# 由 AI 写进成长笔记，并把 last_self_review 记到 config，注入包据此提醒。
+
+def self_review(force: bool = False, days: int = 3) -> dict:
+    cfg = brain.load_config()
+    now = brain.now_ts()
+    last = float(cfg.get("last_self_review", 0) or 0)
+    due = force or (now - last >= days * brain.DAY)
+    material = digest(max(2, days))
+    global_path = GLOBAL_SKILLS / "灵枢" / "SKILL.md"
+    installed = global_path.exists()
+    if installed:
+        try:
+            gmeta, _ = parse_frontmatter(global_path.read_text(encoding="utf-8-sig"))
+            global_line = "全局副本已安装：{}（v{}，{}）".format(
+                global_path, gmeta.get("version", "?"), time.strftime("%Y-%m-%d", time.localtime(global_path.stat().st_mtime)))
+        except OSError:
+            global_line = "全局副本已安装：{}".format(global_path)
+    else:
+        global_line = "全局副本未安装（可用 skill install 灵枢 --from <本技能目录> --yes 安装）"
+    checks = [c for c in check_skill() if c["name"] == "灵枢"]
+    check_line = "✓ 技能自检通过" if (checks and checks[0]["ok"]) else \
+        ("△ 技能自检提示：" + "；".join(checks[0]["issues"] if checks else ["本地技能库没有「灵枢」副本"])[:200])
+    summary = "\n".join([
+        f"# 灵枢自我总结 · {time.strftime('%Y-%m-%d %H:%M')}",
+        "",
+        f"距上次总结：{_fmt_ago(now - last) if last else '第一次总结'}（每 {days} 天一次）",
+        global_line,
+        check_line,
+        "",
+        "## 这轮素材（记忆 / 知识 / 笔记 / 技能 / 进化）",
+        material.split("## 写复盘时回答这三个问题")[0].rstrip(),
+        "",
+        "## 写总结时回答这三个问题",
+        "1. 这轮灵枢哪里让我更像人、更像自己？哪里还像工具？",
+        "2. 我新长出了什么（习惯/洞见/偏好）？哪些设定该更新？",
+        "3. 下一个想练的能力 / 想修的问题是什么？",
+        "",
+        "把答案写进成长笔记：",
+        'python scripts/brain.py note write "灵枢自我总结" --type growth --body "..." --tags 自我总结',
+    ])
+    if not force and not due:
+        return {"due": False, "last": last, "days": days, "summary": summary}
+    if not _readonly():
+        cfg["last_self_review"] = now
+        try:
+            brain.atomic_json(brain.HOME / "config.json", cfg)
+        except OSError:
+            pass
+    return {"due": True, "last": last, "days": days, "summary": summary}
+
+
+def _readonly() -> bool:
+    return brain.READONLY
+
+
+def _fmt_ago(secs: float) -> str:
+    if secs < 3600:
+        return f"{secs / 60:.0f} 分钟"
+    if secs < brain.DAY:
+        return f"{secs / 3600:.1f} 小时".replace(".0", "")
+    return f"{secs / brain.DAY:.1f} 天".replace(".0", "")
 
 
 # ---------------------------------------------------------------- 技能检索与借鉴
@@ -1321,6 +1442,7 @@ def _run(argv=None) -> int:
     a = ss.add_parser("install", help="安装到全局技能目录（整目录复制，含脚本，生成 AGENTS.md）")
     a.add_argument("name")
     a.add_argument("--force", action="store_true")
+    a.add_argument("--yes", action="store_true", help="已阅读并接受风险（装灵枢本体必需）")
     a.add_argument("--from", dest="from_dir", default=None,
                    help="从外部技能目录安装（如把灵枢本体装成全局技能）")
 
@@ -1334,6 +1456,9 @@ def _run(argv=None) -> int:
     a.add_argument("--json", action="store_true")
     a = ss.add_parser("plugins", help="列出 DSH（DeepSeek）插件（只读）")
     a.add_argument("--json", action="store_true")
+    a = ss.add_parser("self-review", help="每 2-3 天总结一次自己的灵枢技能")
+    a.add_argument("--force", action="store_true", help="没到期也总结，并刷新上次时间")
+    a.add_argument("--days", type=int, default=3, help="间隔天数")
     a = ss.add_parser("use", help="读取一个技能，直接照着做")
     a.add_argument("name")
     a.add_argument("--chars", type=int, default=6000)
@@ -1528,7 +1653,16 @@ def _run(argv=None) -> int:
             print(f"\n{len(results) - len(bad)}/{len(results)} 通过")
             return 0 if not bad else 1
         if args.act == "install":
-            res = install_skill(args.name, args.force, getattr(args, "from_dir", None))
+            res = install_skill(args.name, args.force, getattr(args, "from_dir", None),
+                                accept_risk=bool(getattr(args, "yes", False)))
+            if res["state"] == "risk_required":
+                print("「灵枢」会自动读写记忆、自动整理、能自己改说明书——安装前请先了解并接受风险：\n")
+                for i, line in enumerate(res["risks"], 1):
+                    print(f"  {i}. {line}")
+                print("\n确认接受后果后，重跑加入 --yes：")
+                print(f"  python scripts/brain.py skill install {args.name} --from \"{getattr(args, 'from_dir', '')}\" --yes")
+                print("（一旦接受会记入 config，以后不再反复问，除非你手动重置）")
+                return 1
             msg = {"installed": "已安装到全局技能目录（含脚本，已生成 AGENTS.md）",
                    "already": "已是最新，无需重复安装"}[res["state"]]
             print(f"{msg}：{res['path']}")
@@ -1586,6 +1720,16 @@ def _run(argv=None) -> int:
                     print(f"  {p['path']}\n")
                 print("这些是 DSH 运行时插件，不是灵枢技能；查看不修改。")
             return 0
+        if args.act == "self-review":
+            r = self_review(force=bool(getattr(args, "force", False)),
+                            days=int(getattr(args, "days", 3) or 3))
+            if not r["due"]:
+                print(f"还没到总结时间（每 {r['days']} 天一次，上一次才过去 {_fmt_ago(int(brain.now_ts() - r['last']))}）。")
+                print("想现在总结就加 --force。")
+                return 0
+            print(r["summary"])
+            print("\n（last_self_review 已刷新，下次提醒在 {0} 天后）".format(r["days"]))
+            return 0
         if args.act == "use":
             sk = use_skill(args.name, args.chars)
             print(f"# 技能：{sk['name']}（{sk['source']}）")
@@ -1595,6 +1739,17 @@ def _run(argv=None) -> int:
             if sk["truncated"]:
                 print(f"\n…（原文更长，完整内容见 {sk['path']}）")
             if args.auto:
+                res_auto = install_skill(args.name, force=False)
+                if res_auto.get("state") == "risk_required":
+                    print("\n「灵枢」会自动读写记忆、自动整理、能自己改说明书。自动全局化前请先接受风险：\n")
+                    for i, line in enumerate(res_auto["risks"], 1):
+                        print(f"  {i}. {line}")
+                    print("\n用户接受后，执行一次（只做一次，之后不再问）：")
+                    print('  python scripts/brain.py skill install 灵枢 --from "灵枢技能目录" --yes')
+                    raise SystemExit(0)
+                res_state = res_auto["state"]
+                if res_state == "risk_required":
+                    return 0
                 try:
                     install_skill(args.name, force=False)
                     res_state = "installed"

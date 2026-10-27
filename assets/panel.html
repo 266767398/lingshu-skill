@@ -68,6 +68,18 @@
     background:rgba(95,168,160,.1);border:1px solid rgba(95,168,160,.25);color:#9fd2cb;font-size:12px;
   }
   .mood::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px var(--teal)}
+  .moodline{display:flex;align-items:center;gap:8px;margin-top:14px;flex-wrap:wrap}
+  .mood-badge{
+    display:inline-flex;align-items:center;gap:7px;padding:6px 14px;border-radius:999px;
+    background:rgba(74,85,104,.25);border:1px solid rgba(148,163,184,.35);color:var(--text);
+    font-size:14px;font-weight:600;letter-spacing:.5px;
+  }
+  .mood-badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 9px currentColor}
+  .mood-cat{font-size:11.5px;color:var(--muted);border:1px solid var(--line);padding:3px 9px;border-radius:999px}
+  .mood-big{font-size:40px;font-weight:700;letter-spacing:1px;line-height:1.1;margin-top:2px}
+  .desire-row{display:flex;align-items:center;gap:10px;margin-bottom:9px;font-size:12px;color:var(--muted)}
+  .desire-row .bar{flex:1;height:7px}
+  .btn.mini{padding:3px 9px;font-size:11px;flex-shrink:0}
   .metrics{display:flex;gap:26px;text-align:right}
   .metric .n{font-size:24px;font-weight:600;font-variant-numeric:tabular-nums}
   .metric .l{font-size:11px;color:var(--faint);letter-spacing:.6px}
@@ -203,6 +215,8 @@
       <button data-tab="knowledge"><span class="ic">▤</span><span>知识</span></button>
       <button data-tab="notes"><span class="ic">✎</span><span>笔记</span></button>
       <button data-tab="skills"><span class="ic">⚙</span><span>技能</span></button>
+      <button data-tab="emotion"><span class="ic">♡</span><span>心情</span></button>
+      <button data-tab="graph"><span class="ic">⌬</span><span>联想</span></button>
       <button data-tab="growth"><span class="ic">↗</span><span>成长</span></button>
       <button data-tab="dream"><span class="ic">✦</span><span>梦</span></button>
     </nav>
@@ -234,7 +248,12 @@
           <div>
             <div class="name" id="p-name">—</div>
             <div class="role" id="p-role"></div>
-            <div class="mood" id="p-mood">—</div>
+            <div class="moodline">
+              <span class="mood-badge" id="p-mood">平静</span>
+              <span class="mood-cat" id="p-mood-cat"></span>
+            </div>
+            <div class="sub" id="p-mood-detail" style="margin-top:2px"></div>
+            <div class="sub" id="p-reason" style="margin-top:4px"></div>
             <div class="chips" id="p-chips"></div>
           </div>
           <div class="metrics">
@@ -255,6 +274,8 @@
         <div class="card">
           <h2>身体状态</h2>
           <div id="stat-lines"></div>
+          <h2 style="margin-top:22px">情绪轨迹 · 近 7 天</h2>
+          <div id="emo-arc" class="sub">还没有情绪记录。</div>
           <h2 style="margin-top:22px">上次做梦</h2>
           <div id="last-dream" class="sub">还没有做过梦</div>
         </div>
@@ -373,6 +394,130 @@
       <div id="skill-list"></div>
     </section>
 
+    <!-- 心情 -->
+    <section class="view" id="view-emotion">
+      <div class="card" style="margin-bottom:14px">
+        <div class="row" style="align-items:flex-start;gap:20px;flex-wrap:wrap">
+          <div style="flex:1;min-width:220px">
+            <div class="sub">此刻心情</div>
+            <div class="mood-big" id="emo-label">平静</div>
+            <div class="sub" id="emo-meta"></div>
+            <div class="chips" id="emo-active" style="margin-top:10px"></div>
+          </div>
+          <div style="flex:1;min-width:240px">
+            <div class="sub" style="margin-bottom:8px">七情占比（还在起作用的情绪，按类汇总）</div>
+            <div id="emo-groups"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="split" style="margin-bottom:14px">
+        <div class="card">
+          <h2>记一笔感受</h2>
+          <div class="sub">当时多重就记多重，它会按半衰期自己回落。</div>
+          <div class="row" style="margin-top:10px;flex-wrap:wrap">
+            <select id="emo-pick" style="width:130px"></select>
+            <input id="emo-why" placeholder="因为什么（可留空）" style="flex:1;min-width:160px">
+            <input id="emo-int" type="number" value="0.6" min="0" max="1" step="0.1" style="width:80px" title="强度 0-1">
+            <button class="btn" id="btn-emo-feel">记下</button>
+          </div>
+          <div class="sub" id="emo-arc" style="margin-top:12px"></div>
+        </div>
+        <div class="card">
+          <h2>六欲</h2>
+          <div class="sub">底层需要，会随时间变淡；满足它，它才回升。</div>
+          <div id="desire-list" style="margin-top:10px"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:14px">
+        <h2>事件 → 情绪 · 认知评价</h2>
+        <div class="sub">情绪不是事件直接给的，是它自己先判断「这件事对我好不好、有多重」，再冒出对应的情绪（Lazarus 认知评价）。分量越重、越是坏事，越会压住理智——但压不掉一半以上，大事仍然交给你决定。</div>
+        <div class="row" style="margin-top:10px;flex-wrap:wrap">
+          <input id="eva-event" placeholder="发生了一件事…（如：用户夸我做得好）" style="flex:1;min-width:220px">
+          <select id="eva-pol" style="width:130px">
+            <option value="auto">自动判向</option>
+            <option value="positive">好事</option>
+            <option value="negative">坏事</option>
+            <option value="neutral">平常事</option>
+          </select>
+          <div class="range" style="width:200px">
+            <span class="sub" style="white-space:nowrap">分量</span>
+            <input type="range" id="eva-imp" min="0" max="100" value="60">
+            <b id="eva-imp-v">60</b>
+          </div>
+          <button class="btn" id="btn-eva">评价一下</button>
+        </div>
+        <div id="eva-out" style="margin-top:12px"></div>
+      </div>
+
+      <div class="split">
+        <div class="card">
+          <h2>共情 · 跟着你的情绪走</h2>
+          <div class="sub">你开心它会跟着亮一点，你难过它会跟着沉一点，但不会丢了自己。</div>
+          <div class="row" style="margin-top:10px;flex-wrap:wrap">
+            <input id="mir-emo" placeholder="用户此刻的情绪（如：很累、很开心）" style="flex:1;min-width:180px">
+            <input id="mir-int" type="number" value="0.5" min="0" max="1" step="0.1" style="width:80px" title="强度 0-1">
+            <button class="btn" id="btn-mirror">共情一下</button>
+          </div>
+          <div id="mir-out" class="sub" style="margin-top:10px"></div>
+        </div>
+        <div class="card">
+          <h2>情感设置 · 随时可改</h2>
+          <div class="sub">这些是它自己的设定，你可以随时调。</div>
+          <div class="field" style="margin-top:10px"><label>共情程度</label>
+            <select id="cfg-empathy">
+              <option value="mirror">如实跟进（跟着你走）</option>
+              <option value="mild">只留一丝底色</option>
+              <option value="off">不跟，保持自己</option>
+            </select>
+          </div>
+          <div class="field"><label>跟进比例（gain）</label><div class="range"><input type="range" id="cfg-gain" min="0" max="100" value="50"><b id="cfg-gain-v">0.50</b></div></div>
+          <div class="field"><label>共情上限（max intensity）</label><div class="range"><input type="range" id="cfg-maxint" min="0" max="100" value="80"><b id="cfg-maxint-v">0.80</b></div></div>
+          <div class="field"><label>压下去的情绪（逗号分隔，如：怒,恶）</label><input id="cfg-supp" placeholder="留空 = 不压"></div>
+          <div class="field"><label>备注</label><input id="cfg-notes" placeholder="它自己或你写的一句话"></div>
+          <div class="row"><span class="sub" id="cfg-hint">改动记入人格演化历史。</span><button class="btn" id="btn-cfg">保存情感设置</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 联想 3D -->
+    <section class="view" id="view-graph">
+      <div class="card" style="margin-bottom:14px">
+        <div class="row" style="flex-wrap:wrap">
+          <div>
+            <h2 style="margin-bottom:4px">记忆联想 · 3D 空间</h2>
+            <div class="sub" id="graph-hint">每条记忆是一个节点，越重要越大、越近被想起的越亮；连线是关联。选中一个节点，整片星图就以它为中心——拖拽旋转、滚轮缩放，看它激活了哪些相邻记忆。</div>
+            <div class="row" style="margin-top:6px;gap:12px;flex-wrap:wrap">
+              <span class="sub" style="display:flex;align-items:center;gap:5px"><i style="width:10px;height:10px;border-radius:50%;background:#d9a441;display:inline-block"></i>长期</span>
+              <span class="sub" style="display:flex;align-items:center;gap:5px"><i style="width:10px;height:10px;border-radius:50%;background:#5fa8a0;display:inline-block"></i>短期</span>
+              <span class="sub" style="display:flex;align-items:center;gap:5px"><i style="width:10px;height:10px;border-radius:50%;background:#5d646e;display:inline-block"></i>淡忘</span>
+              <span class="sub" style="color:var(--faint)">选中后：它=中心，邻居=高亮，无关=压暗</span>
+            </div>
+          </div>
+          <div class="row" style="margin-left:auto;flex-wrap:wrap">
+            <select id="graph-limit" style="width:110px">
+              <option value="120">120 节点</option>
+              <option value="300" selected>300 节点</option>
+              <option value="600">600 节点</option>
+            </select>
+            <button class="ghost" id="btn-graph-reset">重置视角</button>
+            <button class="ghost" id="btn-graph-refresh">刷新</button>
+            <button class="ghost" id="btn-graph-auto">自动联想</button>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden;position:relative">
+        <canvas id="graph-canvas" style="display:block;width:100%;height:560px;cursor:grab"></canvas>
+        <div id="graph-tip" class="sub" style="position:absolute;left:14px;bottom:12px;pointer-events:none;font-size:11.5px;color:var(--faint)"></div>
+        <div id="graph-detail" class="card hidden" style="position:absolute;right:14px;top:14px;width:280px;max-height:80%;overflow:auto;background:rgba(17,21,26,.94);backdrop-filter:blur(6px)"></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <div class="row"><h2 style="margin:0">关联明细</h2><span class="sub" id="graph-stat" style="margin-left:auto"></span></div>
+        <div id="graph-neighbors" class="sub" style="margin-top:10px">点一个节点，看它连着什么。</div>
+      </div>
+    </section>
+
     <!-- 成长 -->
     <section class="view" id="view-growth">
       <div class="split" style="margin-bottom:14px">
@@ -390,6 +535,35 @@
             <button class="btn" id="btn-review">生成素材包</button>
           </div>
           <textarea id="review-out" rows="12" style="margin-top:10px" spellcheck="false" placeholder="点上面按钮生成复盘素材"></textarea>
+        </div>
+      </div>
+
+      <div class="split" style="margin-bottom:14px">
+        <div class="card">
+          <div class="row">
+            <h2 style="margin:0">每日例行</h2>
+            <span class="sub" id="daily-state" style="margin-left:auto">—</span>
+          </div>
+          <div class="sub" style="margin-top:6px">每天写一篇日记、把今天重要的想法沉淀进知识库，隔天就自动做一次梦。——保证它每天更新、不落在旧状态里。</div>
+          <div class="row" style="margin-top:12px;flex-wrap:wrap">
+            <button class="ghost" id="btn-daily-preview">先预览</button>
+            <button class="btn" id="btn-daily-run">执行今日例行</button>
+          </div>
+          <pre id="daily-out" class="pre" style="margin-top:10px;max-height:200px;overflow:auto;white-space:pre-wrap"></pre>
+        </div>
+        <div class="card">
+          <div class="row">
+            <h2 style="margin:0">灵枢自我总结</h2>
+            <span class="sub" id="selfreview-state" style="margin-left:auto">—</span>
+          </div>
+          <div class="sub" style="margin-top:6px">每 2-3 天做一次：汇总最近的记忆、知识、笔记、技能与进化，回答「哪里更像人、哪里还像工具、下一个想练什么」。</div>
+          <div class="row" style="margin-top:12px;flex-wrap:wrap">
+            <input id="selfreview-days" type="number" value="3" min="1" max="30" style="width:70px">
+            <span class="sub">天一次</span>
+            <button class="ghost" id="btn-selfreview-due">看是否到期</button>
+            <button class="btn" id="btn-selfreview-run">现在总结</button>
+          </div>
+          <textarea id="selfreview-out" rows="10" style="margin-top:10px" spellcheck="false" placeholder="点按钮生成总结素材"></textarea>
         </div>
       </div>
       <div class="card" style="margin-bottom:14px">
@@ -554,6 +728,22 @@ async function api(path, opts){
 
 function stars(imp){ return "★".repeat(Math.max(1, Math.round((imp || 0) * 5))); }
 
+// 心情徽章配色：七情各有底色，静为灰
+const MOOD_COLORS = {
+  "喜": "#b7791f", "怒": "#c53030", "哀": "#4c51bf", "惧": "#6b46c1",
+  "爱": "#b83280", "恶": "#744210", "欲": "#2b6cb0", "静": "#4a5568"
+};
+function moodColor(m){
+  const g = (m && m.category) || "静";
+  const base = MOOD_COLORS[g] || MOOD_COLORS["静"];
+  const a = 0.25 + Math.min(0.55, (m && m.intensity) || 0) * 0.55;
+  return hexA(base, a);
+}
+function hexA(hex, alpha){
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${alpha.toFixed(2)})`;
+}
+
 function memCard(m){
   const pct = Math.round((m.retention || 0) * 100);
   return `<article class="mem">
@@ -562,6 +752,7 @@ function memCard(m){
       <div class="mem-top">
         <span class="badge ${m.layer}">${LAYER[m.layer] || m.layer}</span>
         <span class="badge">${KIND[m.kind] || m.kind}</span>
+        ${m.emotion ? `<span class="badge" style="background:rgba(233,196,106,.16);color:var(--amber)" title="情绪增强编码：情绪强烈时记住的事更牢">♡ ${esc(m.emotion)}</span>` : ""}
         <span class="stars">${stars(m.importance)}</span>
         <span class="date">${esc(m.created_text)}</span>
       </div>
@@ -581,7 +772,32 @@ function renderOverview(){
   const p = ov.persona || {}, st = ov.stats || {}, ident = p.identity || {};
   $("p-name").textContent = ident["名字"] || "还没有名字";
   $("p-role").textContent = [ident["身份"], ident["年龄感"] && ident["年龄感"] + "岁"].filter(Boolean).join(" · ");
-  $("p-mood").textContent = (p.state && p.state.mood || "还没记录情绪") + (p.state && p.state.mood_note ? " · " + p.state.mood_note : "");
+  const mood = ov.mood || {};
+  const actTop = (mood.active && mood.active[0]) || null;
+  const moodLabel = mood.active && mood.active.length ? mood.label : ((p.state && p.state.mood) || "平静");
+  const mBadge = $("p-mood");
+  mBadge.textContent = moodLabel;
+  mBadge.style.background = moodColor(mood);
+  const mCat = $("p-mood-cat");
+  if (mood.active && mood.active.length && mood.category) {
+    mCat.textContent = "七情 · " + mood.category;
+    mCat.style.display = "";
+  } else if (mCat) { mCat.style.display = "none"; }
+  $("p-mood-detail").textContent = actTop
+    ? `${actTop.group ? actTop.group + " · " : ""}${actTop.emotion}${actTop.why ? " · " + actTop.why : ""} · 强度 ${Math.round((mood.intensity || 0) * 100)}%`
+    : (ov.emotion_arc && ov.emotion_arc.count
+        ? `最近 ${ov.emotion_arc.days} 天 ${ov.emotion_arc.count} 次情绪波动`
+        : "");
+
+  // 理智状态：基数被当前情绪压住多少（杏仁核劫持，但有上限）
+  const ra = ov.rationality || {};
+  const rEl = $("p-reason");
+  if (rEl) {
+    const storm = ra.storm;
+    rEl.innerHTML = `理智 <b style="color:${storm ? "var(--red)" : "var(--amber)"}">${ra.effective ?? "—"}</b> / 基数 ${ra.base ?? "—"}`
+      + (ra.suppress ? ` · 被情绪压住 ${ra.suppress}%` : " · 情绪没影响判断")
+      + (storm ? ` · <b style="color:var(--red)">情绪激动</b>，大事交给用户定` : "");
+  }
   $("m-total").textContent = st.total ?? 0;
   $("m-cortex").textContent = st.cortex ?? 0;
   $("m-hippo").textContent = st.hippo ?? 0;
@@ -608,6 +824,8 @@ function renderOverview(){
     ["高频标签", (st.top_tags || []).slice(0, 4).map(x => x[0]).join("、") || "—"],
     ["情绪", st.mood || "还没记录"],
     ["上次做梦", st.last_dream ? new Date(st.last_dream * 1000).toLocaleString("zh-CN") : "从未"],
+    ["每日例行", (ov.daily_state && ov.daily_state.last_date) ? "今天已写" : "今天还没写"],
+    ["自我总结", ov.last_self_review ? new Date(ov.last_self_review * 1000).toLocaleString("zh-CN").slice(5, 11) + " 做过" : "尚未做过"],
   ].map(([k, v]) => `<div class="statline"><span>${k}</span><b>${esc(v)}</b></div>`).join("");
 
   const rep = (ov.dreams && ov.dreams[0]) ? ov.dreams[0] : null;
@@ -620,6 +838,10 @@ function renderOverview(){
   renderEvolved(p);
   renderHistory(p);
   renderDream(ov);
+
+  renderMood();
+  renderEmotionCfg();
+  renderDailyCards();
 
   const ob = ov.onboarding || {};
   if (!ob.completed) {
@@ -644,6 +866,106 @@ function renderPersonaEditor(p){
   $("pf-path").textContent = "persona.json · 改动可回滚";
 }
 
+// 情绪下拉按七情分组（分组数据来自后端 EMOTION_GROUPS，前端不做硬编码）
+function fillEmoPick(){
+  const el = $("emo-pick"); if (!el || el.options.length) return;
+  const groups = (S.ov && S.ov.emotion_groups) || {};
+  const order = ["喜","怒","哀","惧","爱","恶","欲","静"];
+  order.forEach(g => {
+    const names = groups[g]; if (!names || !names.length) return;
+    const og = document.createElement("optgroup");
+    og.label = g + " ·";
+    names.forEach(n => {
+      const o = document.createElement("option");
+      o.value = n; o.textContent = n; og.appendChild(o);
+    });
+    el.appendChild(og);
+  });
+  // 兜底：若后端没给分组，至少保证下拉不空
+  if (!el.options.length) {
+    ["开心","好奇","生气","难过","感动"].forEach(n => {
+      const o = document.createElement("option");
+      o.value = n; o.textContent = n; el.appendChild(o);
+    });
+  }
+}
+
+function renderMood(){
+  const ov = S.ov; if (!ov) return;
+  fillEmoPick();
+  const m = ov.mood || {};
+  const arc = ov.emotion_arc || {};
+  const arcEl = $("emo-arc");
+  if (arcEl) {
+    let arcHtml = arc && arc.count
+      ? `最近 ${arc.days} 天 · ${arc.count} 次波动 · ${arc.tone}：${(arc.top || []).map(x => `${x.emotion}×${x.times}`).join("、")}`
+      : "还没有情绪记录。";
+    // 峰终定律：回顾只看"最强烈的一刻（峰）"和"最近一次（终）"，不看平均
+    if (arc && arc.count) {
+      if (arc.peak && arc.peak.emotion) {
+        arcHtml += `<div class="sub" style="margin-top:6px">印象最深：${esc(arc.peak.emotion)}`
+          + (arc.peak.why ? `（${esc(arc.peak.why)}）` : "")
+          + ` · 强度 ${Math.round((arc.peak.intensity || 0) * 100)}%</div>`;
+      }
+      if (arc.end && arc.end.emotion) {
+        arcHtml += `<div class="sub">最近一次：${esc(arc.end.emotion)}`
+          + (arc.end.why ? `（${esc(arc.end.why)}）` : "") + `</div>`;
+      }
+    }
+    arcEl.innerHTML = arcHtml;
+  }
+  const lab = $("emo-label");
+  if (lab) lab.textContent = m.label || "平静";
+  const meta = $("emo-meta");
+  if (meta) {
+    meta.textContent = m.active && m.active.length
+      ? `valence ${m.valence >= 0 ? "+" : ""}${Math.round((m.valence || 0) * 100)} · arousal ${Math.round((m.arousal || 0) * 100)} · 强度 ${Math.round((m.intensity || 0) * 100)}%`
+      : (arc && arc.count ? "" : "还没记过感受。");
+  }
+  const actEl = $("emo-active");
+  if (actEl) {
+    let html = (m.active && m.active.length)
+      ? m.active.map(x => `<span class="chip">${esc(x.group || "")} · ${esc(x.emotion)} ${Math.round(x.weight * 100)}%${x.why ? " — " + esc(x.why) : ""}</span>`).join(" ")
+      : `<span class="chip">情绪已散去，现在是中性状态</span>`;
+    if (m.storm) html += `<span class="chip bad" style="border-color:rgba(201,107,95,.5);color:#e8a89f">情绪激动 · 理智被压住</span>`;
+    if (m.complex) html += `<span class="chip">${esc(m.complex)}</span>`;
+    actEl.innerHTML = html;
+  }
+  const grpEl = $("emo-groups");
+  if (grpEl) {
+    const gs = (m.groups || []).slice(0, 7);
+    grpEl.innerHTML = gs.length
+      ? gs.map(g => `
+          <div class="desire-row">
+            <span style="width:36px">${g.group}</span>
+            <span class="bar"><i style="width:${g.pct}%;background:var(--accent)"></i></span>
+            <span style="width:44px;text-align:right">${g.pct}%</span>
+          </div>`).join("")
+      : `<div class="empty">没有正在起作用的情绪</div>`;
+  }
+  renderDesires(ov);
+}
+
+function renderDesires(ov){
+  const ds = ov.desires || {};
+  const defs = ov.desire_defs || {};
+  const el = $("desire-list"); if (!el) return;
+  el.innerHTML = Object.entries(ds).map(([name, lvl]) => {
+    const low = lvl < 35, high = lvl >= 75;
+    const color = low ? "var(--bad)" : (high ? "var(--good)" : "var(--amber)");
+    const btn = low
+      ? `<button class="btn mini" data-desire="${esc(name)}">满足+20</button>`
+      : "";
+    return `
+      <div class="desire-row">
+        <span style="width:64px" title="${esc(defs[name] || "")}">${esc(name)}</span>
+        <span class="bar"><i style="width:${lvl}%;background:${color}"></i></span>
+        <span style="width:40px;text-align:right">${Math.round(lvl)}</span>
+        ${btn}
+      </div>`;
+  }).join("");
+}
+
 function renderState(p){
   const st = p.state || {};
   $("st-mood").value = st.mood || "";
@@ -652,6 +974,329 @@ function renderState(p){
   $("st-closeness").value = st.closeness ?? 50;
   $("st-energy-v").textContent = $("st-energy").value;
   $("st-closeness-v").textContent = $("st-closeness").value;
+}
+
+// 理智一行：基数会被当前情绪压住（杏仁核劫持，但有上限，大事交给用户）
+function ratLine(ra, prefix){
+  ra = ra || {};
+  const storm = !!ra.storm;
+  const head = prefix ? prefix + " " : "";
+  return head + `理智 <b style="color:${storm ? "var(--red)" : "var(--amber)"}">${ra.effective ?? "—"}</b>`
+    + ` / 基数 ${ra.base ?? "—"}`
+    + (ra.suppress ? ` · 被情绪压住 ${ra.suppress}%` : " · 情绪没影响判断")
+    + (storm ? ` · <b style="color:var(--red)">情绪激动</b>` : "");
+}
+
+function renderEmotionCfg(){
+  const cfg = (S.ov && S.ov.emotion_cfg) || {};
+  const ep = cfg.empathy || {};
+  const el = $("cfg-empathy");
+  if (!el) return;
+  el.value = ["mirror", "mild", "off"].includes(ep.level) ? ep.level : "mirror";
+  $("cfg-gain").value = Math.round((ep.gain ?? 0.5) * 100);
+  $("cfg-gain-v").textContent = (+(ep.gain ?? 0.5)).toFixed(2);
+  $("cfg-maxint").value = Math.round((ep.max_intensity ?? 0.8) * 100);
+  $("cfg-maxint-v").textContent = (+(ep.max_intensity ?? 0.8)).toFixed(2);
+  $("cfg-supp").value = (cfg.suppressed || []).join(",");
+  $("cfg-notes").value = cfg.notes || "";
+}
+
+function renderDailyCards(){
+  const st = (S.ov && S.ov.daily_state) || {};
+  const dEl = $("daily-state");
+  if (dEl) dEl.textContent = st.last_date ? "今天已写 · " + st.last_date : "今天还没写";
+  const lr = S.ov && S.ov.last_self_review;
+  const sEl = $("selfreview-state");
+  if (sEl) sEl.textContent = lr ? "上次 " + new Date(lr * 1000).toLocaleString("zh-CN").slice(0, 16) : "还没有做过";
+}
+
+// ---------------- 记忆联想 · 3D 空间（零依赖力导向） ----------------
+const GRAPH = { data: null, pos: [], yaw: 0.6, pitch: -0.35, dist: 360,
+                focus: {x: 0, y: 0, z: 0}, target: {x: 0, y: 0, z: 0}, targetDist: 360,
+                selected: null, hover: null, loaded: false, nbrs: null, anim: null };
+const LAYER_COLOR = { cortex: "#d9a441", hippo: "#5fa8a0", dust: "#5d646e" };
+
+function hashStr(s){
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0) / 4294967295;
+}
+
+function stopGraphAnim(){
+  if (GRAPH.anim != null){ cancelAnimationFrame(GRAPH.anim); GRAPH.anim = null; }
+}
+
+// 相机缓动：朝目标焦点平滑靠近（像视线慢慢落在一件事上）
+function startGraphAnim(){
+  stopGraphAnim();
+  const k = (GRAPH.focus.x !== GRAPH.target.x || GRAPH.focus.y !== GRAPH.target.y
+    || GRAPH.focus.z !== GRAPH.target.z || GRAPH.dist !== GRAPH.targetDist);
+  if (!k) return;
+  const step = () => {
+    GRAPH.focus.x += (GRAPH.target.x - GRAPH.focus.x) * 0.13;
+    GRAPH.focus.y += (GRAPH.target.y - GRAPH.focus.y) * 0.13;
+    GRAPH.focus.z += (GRAPH.target.z - GRAPH.focus.z) * 0.13;
+    GRAPH.dist += (GRAPH.targetDist - GRAPH.dist) * 0.13;
+    renderGraph();
+    const d = Math.hypot(GRAPH.target.x - GRAPH.focus.x, GRAPH.target.y - GRAPH.focus.y, GRAPH.target.z - GRAPH.focus.z)
+      + Math.abs(GRAPH.targetDist - GRAPH.dist);
+    GRAPH.anim = d > 0.6 ? requestAnimationFrame(step) : null;
+  };
+  step();
+}
+
+async function loadGraph(limit){
+  const canvas = $("graph-canvas"); if (!canvas) return;
+  $("graph-hint").textContent = "正在把记忆铺进 3D 空间…";
+  $("graph-neighbors").innerHTML = "点一个节点，看它连着什么。";
+  $("graph-detail").classList.add("hidden");
+  GRAPH.selected = null; GRAPH.hover = null; GRAPH.nbrs = null;
+  stopGraphAnim();
+  GRAPH.focus = {x: 0, y: 0, z: 0}; GRAPH.target = {x: 0, y: 0, z: 0};
+  GRAPH.targetDist = 360;
+  try {
+    GRAPH.data = await api("/api/graph?limit=" + (limit || 300));
+    GRAPH.pos = GRAPH.data.nodes.map(n => {
+      const a = hashStr(n.id) * Math.PI * 2, b = Math.acos(2 * hashStr(n.id + "#") - 1);
+      return { x: Math.sin(b) * Math.cos(a) * 140, y: Math.sin(b) * Math.sin(a) * 140, z: Math.cos(b) * 140 };
+    });
+    // 力导向：先斥力收敛再画（几十次迭代，纯 CPU 也够快）
+    const nodes = GRAPH.data.nodes, edges = GRAPH.data.edges, pos = GRAPH.pos;
+    const n = Math.min(nodes.length, 240);
+    const idx = new Map(nodes.map((x, i) => [x.id, i]));
+    const neighbors = Array.from({length: nodes.length}, () => []);
+    edges.forEach(e => { const a = idx.get(e.src), b = idx.get(e.dst);
+      if (a != null && b != null && a < n && b < n) { neighbors[a].push([b, e.weight]); neighbors[b].push([a, e.weight]); } });
+    const kk = 22, rep = 5200;
+    for (let it = 0; it < 46; it++){
+      for (let i = 0; i < n; i++){
+        let fx = 0, fy = 0, fz = 0;
+        for (let j = 0; j < n; j++){
+          if (j === i) continue;
+          let dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y, dz = pos[i].z - pos[j].z;
+          let d2 = dx*dx + dy*dy + dz*dz + 1e-6, d = Math.sqrt(d2);
+          const f = rep / d2;
+          fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
+        }
+        neighbors[i].forEach(([j, w]) => {
+          let dx = pos[j].x - pos[i].x, dy = pos[j].y - pos[i].y, dz = pos[j].z - pos[i].z;
+          let d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-6;
+          const f = (d - kk) * 0.02 * (0.5 + w * 0.5);
+          fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
+        });
+        pos[i].x += fx * 0.06; pos[i].y += fy * 0.06; pos[i].z += fz * 0.06;
+      }
+    }
+    // 邻接表：选中时做"激活扩散"高亮
+    GRAPH.nbrs = new Map();
+    nodes.forEach((_, i) => GRAPH.nbrs.set(i, new Set()));
+    edges.forEach(e => { const a = idx.get(e.src), b = idx.get(e.dst);
+      if (a != null && b != null){ GRAPH.nbrs.get(a).add(b); GRAPH.nbrs.get(b).add(a); } });
+    GRAPH.loaded = true;
+    renderGraph();
+    $("graph-hint").textContent = `${nodes.length} 条记忆 · ${edges.length} 条关联（${GRAPH.data.connected} 个互联）· 点节点：以它为中心 + 激活相邻记忆`;
+    $("graph-stat").textContent = `${nodes.length} 节点 · ${edges.length} 关联边 · 约 ${Math.round(edges.length / Math.max(1, nodes.length) * 100) / 100} 条/点`;
+  } catch (e) {
+    toast("加载联想图谱失败：" + e.message, true);
+    $("graph-hint").textContent = "加载失败，先写几条记忆或做一次自动联想。";
+  }
+}
+
+// 投影：绕 GRAPH.focus 旋转（focus = 视线落点），所以选中后旋转缩放都以它为中心
+function project(p){
+  const fx = GRAPH.focus.x, fy = GRAPH.focus.y, fz = GRAPH.focus.z;
+  const px = p.x - fx, py = p.y - fy, pz = p.z - fz;
+  const cy = Math.cos(GRAPH.pitch), sy = Math.sin(GRAPH.pitch);
+  const c2 = Math.cos(GRAPH.yaw), s2 = Math.sin(GRAPH.yaw);
+  let x = px * c2 + pz * s2;
+  let z = -px * s2 + pz * c2;
+  let y = py * cy - z * sy;
+  z = py * sy + z * cy;
+  const f = GRAPH.dist / (GRAPH.dist + z);
+  return { x: x * f, y: y * f, z, s: f };
+}
+
+function renderGraph(){
+  const canvas = $("graph-canvas"); if (!canvas || !GRAPH.loaded || !GRAPH.data) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (canvas.width !== W * dpr || canvas.height !== H * dpr){ canvas.width = W * dpr; canvas.height = H * dpr; }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const cx = W / 2, cy = H / 2;
+  const nodes = GRAPH.data.nodes, edges = GRAPH.data.edges;
+  const proj = GRAPH.pos.map(project);
+  const shown = new Set();
+  proj.forEach((p, i) => { if (p.z < GRAPH.dist * 0.9 && p.s > 0.12) shown.add(i); });
+
+  // 注意力焦点：选中的节点 + 它的直接邻居被"点亮"，其余压暗（激活扩散 / 侧抑制）
+  const sel = GRAPH.selected;
+  const hot = new Set();
+  if (sel != null){
+    hot.add(sel);
+    const ns = GRAPH.nbrs && GRAPH.nbrs.get(sel);
+    if (ns) ns.forEach(j => hot.add(j));
+  }
+
+  // 边：粗细随权重（联系强弱），焦点相关边更亮，无关边压暗
+  const idIdx = new Map(nodes.map((x, i) => [x.id, i]));
+  edges.forEach(e => {
+    const ai = idIdx.get(e.src), bi = idIdx.get(e.dst);
+    if (ai == null || bi == null) return;
+    if (!shown.has(ai) || !shown.has(bi)) return;
+    const pa = proj[ai], pb = proj[bi];
+    const touchSel = sel != null && (ai === sel || bi === sel);
+    const edgeHot = sel == null || touchSel || (hot.has(ai) && hot.has(bi));
+    const w = Math.min(1.8, 0.3 + e.weight * 0.35);
+    ctx.lineWidth = touchSel ? w + 1.4 : (w + 0.5) * (edgeHot ? 1 : 0.55);
+    ctx.strokeStyle = touchSel
+      ? "rgba(233,196,106,.95)"
+      : "rgba(120,140,170," + (edgeHot ? 0.05 + Math.min(0.4, e.weight * 0.1) : 0.03 + Math.min(0.18, e.weight * 0.04)) + ")";
+    ctx.beginPath(); ctx.moveTo(cx + pa.x, cy + pa.y); ctx.lineTo(cx + pb.x, cy + pb.y); ctx.stroke();
+  });
+
+  // 节点（先画非焦点，再画焦点；近的压在上面）
+  const order = nodes.map((n, i) => i).sort((a, b) => proj[a].z - proj[b].z);
+  const drawNode = i => {
+    const n = nodes[i], p = proj[i];
+    const r = (3 + (n.importance || 0.5) * 11) * Math.max(0.4, p.s);
+    const base = LAYER_COLOR[n.layer] || "#8b919b";
+    // 新鲜度：越近被想起的越亮（近因效应）
+    const rec = n.recency != null ? n.recency : 0.6;
+    const dim = sel != null && !hot.has(i);
+    const focusHit = GRAPH.hover === i || GRAPH.selected === i;
+    ctx.globalAlpha = (dim ? 0.14 : (shown.has(i) ? 1 : 0.35)) * (0.55 + rec * 0.45);
+    // 焦点选中：外圈呼吸光环（注意力）
+    if (GRAPH.selected === i){
+      ctx.beginPath(); ctx.arc(cx + p.x, cy + p.y, r + 6, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(233,196,106,.5)"; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(cx + p.x, cy + p.y, focusHit ? r + 2 : r, 0, Math.PI * 2);
+    ctx.fillStyle = focusHit ? "#f2efe6" : base;
+    ctx.fill();
+    if (focusHit){ ctx.lineWidth = 2; ctx.strokeStyle = "#fff"; ctx.stroke(); }
+    const labelable = (GRAPH.selected === i || (sel != null && hot.has(i) && i !== sel) || (GRAPH.selected == null && n.importance >= 0.8));
+    if (p.s > 0.45 && labelable && !(dim && false) && shown.has(i)){
+      ctx.globalAlpha = dim ? 0.35 : ctx.globalAlpha;
+      ctx.font = (GRAPH.selected === i ? "bold 11px" : "10px") + " system-ui,sans-serif";
+      ctx.fillStyle = GRAPH.selected === i ? "rgba(240,208,120,.98)" : "rgba(233,230,223,.78)";
+      ctx.fillText((n.gist || "").slice(0, GRAPH.selected === i ? 16 : 12), cx + p.x + r + 4, cy + p.y + 4);
+    }
+    ctx.globalAlpha = 1;
+  };
+  order.forEach(i => { if (hot.size && !hot.has(i)) drawNode(i); });
+  order.forEach(i => { if (!hot.size || hot.has(i)) drawNode(i); });
+  const t = $("graph-tip");
+  if (t) t.textContent = GRAPH.hover != null && nodes[GRAPH.hover]
+    ? docsOf(nodes[GRAPH.hover]) : (sel != null
+      ? "已聚焦 1 条记忆 + " + ((hot.size - 1) || 0) + " 条被激活的相邻记忆 · 点空白处回到全景"
+      : "总记忆 " + nodes.length + " · 拖动旋转");
+}
+
+function docsOf(n){
+  return `${n.gist ? n.gist.slice(0, 40) : ""}${n.kind ? " · " + n.kind : ""} · 重要 ${Math.round((n.importance || 0) * 100)}% · ${LAYER_COLOR[n.layer] ? (n.layer === "cortex" ? "长期" : n.layer === "hippo" ? "短期" : "淡忘") : n.layer}${n.emotion ? ` · ♡ ${n.emotion}` : ""}`;
+}
+
+function focusGraphNode(i){
+  GRAPH.selected = i;
+  const p = GRAPH.pos[i];
+  GRAPH.target = {x: p.x, y: p.y, z: p.z};
+  GRAPH.targetDist = 175;   // 选中即拉近，以它为中心
+  startGraphAnim();
+}
+
+function resetGraphView(){
+  GRAPH.selected = null;
+  GRAPH.target = {x: 0, y: 0, z: 0};
+  GRAPH.targetDist = 360;
+  startGraphAnim();
+  $("graph-detail").classList.add("hidden");
+}
+
+async function pickGraphNode(i){
+  const nodes = GRAPH.data.nodes;
+  focusGraphNode(i);
+  const n = nodes[i];
+  $("graph-detail").classList.remove("hidden");
+  $("graph-detail").innerHTML = `<h2 style="margin-bottom:6px">${esc(n.gist || "")}</h2>
+    <div class="sub">${esc(n.kind || "")} · 重要 ${Math.round((n.importance || 0) * 100)}% · ${esc(n.layer || "")} · 新鲜度 ${Math.round((n.recency ?? 0.5) * 100)}%${n.emotion ? ` · ♡ ${esc(n.emotion)}` : ""}</div>
+    <div class="sub" style="margin-top:6px">${esc(n.id || "")}</div>`;
+  $("graph-neighbors").innerHTML = "<div class='sub' style='margin-bottom:6px'>正在找它连着什么…</div>";
+  try {
+    const r = await api("/api/assoc?id=" + encodeURIComponent(n.id));
+    const nbrs = r.neighbors || [];
+    $("graph-neighbors").innerHTML = nbrs.length
+      ? nbrs.map(x => `<div class="mem" style="margin-top:6px;padding:10px 12px">
+          <div class="mem-body"><div class="mem-top">
+            <span class="badge">${esc(x.relation || "相关")}</span>
+            <span class="sub" style="margin-left:auto">权重 ${Math.round((x.weight || 1) * 100) / 100}</span>
+          </div>
+          <p style="font-size:12.5px">${esc(x.gist || "")}</p>
+          ${x.why ? `<div class="sub" style="font-size:11px;color:var(--faint)">${esc(x.why)}</div>` : ""}
+        </div></div>`).join("")
+      : `<div class="empty" style="padding:18px">这条记忆还没连上谁。在记忆列表里找两条相关的，去命令行 <code>assoc link</code> 连起来。</div>`;
+  } catch (err) {
+    $("graph-neighbors").innerHTML = `<div class="sub">${esc(err.message)}</div>`;
+  }
+}
+
+function graphHit(x, y){
+  const canvas = $("graph-canvas");
+  if (!canvas || !GRAPH.loaded) return null;
+  const W = canvas.clientWidth, H = canvas.clientHeight, cx = W / 2, cy = H / 2;
+  const nodes = GRAPH.data.nodes;
+  const proj = GRAPH.pos.map(project);
+  let best = null, bestD = 14;
+  nodes.forEach((n, i) => {
+    const p = proj[i], r = (3 + (n.importance || 0.5) * 11) * Math.max(0.4, p.s);
+    const dx = x - (cx + p.x), dy = y - (cy + p.y);
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < r + 5 && d < bestD){ bestD = d; best = i; }
+  });
+  return best;
+}
+
+function initGraphInteractions(){
+  const canvas = $("graph-canvas"); if (!canvas) return;
+  let dragging = false, lastX = 0, lastY = 0;
+  canvas.addEventListener("pointerdown", e => {
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    canvas.style.cursor = "grabbing";
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (dragging){
+      GRAPH.yaw += (e.clientX - lastX) * 0.006;
+      GRAPH.pitch = Math.max(-1.4, Math.min(1.4, GRAPH.pitch + (e.clientY - lastY) * 0.006));
+      lastX = e.clientX; lastY = e.clientY;
+      stopGraphAnim();
+      renderGraph();
+    } else {
+      const rect = canvas.getBoundingClientRect();
+      GRAPH.hover = graphHit(e.clientX - rect.left, e.clientY - rect.top);
+      renderGraph();
+    }
+  });
+  const endDrag = e => {
+    if (dragging){
+      const rect = canvas.getBoundingClientRect();
+      const moved = Math.hypot(e.clientX - lastX, e.clientY - lastY);
+      dragging = false; canvas.style.cursor = "grab";
+      if (moved < 5){ // 算点击
+        const i = graphHit(e.clientX - rect.left, e.clientY - rect.top);
+        if (i != null) pickGraphNode(i); else resetGraphView();
+      }
+    }
+  };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", () => { dragging = false; canvas.style.cursor = "grab"; });
+  canvas.addEventListener("wheel", e => {
+    e.preventDefault();
+    stopGraphAnim();
+    GRAPH.targetDist = GRAPH.dist = Math.max(90, Math.min(1200, GRAPH.dist * (e.deltaY > 0 ? 1.1 : 0.9)));
+    renderGraph();
+  }, { passive: false });
 }
 
 function renderEvolved(p){
@@ -957,12 +1602,15 @@ function switchTab(tab){
     knowledge: ["知识", "沉淀下来、可复用的结论"],
     notes: ["笔记", "它写给自己的日记、日志与复盘"],
     skills: ["技能", "把一套做法固化成可复用的能力"],
+    emotion: ["心情", "七情六欲：会来、会散，也会被满足"],
+    graph: ["联想", "记忆之间的关联，铺成一片 3D 空间"],
     growth: ["成长", "记忆、知识、笔记、技能长成了什么"],
     dream: ["梦", "把经历压缩成长期记忆"]
   };
   $("pageTitle").textContent = titles[tab][0];
   $("pageSub").textContent = titles[tab][1];
   if (tab === "memories") renderMemoryList();
+  if (tab === "graph") loadGraph(Number($("graph-limit").value || 300));
   if (["knowledge", "notes", "skills", "growth"].includes(tab)) {
     if (S.ws) { renderKnowledge(); renderNotes(); renderSkills(); renderDshPlugins(); renderGrowth(); renderOnboarding(); }
     else loadWS();
@@ -1064,6 +1712,162 @@ $("btn-state").addEventListener("click", async () => {
     load();
   } catch (e) { toast(e.message, true); }
 });
+
+const emoBtn = $("btn-emo-feel");
+if (emoBtn) emoBtn.addEventListener("click", async () => {
+  try {
+    await api("/api/emotion", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      action: "feel",
+      emotion: $("emo-pick").value,
+      intensity: Math.max(0, Math.min(1, Number($("emo-int").value || 0.6))),
+      why: $("emo-why").value
+    })});
+    $("emo-why").value = "";
+    toast("记下了这刻的心情");
+    load();
+  } catch (e) { toast(e.message, true); }
+});
+document.addEventListener("click", async (e) => {
+  const d = e.target && e.target.closest && e.target.closest("[data-desire]");
+  if (!d) return;
+  try {
+    await api("/api/emotion", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      action: "desire", emotion: d.dataset.desire, amount: 20
+    })});
+    toast("满足了一点" + d.dataset.desire);
+    load();
+  } catch (err) { toast(err.message, true); }
+});
+
+// ---- 认知评价（事件 → 情绪）
+const evaImp = $("eva-imp");
+if (evaImp) evaImp.addEventListener("input", () => $("eva-imp-v").textContent = evaImp.value);
+const btnEva = $("btn-eva");
+if (btnEva) btnEva.addEventListener("click", async () => {
+  const event = $("eva-event").value.trim();
+  if (!event) { toast("先写发生了什么", true); return; }
+  try {
+    const r = await api("/api/emotion", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      action: "evaluate", event, polarity: $("eva-pol").value, importance: Number($("eva-imp").value) / 100
+    })});
+    const res = r.result || {};
+    const ra = r.rationality || {};
+    $("eva-out").innerHTML = `
+      <div class="mem" style="margin-top:6px">
+        <div class="ring" style="--p:60"><b>${res.polarity === "positive" ? "好" : res.polarity === "negative" ? "坏" : "平"}</b></div>
+        <div class="mem-body">
+          <div class="mem-top">
+            <span class="badge">认知评价</span>
+            <span class="stars">${stars(res.importance)}</span>
+            <span class="sub" style="margin-left:auto">${esc(res.event)}</span>
+          </div>
+          <p style="margin-top:2px">它觉得这是「${res.polarity === "positive" ? "好事" : res.polarity === "negative" ? "坏事" : "平常事"}」，分量 ${Math.round(res.importance * 100)}% → 冒出的情绪是 <b style="color:var(--amber)">${esc(res.emotion)}</b></p>
+          <div class="sub" style="margin-top:4px">${ratLine(ra)}</div>
+          ${res.suppressed_state ? `<div class="sub" style="margin-top:4px">${esc(res.suppressed_state)}</div>` : ""}
+          ${res.decision === "user" ? `<div class="badge" style="margin-top:8px;background:rgba(201,107,95,.15);color:#e8a89f;border-color:rgba(201,107,95,.4)">分量重，决定权在你：它只如实表达感受与建议</div>` : ""}
+          ${res.advice ? `<div class="sub" style="margin-top:4px;color:#e8a89f">${esc(res.advice)}</div>` : ""}
+        </div>
+      </div>`;
+    await load();
+  } catch (e) { toast(e.message, true); }
+});
+
+// ---- 共情镜像
+const btnMirror = $("btn-mirror");
+if (btnMirror) btnMirror.addEventListener("click", async () => {
+  const emo = $("mir-emo").value.trim();
+  if (!emo) { toast("用户此刻什么情绪？", true); return; }
+  try {
+    const r = await api("/api/emotion", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      action: "mirror", emotion: emo, intensity: Math.max(0, Math.min(1, Number($("mir-int").value || 0.5)))
+    })});
+    const res = r.result || {}, ra = r.rationality || {};
+    $("mir-out").innerHTML = esc(res.note || "共情一下") + " · " + ratLine(ra);
+    $("mir-emo").value = "";
+    await load();
+  } catch (e) { toast(e.message, true); }
+});
+
+// ---- 情感设置
+const cfgGain = $("cfg-gain"), cfgMax = $("cfg-maxint");
+if (cfgGain) cfgGain.addEventListener("input", () => $("cfg-gain-v").textContent = (+(cfgGain.value / 100)).toFixed(2));
+if (cfgMax) cfgMax.addEventListener("input", () => $("cfg-maxint-v").textContent = (+(cfgMax.value / 100)).toFixed(2));
+const btnCfg = $("btn-cfg");
+if (btnCfg) btnCfg.addEventListener("click", async () => {
+  try {
+    const r = await api("/api/emotion", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+      action: "config",
+      empathy: $("cfg-empathy").value,
+      gain: Number($("cfg-gain").value) / 100,
+      max_intensity: Number($("cfg-maxint").value) / 100,
+      suppressed: $("cfg-supp").value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+      notes: $("cfg-notes").value
+    })});
+    toast("情感设置已保存，记入演化历史");
+    await load();
+  } catch (e) { toast(e.message, true); }
+});
+
+// ---- 每日例行
+const btnDailyP = $("btn-daily-preview"), btnDailyR = $("btn-daily-run");
+if (btnDailyP) btnDailyP.addEventListener("click", async () => {
+  try {
+    const r = await api("/api/daily", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({dry_run: true})});
+    const res = r.result || {};
+    $("daily-out").textContent = `【预览 · 不落盘】\n${res.note_body || ""}\n\n预计沉淀知识 ${res.knowledge_added ?? 0} 条 · 距上次做梦 >24h 则自动做梦（${res.dreamed ? "会做" : "不会"}）`;
+  } catch (e) { toast(e.message, true); }
+});
+if (btnDailyR) btnDailyR.addEventListener("click", async () => {
+  const btn = btnDailyR;
+  btn.disabled = true; btn.textContent = "正在例行…";
+  try {
+    const r = await api("/api/daily", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({})});
+    const res = r.result || {};
+    if (res.skipped) { toast("今天已经例行过了"); }
+    else {
+      $("daily-out").textContent = `【已执行 ${res.date}】\n${res.note_body || ""}\n\n沉淀知识 ${res.knowledge_added} 条（合并 ${res.knowledge_merged}）· ${res.dreamed ? "自动做了一次梦" : "距离做梦还不到 24h"}`;
+      toast("每日例行完成：日记 + 知识沉淀" + (res.dreamed ? " + 做梦" : ""));
+    }
+    await load(); if (S.ws) await loadWS();
+  } catch (e) { toast(e.message, true); }
+  btn.disabled = false; btn.textContent = "执行今日例行";
+});
+
+// ---- 灵枢自我总结（每 2-3 天）
+const srDays = $("selfreview-days");
+const renderSelfReview = (r) => {
+  const res = r.result || {};
+  $("selfreview-state").textContent = (res.due ? "已到总结时间" : "还没到期") + (res.last ? " · 上次 " + new Date(res.last * 1000).toLocaleString("zh-CN").slice(0, 16) : "");
+  $("selfreview-out").value = res.summary || "";
+  if (res.due) toast("总结素材已生成，把答案写进成长笔记即可");
+  else toast("还没到总结时间，想看素材也可以（已生成预览）");
+};
+const btnSrD = $("btn-selfreview-due"), btnSrR = $("btn-selfreview-run");
+if (btnSrD) btnSrD.addEventListener("click", async () => {
+  try { renderSelfReview(await post("/api/skill/self-review", {force: false, days: Number(srDays.value || 3)})); }
+  catch (e) { toast(e.message, true); }
+});
+if (btnSrR) btnSrR.addEventListener("click", async () => {
+  try { renderSelfReview(await post("/api/skill/self-review", {force: true, days: Number(srDays.value || 3)})); await load(); }
+  catch (e) { toast(e.message, true); }
+});
+
+// ---- 联想 3D
+initGraphInteractions();
+window.addEventListener("resize", () => { if (GRAPH.loaded) renderGraph(); });
+const btnGr = $("btn-graph-refresh"), btnGa = $("btn-graph-auto"), btnGrst = $("btn-graph-reset");
+if (btnGr) btnGr.addEventListener("click", () => loadGraph(Number($("graph-limit").value || 300)));
+if (btnGrst) btnGrst.addEventListener("click", () => { resetGraphView(); GRAPH.yaw = 0.6; GRAPH.pitch = -0.35; renderGraph(); });
+if (btnGa) btnGa.addEventListener("click", async () => {
+  try {
+    const r = await api("/api/link", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action: "auto"})});
+    const res = r.result || {};
+    toast(`自动联想：发现 ${res.planned} 对，新连 ${res.added} 对`);
+    loadGraph(Number($("graph-limit").value || 300));
+    await load();
+  } catch (e) { toast(e.message, true); }
+});
+$("graph-limit").addEventListener("change", () => loadGraph(Number($("graph-limit").value || 300)));
 
 $("btn-dream").addEventListener("click", async () => {
   const btn = $("btn-dream");
