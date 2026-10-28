@@ -687,6 +687,10 @@ def _brace_balance(line: str) -> int:
     return depth
 
 
+# 本进程当前持有的写锁路径集合：read_jsonl 自愈时若已持锁直接修，避免重复抢锁/超时
+_HELD_LOCKS: set = set()
+
+
 def read_jsonl(path: Path) -> list:
     if not path.exists():
         return []
@@ -738,7 +742,21 @@ def read_jsonl(path: Path) -> list:
             with open(tmp, "w", encoding="utf-8", newline="\n") as f:
                 for r in out:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            os.replace(tmp, path)
+            lock = path.with_name(path.name + ".lock")
+            # 自愈=替代整文件。若别的进程正持锁写盘，抢写会把它的新数据覆盖丢。
+            # 本进程已持锁→直接修；否则快速抢锁（0.5s），抢不到就这轮先跳过，
+            # 坏块已经进了 .corrupt、原文件也没动，下次读取时再修。
+            if str(lock) not in _HELD_LOCKS:
+                try:
+                    with _locked(path, timeout=0.5):
+                        os.replace(tmp, path)
+                except TimeoutError:
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+            else:
+                os.replace(tmp, path)
         except Exception:
             pass  # 只读环境修不了就下次再修；坏块仍在原文件里，没丢
     return out
@@ -769,19 +787,20 @@ def write_jsonl(path: Path, rows: list) -> None:
 
 
 @contextmanager
-def _locked(path: Path):
+def _locked(path: Path, timeout: float = 10.0):
     """跨进程写锁：用独占创建 lock 文件互斥，带超时与陈旧锁清理。
 
     没有锁时两个进程同时 read-modify-write 会互相覆盖（后写者赢，先写者丢）。
     Windows 上没有 flock，用 O_CREAT|O_EXCL 保证只有一个进程能创建锁文件。
     """
     lock = path.with_name(path.name + ".lock")
-    deadline = time.time() + 10.0
+    deadline = time.time() + timeout
     while True:
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
+            _HELD_LOCKS.add(str(lock))  # 记住"本进程已持锁"，read_jsonl 自愈时避免重复抢锁
             break
         except FileExistsError:
             # 陈旧锁（持锁进程已死）：超过 5 秒直接接管
@@ -801,6 +820,7 @@ def _locked(path: Path):
     try:
         yield
     finally:
+        _HELD_LOCKS.discard(str(lock))
         try:
             lock.unlink()
         except OSError:
@@ -3858,7 +3878,7 @@ def cmd_restore(zip_path: str, yes: bool = False) -> int:
         if not yes:
             try:
                 if sys.stdin and sys.stdin.isatty():
-                    ans = input(f"恢复会覆盖 {HOME} 下的现有数据。继续？[y/N] ")
+                    ans = input(f"恢复会把备份内容写回 {HOME}（备份之后新增的文件不会被删除）。继续？[y/N] ")
                     if ans.strip().lower() not in ("y", "yes"):
                         print("已取消。")
                         return 0

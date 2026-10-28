@@ -65,13 +65,7 @@ def overview() -> dict:
         for f in sorted(ddir.glob("*.md"), reverse=True)[:12]:
             dreams.append({"name": f.name, "mtime": brain.fmt_time(int(f.stat().st_mtime)),
                            "content": f.read_text(encoding="utf-8")[:3000]})
-    pending = None
-    pp = ddir / "pending.json" if ddir.exists() else None
-    if pp and pp.exists():
-        try:
-            pending = json.loads(pp.read_text(encoding="utf-8-sig"))
-        except Exception:
-            pending = None
+    pending = brain.load_dream_pending()  # 与 CLI 同一套解析，避免两处逻辑漂移
     return {
         "stats": brain.stats(),
         "persona": brain.load_persona(),
@@ -103,7 +97,7 @@ def overview() -> dict:
 
 
 def _log_summary() -> dict:
-    """最近 100 条里 error / warn（不含 error）各自多少条，一次读取避免重复解析。"""
+    """最近 200 条里 error / warn（不含 error）各自多少条，一次读取避免重复解析。"""
     recent = brain.read_logs(200, level=None)
     errs = sum(1 for r in recent if r.get("level") == "error")
     warns = sum(1 for r in recent if r.get("level") == "warn")
