@@ -4619,6 +4619,15 @@ def _main(argv=None) -> int:
     if args.cmd == "init":
         ensure_home()
         if args.force:
+            # 重置人格是最伤数据的一步：先把当前档案留一份副本。
+            # 之前直接 save_persona(default_persona()) 覆盖，人格/初识/演化历史当场没。
+            if (HOME / "persona.json").exists():
+                bak = HOME / f"persona.json.pre-init-{now_ts()}"
+                try:
+                    shutil.copy2(HOME / "persona.json", bak)
+                    print(f"旧人格档案已备份：{bak}（后悔了可手动改回）")
+                except OSError as exc:
+                    print(f"[警告] 备份旧人格档案失败：{exc}", file=sys.stderr)
             save_persona(default_persona())
         p = load_persona()
         print(f"记忆库已就绪：{HOME}")
@@ -5538,6 +5547,13 @@ def _main(argv=None) -> int:
             if not lines:
                 print("没有可清的规则。")
                 return 0
+            # 用户规则是长期手写的，清空前留一份副本（误触也能捞回来）
+            bak = HOME / f"lingshu.user.md.bak-{now_ts()}"
+            try:
+                shutil.copy2(path, bak)
+                print(f"已备份原规则：{bak}")
+            except OSError as exc:
+                print(f"[警告] 备份原规则失败：{exc}", file=sys.stderr)
             try:
                 path.unlink()
             except FileNotFoundError:

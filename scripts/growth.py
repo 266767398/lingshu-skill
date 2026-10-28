@@ -59,6 +59,10 @@ def _global_roots() -> list:
 
 GLOBAL_SKILLS = _global_roots()[0]  # 安装目标（主目录）
 
+# 安装源体积上限：超过就认为 --from 指错了目录（防止把整个用户目录/磁盘塞进技能目录）
+MAX_INSTALL_FILES = 3000
+MAX_INSTALL_BYTES = 200 * 1024 * 1024
+
 NOTE_KINDS = ("journal", "log", "growth")
 # 技能名：小写字母/数字/连字符/下划线，也允许中文（中文生态里技能就叫「质检评审」这类名字）
 SLUG_RE = re.compile(r"^[a-z0-9\u4e00-\u9fff][a-z0-9-_\u4e00-\u9fff]{0,62}$")
@@ -1066,6 +1070,35 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
     dst_dir = GLOBAL_SKILLS / name
     dst = dst_dir / "SKILL.md"
 
+    # 安装源防呆：下面几种情况轻则把目录复制进自己（爆盘/死循环），重则把整个记忆库
+    # 塞进技能目录。宁可报错，也不要在用户机器上干这种"看起来在装技能"的事。
+    try:
+        _src_r = src_dir.resolve()
+        _dst_r = dst_dir.resolve()
+        _home_r = Path(HOME).resolve()
+    except OSError:
+        _src_r, _dst_r, _home_r = src_dir.absolute(), dst_dir.absolute(), Path(HOME).absolute()
+    if _src_r == _dst_r or _dst_r in _src_r.parents:
+        raise KeyError("安装源就是目标目录（或在其内部）——会把自己反复复制进去，已停止。"
+                       "若想更新全局副本，请直接 install --force，别把 --from 指向它。")
+    if _src_r == _home_r or _src_r in _home_r.parents:
+        raise KeyError(f"安装源是记忆数据目录或它的上级（{HOME}），"
+                       "请指向技能目录（含 SKILL.md 的那个）。")
+    if from_dir:
+        _count = _size = 0
+        for _f in src_dir.rglob("*"):
+            if not _f.is_file() or "__pycache__" in _f.parts or ".git" in _f.parts:
+                continue
+            _count += 1
+            if _count > MAX_INSTALL_FILES:
+                raise KeyError(f"安装源文件过多（>{MAX_INSTALL_FILES} 个），可能指错目录了，已停止。")
+            try:
+                _size += _f.stat().st_size
+            except OSError:
+                pass
+            if _size > MAX_INSTALL_BYTES:
+                raise KeyError(f"安装源过大（>{MAX_INSTALL_BYTES // (1024 * 1024)} MB），可能指错目录了，已停止。")
+
     meta, _ = parse_frontmatter(src.read_text(encoding="utf-8"))
 
     # 风险告知：灵枢会自动读写记忆、自动整理、能自编辑——用户得先知道并接受
@@ -1132,6 +1165,22 @@ def _legacy_global_dir(name: str) -> str | None:
     return None
 
 
+def _safe_rmtree(d: Path, root: Path) -> bool:
+    """只允许删 root 的直接子目录。
+
+    技能名虽然已经过 SLUG_RE 校验，这里再按真实路径核一遍：防手滑、防将来放宽
+    名字规则后把全局根目录本身（或根外面的东西）删掉。返回是否真的删了。
+    """
+    try:
+        dres, rres = d.resolve(), root.resolve()
+    except OSError:
+        dres, rres = d.absolute(), root.absolute()
+    if dres == rres or dres.parent != rres:
+        return False
+    shutil.rmtree(d)
+    return True
+
+
 def uninstall_skill(name: str) -> dict:
     name = _require_slug(name)
     # 新 kebab 目录 + 旧版中文目录一起清：旧版安装把中文名当目录名，
@@ -1143,8 +1192,7 @@ def uninstall_skill(name: str) -> dict:
             if not _n:
                 continue
             d = root / _n
-            if d.exists():
-                shutil.rmtree(d)
+            if d.exists() and _safe_rmtree(d, root):
                 removed.append(str(d))
     if not removed:
         return {"name": name, "state": "absent"}
@@ -1160,7 +1208,8 @@ def remove_skill(name: str) -> bool:
     d = SKILLS_DIR / name
     if not d.exists():
         return False
-    shutil.rmtree(d)
+    if not _safe_rmtree(d, SKILLS_DIR):
+        return False
     reg = load_registry()
     reg.pop(name, None)
     save_registry(reg)
@@ -2205,6 +2254,9 @@ def _run(argv=None) -> int:
             for _s in res.get("stale") or []:
                 print(f"  [提示] 另一个全局目录里还有同名副本：{_s}")
                 print("         它不会自动跟着更新，若那边也要用请单独 install --force。")
+            if re.search(r"[\u4e00-\u9fff]", (args.name or "").strip()):
+                print("  [提示] 名字含中文：DSH 的技能发现只认 kebab-case（英文短横线），"
+                      "这个技能装进全局后可能不显示，建议用 skill edit 改成英文名。")
             return 0
         if args.act == "uninstall":
             res = uninstall_skill(args.name)

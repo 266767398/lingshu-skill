@@ -8,7 +8,7 @@
 
 | 目的 | 命令 |
 |---|---|
-| 初始化 | `init` |
+| 初始化 | `init`（`--force` 重置人格，覆盖前自动留一份 `persona.json.pre-init-<时间戳>`） |
 | 会话开始钩子 | `startup --query "关键词"`（返回码 0/10/2/64） |
 | 注入记忆 | `inject "关键词" [--budget 1400]` |
 | 只读降级 | `--ro inject "关键词"`（或 `BRAIN_MEMORY_READONLY=1`） |
@@ -49,7 +49,7 @@
 | 技能卸载 | `skill uninstall <名字>`（`lingshu` 会连旧版中文目录 `灵枢` 一起删掉，两个全局目录都清，避免 DSH 仍去扫空壳） |
 | 技能自动全局化 | `skill use <名字> --auto` |
 | DSH 插件（只读） | `skill plugins [--json]` |
-| 用户附加规则 | `user-rules show\|add <规则>\|clear`（数据目录 lingshu.user.md，更新永不覆盖，每会话自动注入） |
+| 用户附加规则 | `user-rules show\|add <规则>\|clear`（数据目录 lingshu.user.md，更新永不覆盖，每会话自动注入；`clear` 前自动备份） |
 | 扩展模块 | `ext new\|edit\|show\|list\|run\|check\|rm`（可执行钩子，数据目录，更新永不覆盖） |
 | 成长 | `growth status` / `growth review --days 7` |
 | 进化日志 | `evolve log "标题" --kind persona\|skill\|knowledge\|thinking\|self` / `evolve list` |

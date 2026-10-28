@@ -2,7 +2,7 @@
 
 > 名字取自《黄帝内经》：**算力给思考，人格给灵魂，记忆给生命。**
 
-> 当前版本 **v2.11.3**（变更见 [CHANGELOG.md](CHANGELOG.md)）
+> 当前版本 **v2.11.4**（变更见 [CHANGELOG.md](CHANGELOG.md)）
 
 > ⚠️ **能力天花板（先读）**：灵枢是「提示词 + 脚本」的机制，**不能从底层强制约束模型**。当模型发生强幻觉时依然会无视全部规则；效果上限取决于底层大模型本身的推理、记忆与指令遵循能力。中强模型（7B+、云端）可完整遵守；**3B 以下本地小模型会出现大量规则漏执行**（忘走 startup、跳过写盘、纪律打折）——请据此降低预期，或改用 `SKILL-lite.md`（精简版）/ `SKILL-tiny.md`（最小试用版）。
 
@@ -313,6 +313,8 @@ if [ -d "$DIR/.git" ]; then git -C "$DIR" pull; else git clone --depth 1 https:/
 ```
 
 - 更新只替换**技能本体文件**；记忆数据在 `~/.brain-memory/`，**不会动**。
+- 具体保留下来的（都在数据目录，不在技能目录）：人格 `persona.json`（含初识与演化历史）、记忆 `hippocampus.jsonl` / `cortex.jsonl` / 归档、知识库与笔记、情绪与欲望状态、记忆关联 `assoc.jsonl`、梦报告 `dreams/`、运行日志 `lingshu.log`、**你自己写的技能 `skills/`**、**扩展模块 `extensions/`**、长期规则 `lingshu.user.md`、`config.json`。
+- 更新前想更稳：`python scripts/brain.py backup`（产物在 `~/brain-backups/`，自动保留最近 20 份）；更新后 `python scripts/brain.py stats` 对一眼条数与人格即可。
 - **更新不会自动改名、也不会自动换目录**：更新只覆盖技能仓库里的文件，而宿主扫的是**全局副本目录**——DSH 读 `~/.dsh/skills/`，Trae 读 `~/.trae-cn/skills/`。从 v2.11.2 之前装过的，旧的中文目录 `灵枢/` 还在，会被 DSH 跳过。请重装一次：
   ```bash
   python scripts/brain.py skill uninstall lingshu   # 会连旧的 灵枢/ 目录一起删（两个全局目录都清）

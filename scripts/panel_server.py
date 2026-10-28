@@ -684,10 +684,15 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "result": res, "workspace": workspace()})
                     return
                 elif act == "uninstall":
-                    self._json({"ok": True, "result": growth.uninstall_skill(data.get("name", "")),
+                    # 会删全局技能目录里的东西，记一笔日志，事后能查是谁在面板上删的
+                    res = growth.uninstall_skill(data.get("name", ""))
+                    brain.log_event("panel", f"卸载技能 {data.get('name', '')} → {res.get('state')}")
+                    self._json({"ok": True, "result": res,
                                 "workspace": workspace()})
                 elif act == "delete":
-                    self._json({"ok": growth.remove_skill(data.get("name", "")), "workspace": workspace()})
+                    ok = growth.remove_skill(data.get("name", ""))
+                    brain.log_event("panel", f"删除自建技能 {data.get('name', '')} → {ok}")
+                    self._json({"ok": ok, "workspace": workspace()})
                 elif act == "check":
                     self._json({"ok": True, "checks": growth.check_skill(data.get("name"))})
                 elif act == "show":

@@ -44,7 +44,8 @@
 4. **覆盖更新**：把克隆目录里的这些文件/目录复制到 `<本技能目录>`（覆盖同名）：
    `SKILL.md`、`SKILL-lite.md`、`SKILL-tiny.md`、`README.md`、`CHANGELOG.md`、`docs/`、`assets/`、`scripts/`、`start-panel.bat`
    （Windows 上等价：把克隆目录里的这些项复制粘贴到技能目录，选"覆盖"。）
-   注意：**你的自定义内容不会被覆盖**——长期规则写在数据目录 `~/.brain-memory/lingshu.user.md`（更新只动技能目录，永远不碰它）；全局 `AGENTS.md` 里 `<!-- lingshu:start -->` … `<!-- lingshu:end -->` 区块之外的手写部分，更新时原样保留。
+   覆盖前建议先备份一次数据目录（几秒，心理踏实）：`python "<本技能目录>/scripts/brain.py" backup`，产物在 `~/brain-backups/`。
+   注意：**你的自定义内容不会被覆盖**——长期规则写在数据目录 `~/.brain-memory/lingshu.user.md`（更新只动技能目录，永远不碰它）；**你自己写的技能**在 `~/.brain-memory/skills/`、**扩展模块**在 `~/.brain-memory/extensions/`，都在数据目录里，更新技能目录不会碰。全局 `AGENTS.md` 里 `<!-- lingshu:start -->` … `<!-- lingshu:end -->` 区块之外的手写部分，更新时原样保留。
 5. **自检**：`python "<本技能目录>/scripts/brain.py" stats` 能正常输出统计 = 数据没坏。
 6. **汇报**：对照 `CHANGELOG.md` 把本次新增的关键点讲给用户听，并明确说"记忆数据没动，还是原来的"。
 
