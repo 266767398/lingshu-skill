@@ -170,6 +170,10 @@ def load_loose_json(path, label: str = "JSON") -> dict | list:
                      "模型输出里多半混了说明文字或代码块——请只保留 JSON 主体再试。")
 
 
+_NUMERIC_CONFIG_KEYS = {"budget_tokens", "review_threshold", "dream_threshold",
+                        "escape_threshold", "panel_port"}
+
+
 def config_set(key: str, value: str) -> dict:
     """改一项配置（值能当 JSON 解析就当 JSON，否则按字符串存）。"""
     cfg = load_config()
@@ -177,6 +181,26 @@ def config_set(key: str, value: str) -> dict:
         val = json.loads(value)
     except Exception:
         val = value
+    # 数值型配置做校验：否则一条坏值会让 startup/inject 在解析时崩掉、还被误报成"未初始化"
+    if key in _NUMERIC_CONFIG_KEYS:
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} 需要是数字，收到：{value!r}")
+        if key in ("review_threshold", "dream_threshold", "escape_threshold"):
+            if not (0.0 <= num <= 1.0):
+                raise ValueError(f"{key} 需要在 0~1 之间，收到：{value!r}")
+            val = num
+        elif key == "budget_tokens":
+            num = int(num)
+            if num <= 0:
+                raise ValueError(f"budget_tokens 需要是正整数，收到：{value!r}")
+            val = num
+        elif key == "panel_port":
+            num = int(num)
+            if not (1 <= num <= 65535):
+                raise ValueError(f"panel_port 需要在 1~65535 之间，收到：{value!r}")
+            val = num
     cfg[key] = val
     ensure_home()
     atomic_json(HOME / "config.json", cfg)
@@ -189,6 +213,14 @@ def config_unset(key: str) -> dict:
     ensure_home()
     atomic_json(HOME / "config.json", cfg)
     return cfg
+
+
+def _cfg_num(cfg: dict, key: str, default, cast=float):
+    """从配置里安全取一个数字：坏值/手改错时回退默认，绝不让注入崩掉。"""
+    try:
+        return cast(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def model_tier() -> str:
@@ -2102,6 +2134,11 @@ def set_persona_field(path: str, value: str) -> dict:
     if _is_locked(p, path):
         raise PermissionError(f"{path} 已被锁定，不能由 AI 修改")
     parts = path.split(".")
+    # 结构段（identity/traits/drives/state）必须写成 根.子字段；裸写会把整段覆盖成字符串/数字，
+    # 之后注入与面板读取都会崩。列表类（style/values/...）允许整份覆盖。
+    if len(parts) == 1 and root not in _PERSONA_LIST_FIELDS:
+        raise ValueError(f"{path} 需要写成「{root}.子字段」的形式（如 {root}.名字=...）；"
+                         "列表类（style/values/likes/dislikes/background/relationship）可直接写。")
     node = p
     for part in parts[:-1]:
         if part not in node or not isinstance(node[part], dict):
@@ -2168,10 +2205,19 @@ def persona_rollback(index: int | None = None) -> dict:
         current = node.get(leaf)
         # 该字段在这条变更之后还被改过（当前值已不是这条的 to）→ 回滚会把它打回旧值，
         # 让调用方明确提示"这会覆盖之后 N 次改动"，而不是静默覆盖。
-        if to is not None and current != to:
+        # 注意：新增项（from=None）在列表字段里各自独立，不存在"覆盖后来的改动"，别误报。
+        if frm is not None and to is not None and current != to:
             overwrote = True
         if frm is None:
-            node.pop(leaf, None)
+            # 这条是"新增"（from=None）：只撤销新增的那一项，绝不把整个字段/整段删光。
+            # 例：locked 列表回滚一条锁，不能把全部锁清空；style/values 增项回滚，
+            # 不能把整份清单删掉；state 结构段没有旧值可还原，保守不动。
+            if isinstance(current, list) and (leaf in _PERSONA_LIST_FIELDS or leaf == "locked"):
+                node[leaf] = [x for x in current if x != to]
+            elif isinstance(current, dict):
+                pass  # 无旧值可还原的结构段：不清空，避免丢数据
+            else:
+                node.pop(leaf, None)
         elif isinstance(current, dict) and isinstance(frm, str):
             # 目标叶子是 dict（如 onboarding），而历史里的 from 是字符串（初识标记），
             # 直接替换会把它变成字符串导致后续注入崩溃 → 只回滚 dict 内部的初识标记。
@@ -2589,8 +2635,11 @@ def persona_self_author(name: str = "", traits: str = "", likes: str = "", disli
                 p[key].append(item)
                 hist.append({"ts": now, "field": key, "from": None,
                              "to": item, "why": "初识：我自己选的"})
-    # 名字和性格都空着就不算完成——不能凭空打勾；只有真正写出了名字或性格才算
-    if ob.get("stage") != "done" and filled:
+    # 名字和性格都空着就不算完成——不能凭空打勾；只有真正写出了名字或性格才算。
+    # 但用户已答出名字+性格、AI 没有身份/性格可补（filled 恒 False）时，补喜好/习惯也算完成初识，
+    # 否则注入包会永远催"初识还没完成"。
+    identity_ready = bool(ident.get("名字")) and bool(p.get("traits"))
+    if ob.get("stage") != "done" and (filled or identity_ready):
         ob.update({"stage": "done", "completed": True, "completed_at": now})
         hist.append({"ts": now, "field": "onboarding", "from": "awaiting_self",
                      "to": "done", "why": "初识完成"})
@@ -2878,7 +2927,7 @@ def read_user_rules() -> list:
 def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
     ensure_home()
     cfg = load_config()
-    budget = budget_tokens or int(cfg.get("budget_tokens", 1400))
+    budget = budget_tokens or _cfg_num(cfg, "budget_tokens", 1400, int)
     char_budget = int(budget * 1.8)
     p = load_persona()
     session_mode = resolve_mode(query)
@@ -3027,9 +3076,9 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
                    f"{ra['effective']}（被压住 {ra['suppress']}%）。语气自然流露可以，"
                    "涉及钱/关系/承诺等大事，把决定权交给用户。")
     cfg = load_config()
-    rv = f"{float(cfg.get('review_threshold', 0.60)) * 100:.0f}%"
-    dr = f"{float(cfg.get('dream_threshold', 0.75)) * 100:.0f}%"
-    es = f"{float(cfg.get('escape_threshold', 0.90)) * 100:.0f}%"
+    rv = f"{_cfg_num(cfg, 'review_threshold', 0.60) * 100:.0f}%"
+    dr = f"{_cfg_num(cfg, 'dream_threshold', 0.75) * 100:.0f}%"
+    es = f"{_cfg_num(cfg, 'escape_threshold', 0.90) * 100:.0f}%"
     out.append(f"[水位守则] 会话中即记即存；{rv} 补记清点，{dr} 做梦压缩，{es} 封存保底。"
                "用 python scripts/brain.py check-context --used <当前百分比> 逐档检查。")
     # 待审核提醒：AI 整理出来的东西不能当事实直接沉淀
@@ -3237,6 +3286,8 @@ def cmd_backup(target: str | None = None, keep: int = 20) -> int:
                     continue
                 if f.name.endswith(".tmp") or f.name == ".write-probe":
                     continue
+                if f == zip_path:
+                    continue  # 别把正在写的备份包自己打包进去（--out 指向记忆库自身时会踩到）
                 if "backups" in f.parts and f.suffix == ".zip":
                     continue  # 别把上一次的备份打包进去
                 if _is_sensitive_file(f):
@@ -3507,9 +3558,9 @@ def cmd_sync_dsh(days: int = 1, dry_run: bool = False, force: bool = False,
         print(f"今日已同步过（{target}），跳过。加 --force 可覆盖。")
         return 0
     if marker in existing:
-        # 覆盖昨天的内容：删掉旧的同步块
+        # 只覆盖今天这一块：用 rfind 定位最后一个同步块起点，避免把历史每天的块一起删掉
         head = "## 灵枢 → DSH 同步"
-        s = existing.find(head)
+        s = existing.rfind(head)
         e = existing.find(marker)
         if s != -1 and e != -1:
             e = e + len(marker)
@@ -4754,9 +4805,9 @@ def _main(argv=None) -> int:
     if args.cmd == "check-context":
         cfg = load_config()
         used = float(args.used)
-        review = float(cfg.get("review_threshold", 0.60)) * 100
-        dream_pct = float(cfg.get("dream_threshold", 0.75)) * 100
-        escape = float(cfg.get("escape_threshold", 0.90)) * 100
+        review = _cfg_num(cfg, "review_threshold", 0.60) * 100
+        dream_pct = _cfg_num(cfg, "dream_threshold", 0.75) * 100
+        escape = _cfg_num(cfg, "escape_threshold", 0.90) * 100
 
         print(f"上下文 {used:.0f}%（清点 {review:.0f}% / 做梦 {dream_pct:.0f}% / 封存 {escape:.0f}%）")
 

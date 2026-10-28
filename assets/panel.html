@@ -138,6 +138,8 @@
   }
   button.btn:hover{filter:brightness(1.08)}
   button.btn:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost:disabled,button.iconbtn:disabled,button.mini:disabled{opacity:.45;cursor:not-allowed}
+  button:disabled{filter:saturate(.6)}
   button.ghost{
     all:unset;cursor:pointer;padding:9px 15px;border-radius:9px;border:1px solid var(--line);
     color:var(--muted);font-size:13px;text-align:center;transition:.15s;
@@ -751,6 +753,15 @@ const S = { ov: null, tab: "overview", ws: null, memIndex: {} };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const cssCls = (s) => String(s == null ? "" : s).replace(/[^a-zA-Z0-9_-]/g, "_");
+// 只读模式：禁用写按钮（tab 切换 + 检索/预览等纯读操作保留），避免"能点但全部失败"的挫败流
+const READ_BUTTONS = new Set(["btn-search","btn-inject","btn-conflicts","kg-btn-search","note-btn-search","skill-btn-check","btn-review","btn-daily-preview","btn-selfreview-due","btn-graph-refresh","btn-graph-reset","inject-run"]);
+function applyReadonlyUI(ro){
+  if (!ro) return;   // 只读状态全程不变，这里只做"禁用"，不反向放开其他逻辑禁用过的按钮
+  document.querySelectorAll("button").forEach(b => {
+    if (b.dataset.tab || READ_BUTTONS.has(b.id)) return;
+    b.disabled = true;
+  });
+}
 const KIND = {fact:"事实", preference:"偏好", emotion:"情绪", insight:"洞见", habit:"习惯", episode:"片段", identity:"身份"};
 const LAYER = {cortex:"长期", hippo:"短期", dust:"淡忘"};
 function tierLabel(t){
@@ -873,6 +884,7 @@ function renderOverview(){
 
   const roBanner = $("ro-banner");
   if (roBanner) roBanner.classList.toggle("hidden", !ov.readonly);
+  applyReadonlyUI(!!ov.readonly);
 
   const traits = p.traits || {};
   $("p-traits").innerHTML = Object.keys(traits).length
@@ -973,7 +985,7 @@ function renderMood(){
   const arcEl = $("emo-arc");
   if (arcEl) {
     let arcHtml = arc && arc.count
-      ? `最近 ${arc.days} 天 · ${arc.count} 次波动 · ${arc.tone}：${(arc.top || []).map(x => `${x.emotion}×${x.times}`).join("、")}`
+      ? `最近 ${arc.days} 天 · ${arc.count} 次波动 · ${arc.tone}：${(arc.top || []).map(x => `${esc(x.emotion)}×${x.times}`).join("、")}`
       : "还没有情绪记录。";
     // 峰终定律：回顾只看"最强烈的一刻（峰）"和"最近一次（终）"，不看平均
     if (arc && arc.count) {

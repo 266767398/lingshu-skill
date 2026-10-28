@@ -104,9 +104,13 @@ def save_knowledge(rows: list) -> None:
 
 
 def _kdoc(rec: dict) -> set:
+    # 字段可能是 None（手改/LLM 产出），统一转成字符串再切词，避免 " ".join 抛 TypeError
+    def _s(x):
+        return str(x) if x is not None else ""
     return brain.terms(" ".join([
-        rec.get("title", "") * 2, rec.get("body", ""),
-        " ".join(rec.get("points") or []), " ".join(rec.get("tags") or []),
+        _s(rec.get("title")) * 2, _s(rec.get("body")),
+        " ".join(_s(p) for p in (rec.get("points") or [])),
+        " ".join(_s(t) for t in (rec.get("tags") or [])),
     ]))
 
 
@@ -128,8 +132,9 @@ def add_knowledge(title: str, body: str, topic: str = "", points=None, tags=None
             continue
         # 只在标题几乎相同（或包含关系极强）时合并，避免把同主题的不同结论揉成一条
         if brain.jaccard(new_title_terms, brain.terms(old.get("title", ""))) >= 0.75:
-            if body and body not in old.get("body", ""):
-                old["body"] = (old.get("body", "") + "\n\n" + body).strip()
+            old_body = str(old.get("body") or "")
+            if body and body not in old_body:
+                old["body"] = (old_body + "\n\n" + body).strip()
             old["points"] = _dedupe((old.get("points") or []) + list(points or []))
             old["tags"] = _dedupe((old.get("tags") or []) + list(tags or []))
             old["entities"] = _dedupe((old.get("entities") or []) + list(entities or []))
@@ -278,6 +283,8 @@ def rebuild_index(rows: list | None = None, force: bool = False) -> dict:
         "entities": dict(sorted(entities.items(), key=lambda x: x[1], reverse=True)[:60]),
         "ids": [r["id"] for r in rows],
     }
+    if brain.READONLY:
+        return idx  # 只读=只能读不能写：统计/列表不该把索引写盘
     try:
         brain.atomic_json(INDEX_FILE, idx)
     except OSError:
@@ -292,7 +299,7 @@ def knowledge_stats() -> dict:
         "total": len(rows),
         "topics": idx["topics"],
         "tags": list(idx["tags"].items())[:8],
-        "words": sum(len(r.get("body", "")) for r in rows),
+        "words": sum(len(str(r.get("body") or "")) for r in rows),
         "pinned": sum(1 for r in rows if r.get("pinned")),
         "pending": sum(1 for r in rows if r.get("status") == "pending"),
     }
@@ -380,8 +387,10 @@ def apply_tidy(result: dict) -> dict:
             if other_id == base["id"]:
                 continue   # 重复 id 不能把 base 自己当"被合并者"删掉
             other = by_id[other_id]
-            if other.get("body") and other["body"] not in base.get("body", ""):
-                base["body"] = (base.get("body", "") + "\n\n" + other["body"]).strip()
+            other_body = str(other.get("body") or "")
+            base_body = str(base.get("body") or "")
+            if other_body and other_body not in base_body:
+                base["body"] = (base_body + "\n\n" + other_body).strip()
             base["points"] = _dedupe((base.get("points") or []) + (other.get("points") or []))
             base["tags"] = _dedupe((base.get("tags") or []) + (other.get("tags") or []))
             base["entities"] = _dedupe((base.get("entities") or []) + (other.get("entities") or []))
@@ -429,15 +438,14 @@ def apply_tidy(result: dict) -> dict:
         by_id[rec["id"]] = rec
         done["created"] += 1
 
-    explicit = set()
     for kid in result.get("delete") or []:
         if kid in by_id:
             removed.add(kid)
-            explicit.add(kid)
 
     rows = [r for r in rows if r["id"] not in removed]
     save_knowledge(rows)
-    done["deleted"] = len(explicit)
+    # 统计真实从库里消失的条数（含合并被吃掉的那 X-1 条），别只报 delete 清单
+    done["deleted"] = len(removed)
 
     pending = KNOWLEDGE_DIR / "pending.json"
     if pending.exists():
@@ -542,7 +550,13 @@ def list_notes(kind: str | None = None, days: int | None = None, limit: int = 60
     if kind:
         rows = [r for r in rows if r.get("type") == kind]
     if days is not None:
-        floor = brain.now_ts() - days * brain.DAY
+        ts = brain.now_ts()
+        if days == 0:
+            # 只看今天：从本地时区当天零点算起，而不是"此刻往前 0 天"（那恒为空）
+            lt = time.localtime(ts)
+            floor = int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)))
+        else:
+            floor = ts - days * brain.DAY
         rows = [r for r in rows if r.get("created", 0) >= floor]
     return sorted(rows, key=lambda r: r.get("created", 0), reverse=True)[:limit]
 
@@ -552,8 +566,8 @@ def search_notes(query: str, k: int = 10) -> list:
     if not rows or not (query or "").strip():
         return []
     q = brain.terms(query)
-    docs = [brain.terms(" ".join([r.get("title", "") * 2, r.get("body", ""),
-                                  " ".join(r.get("tags") or [])])) for r in rows]
+    docs = [brain.terms(" ".join([str(r.get("title") or "") * 2, str(r.get("body") or ""),
+                                  " ".join(str(t) for t in (r.get("tags") or []))])) for r in rows]
     idf = brain.build_idf(docs)
     out = [(r, brain.relevance(q, d, idf)) for r, d in zip(rows, docs)]
     out = [x for x in out if x[1] > 0.02]
@@ -655,6 +669,7 @@ def read_skill(name: str) -> dict:
     path = _skill_path(name)
     if not path.exists():
         raise KeyError(f"没有这个技能：{name}")
+    name = _require_slug(name)   # 归一化，保证回写 frontmatter 与目录名一致
     text = path.read_text(encoding="utf-8")
     meta, body = parse_frontmatter(text)
     return {"name": name, "meta": meta, "body": body, "path": str(path), "raw": text}
@@ -758,6 +773,7 @@ def create_skill(name: str, description: str, body: str, overwrite: bool = False
 
 def edit_skill(name: str, body: str | None = None, append: str | None = None,
                description: str | None = None) -> dict:
+    name = _require_slug(name)   # 归一化后再回写 frontmatter，避免名字漂移
     cur = read_skill(name)
     meta = cur["meta"]
     new_body = (body if body is not None else cur["body"])
@@ -1112,14 +1128,16 @@ def self_review(force: bool = False, days: int = 3) -> dict:
         'python scripts/brain.py note write "灵枢自我总结" --type growth --body "..." --tags 自我总结',
     ])
     if not force and not due:
-        return {"due": False, "last": last, "days": days, "summary": summary}
+        return {"due": False, "last": last, "days": days, "summary": summary, "saved": False}
+    saved = False
     if not _readonly():
         cfg["last_self_review"] = now
         try:
             brain.atomic_json(brain.HOME / "config.json", cfg)
+            saved = True
         except OSError:
-            pass
-    return {"due": True, "last": last, "days": days, "summary": summary}
+            saved = False
+    return {"due": True, "last": last, "days": days, "summary": summary, "saved": saved}
 
 
 def _readonly() -> bool:
@@ -1297,9 +1315,15 @@ def borrow_skill(name: str, as_name: str = "", note: str = "", force: bool = Fal
     sk = locate_skill(name)
     if sk["source"] == "自己":
         raise ValueError("这是你自己写的技能，直接用 skill edit 改就行，不用借鉴")
-    target = (as_name or name).strip()
-    if not SLUG_RE.match(target):
-        target = "borrowed-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+    target = (as_name or "").strip()
+    if target:
+        # 先用 create_skill 同一套归一化；特殊字符才退化成 hash 名，大小写/空格不该被杀
+        try:
+            target = _require_slug(target)
+        except ValueError:
+            target = "borrowed-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+    else:
+        target = _require_slug(name)
     desc = f"借鉴自 {name}：{sk['meta'].get('description', '')}".strip()
     body = sk["body"].rstrip()
     body += f"\n\n## 出处\n借鉴自技能 `{name}`（{sk['path']}）。"
@@ -1510,9 +1534,10 @@ def log_evolution(kind: str, title: str, detail: str = "", refs=None) -> dict:
     }
     if not row["title"]:
         raise ValueError("进化记录需要一个标题")
-    rows = brain.read_jsonl(EVOLUTION_FILE)
-    rows.append(row)
-    brain.write_jsonl(EVOLUTION_FILE, rows)
+    with brain._locked(EVOLUTION_FILE):
+        rows = brain.read_jsonl(EVOLUTION_FILE)
+        rows.append(row)
+        brain.write_jsonl(EVOLUTION_FILE, rows)
     return row
 
 
@@ -1814,10 +1839,12 @@ def _run(argv=None) -> int:
                                                  "rm", "confirm", "discard"))
             or (args.cmd == "note" and act in ("write", "update", "delete"))
             or (args.cmd == "skill" and act in ("new", "edit", "install", "uninstall",
-                                                "rm", "borrow", "use"))
+                                                "rm", "borrow"))
+            # skill use 只有 --auto（未全局化自动安装）才写盘；纯读取照常放行
+            or (args.cmd == "skill" and act == "use" and getattr(args, "auto", False))
             or (args.cmd == "ext" and act in ("new", "edit", "rm"))
             or (args.cmd == "evolve" and act == "log")
-            or args.cmd == "learn"
+            # learn（ask/loop）是纯读命令，只读环境也要能查自己的知识库
         )
         if writing:
             print(f"[只读] 记忆库当前不可写，{args.cmd} {act} 需要写盘。"
@@ -2082,7 +2109,10 @@ def _run(argv=None) -> int:
                 print("想现在总结就加 --force。")
                 return 0
             print(r["summary"])
-            print("\n（last_self_review 已刷新，下次提醒在 {0} 天后）".format(r["days"]))
+            if r.get("saved"):
+                print("\n（last_self_review 已刷新，下次提醒在 {0} 天后）".format(r["days"]))
+            else:
+                print("\n（只读：本次总结时间未记录，下次仍会提醒）")
             return 0
         if args.act == "use":
             sk = use_skill(args.name, args.chars)

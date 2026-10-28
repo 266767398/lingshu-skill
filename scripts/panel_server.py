@@ -251,10 +251,22 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
             got = auth[7:].strip()
-        return got == TOKEN
+        import hmac
+        return hmac.compare_digest(got, TOKEN)
 
     # -------------------------------------------------- routes
     def do_GET(self):
+        # 与 do_POST 对齐的兜底：任意一条数据损坏都不能让整个接口断连无响应
+        try:
+            self._route_get()
+        except (ValueError, KeyError, PermissionError) as exc:
+            self._json({"error": str(exc)}, 400)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            self._json({"error": "面板内部错误，详情见运行日志"}, 500)
+
+    def _route_get(self):
         url = urlparse(self.path)
         path = url.path
         if path in ("/", "/index.html"):
@@ -340,12 +352,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not text:
                     self._json({"error": "内容为空"}, 400)
                     return
+                tags = data.get("tags") or []
+                entities = data.get("entities") or []
+                if not isinstance(tags, list) or not isinstance(entities, list):
+                    self._json({"error": "tags / entities 必须是数组"}, 400)
+                    return
                 rec, how = brain.remember(
                     text,
                     kind=data.get("kind", "fact"),
                     importance=data.get("importance"),
-                    tags=data.get("tags") or [],
-                    entities=data.get("entities") or [],
+                    tags=tags,
+                    entities=entities,
                     source="user",
                     emotion=(data.get("emotion") or None),
                 )
@@ -461,6 +478,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "emotion_arc": brain.emotion_arc(7),
                                 "desires": brain.desire_state()})
                     return
+                # 走到这里只允许 now（或缺省不传）→ 返回当前心情快照；拼错/未知 action 明确报错，
+                # 别"假成功"让人以为写进去了
+                if act not in ("", "now"):
+                    self._json({"error": f"未知操作：{act}"}, 400)
+                    return
                 self._json({"ok": True, "mood": brain.mood_now(),
                             "rationality": brain.rationality(),
                             "emotion_arc": brain.emotion_arc(7),
@@ -531,7 +553,11 @@ class Handler(BaseHTTPRequestHandler):
                     imp = float(data["importance"])
                     target["importance"] = round(max(0.0, min(1.0, imp / 10 if imp > 1 else imp)), 3)
                 if "tags" in data:
-                    target["tags"] = [t.strip() for t in data["tags"] if t.strip()]
+                    tags = data["tags"]
+                    if not isinstance(tags, list):
+                        self._json({"error": "tags 必须是数组"}, 400)
+                        return
+                    target["tags"] = [str(t).strip() for t in tags if str(t).strip()]
                 brain.save_all(records)
                 self._json({"ok": True, "memory": memory_view(target)})
                 return
