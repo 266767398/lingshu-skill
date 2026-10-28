@@ -1000,6 +1000,17 @@ def _upsert_agents_block(path: Path, generated: str) -> str:
             if new != old:
                 path.write_text(new, encoding="utf-8")
             return "updated"
+        # 有 start 却没有 end（上次写到一半/用户删了标记）：补一个 end 闭合，
+        # start 之后的内容原样保留到下方，绝不吞掉用户手写的东西，也不会叠出两个区块。
+        # block 取自 generated（它自带 start…end），所以这里不要再补 end，否则会叠两个。
+        block = generated[generated.find(AGENTS_BLOCK_START):].rstrip("\n")
+        tail = old[i + len(AGENTS_BLOCK_START):].strip("\n")
+        head = old[:i].rstrip("\n")
+        parts = [p for p in (head, block, tail) if p]
+        new = "\n\n".join(parts) + "\n"
+        if new != old:
+            path.write_text(new, encoding="utf-8")
+        return "updated"
     # 旧版无标记：整份都是生成的才整体替换；否则视为含用户手写，插在最前面
     if _looks_generated(old):
         path.write_text(generated, encoding="utf-8")
@@ -1181,8 +1192,13 @@ def _safe_rmtree(d: Path, root: Path) -> bool:
     return True
 
 
-def uninstall_skill(name: str) -> dict:
+def uninstall_skill(name: str, managed_only: bool = False) -> dict:
     name = _require_slug(name)
+    # 面板传入 managed_only：只允许卸载灵枢自己装过/记录在案的技能。
+    # 否则一个手滑（或恶意请求）就能把用户全局目录里别的插件删掉。
+    if managed_only and name not in _SELF_NAMES and name not in load_registry():
+        raise PermissionError(
+            f"{name} 不在灵枢的安装记录里，面板不删它；确需删除请用命令行 `skill uninstall {name}`。")
     # 新 kebab 目录 + 旧版中文目录一起清：旧版安装把中文名当目录名，
     # 只删 lingshu 会留下"灵枢"空壳，DSH 仍会去扫它。多全局目录（DSH/Trae）都清。
     candidates = [name, _SLUG_TO_LEGACY_NAME.get(name)]
@@ -1525,7 +1541,32 @@ def borrow_skill(name: str, as_name: str = "", note: str = "", force: bool = Fal
 # 约定（都可选）：DESC 一句话说明；inject(ctx) 返回文本并入每会话注入包；run(argv) 由 `ext run` 调用。
 
 def _ext_path(name: str) -> Path:
-    return EXT_DIR / (_require_slug(name) + ".py")
+    """解析扩展模块文件路径。
+
+    扩展文件名允许下划线（例如手工放的 flow_helper.py），不能像技能名那样一律把
+    下划线折成连字符，否则 list 里看得到、run/edit 却报「没有这个扩展模块」。
+    顺序：原始名精确匹配 → slug 归一化 → 大小写/下划线不敏感扫描 → 返回归一化候选（供创建）。
+    """
+    raw = (name or "").strip()
+    if not raw:
+        raise ValueError("扩展模块名不能为空")
+    # 1) 原始名精确匹配（保留下划线）
+    exact = EXT_DIR / (raw + ".py")
+    if exact.exists():
+        return exact
+    # 2) 归一化（大小写/空格/下划线→连字符）
+    slug = _require_slug(raw)
+    cand = EXT_DIR / (slug + ".py")
+    if cand.exists():
+        return cand
+    # 3) 大小写 / 下划线不敏感扫描，兜住 flow_helper 与 flow-helper 混用
+    if EXT_DIR.is_dir():
+        want = {raw.lower(), slug}
+        for p in EXT_DIR.glob("*.py"):
+            stem = p.stem.lower()
+            if stem in want or stem.replace("_", "-") in want:
+                return p
+    return cand
 
 
 def list_extensions() -> list:
@@ -1584,7 +1625,7 @@ def ext_injections(ctx: dict | None = None) -> list:
 
 def create_extension(name: str, desc: str = "", body: str = "", overwrite: bool = False) -> dict:
     """新建扩展模块：给一个能跑的模板，AI 拿到手改。自由，不设字数门槛。"""
-    name = (name or "").strip().lower().replace(" ", "-").replace("_", "-")
+    name = (name or "").strip().lower().replace(" ", "-")
     if not SLUG_RE.match(name):
         raise ValueError("扩展模块名只能用字母/数字/连字符/下划线/中文，例如 flow-helper")
     desc = re.sub(r"\s+", " ", (desc or "").strip())

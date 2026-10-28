@@ -27,7 +27,7 @@ import shutil
 import sys
 import time
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -735,9 +735,17 @@ def read_jsonl(path: Path) -> list:
                   level="warn", path=path.name)
         try:
             corrupt = path.with_name(path.name + ".corrupt")
-            with open(corrupt, "a", encoding="utf-8") as cf:
-                for b in bad_blocks:
-                    cf.write(b.rstrip() + "\n---\n")
+            # 去重：修不了（只读/抢锁失败）时坏块会留在原文件里，下次读还会再报，
+            # 不加这一步 .corrupt 会每读一次就追加一遍，越滚越大。
+            try:
+                existing = corrupt.read_text(encoding="utf-8", errors="ignore") if corrupt.exists() else ""
+            except OSError:
+                existing = ""
+            fresh = [b for b in bad_blocks if b.rstrip() not in existing]
+            if fresh:
+                with open(corrupt, "a", encoding="utf-8") as cf:
+                    for b in fresh:
+                        cf.write(b.rstrip() + "\n---\n")
             tmp = _tmp_path(path)
             with open(tmp, "w", encoding="utf-8", newline="\n") as f:
                 for r in out:
@@ -762,12 +770,8 @@ def read_jsonl(path: Path) -> list:
     return out
 
 
-def write_jsonl(path: Path, rows: list) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _tmp_path(path)
-    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+def _replace_retry(tmp: Path, path: Path) -> None:
+    """os.replace 覆盖，遇 Windows 文件占用重试；最终失败则清掉 tmp 并抛出。"""
     # Windows 上 os.replace 覆盖"正被别的进程打开读取"的文件会抛 PermissionError。
     # 写方之间有锁互斥，但读方（stats/recall/面板）不加锁；短暂重试几次等读句柄释放。
     for attempt in range(6):
@@ -786,12 +790,23 @@ def write_jsonl(path: Path, rows: list) -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
+def write_jsonl(path: Path, rows: list) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _tmp_path(path)
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    _replace_retry(tmp, path)
+
+
 @contextmanager
 def _locked(path: Path, timeout: float = 10.0):
     """跨进程写锁：用独占创建 lock 文件互斥，带超时与陈旧锁清理。
 
     没有锁时两个进程同时 read-modify-write 会互相覆盖（后写者赢，先写者丢）。
     Windows 上没有 flock，用 O_CREAT|O_EXCL 保证只有一个进程能创建锁文件。
+    锁文件里写持有者 pid：解锁时只删自己那把，避免「持锁超时被接管后，
+    自己退出时把接管者的锁删掉」——那会让第三个进程立刻挤进来一起写。
     """
     lock = path.with_name(path.name + ".lock")
     deadline = time.time() + timeout
@@ -803,9 +818,10 @@ def _locked(path: Path, timeout: float = 10.0):
             _HELD_LOCKS.add(str(lock))  # 记住"本进程已持锁"，read_jsonl 自愈时避免重复抢锁
             break
         except FileExistsError:
-            # 陈旧锁（持锁进程已死）：超过 5 秒直接接管
+            # 陈旧锁（持锁进程已死）：久到不可能是正常写盘（正常持锁 <2s）才接管。
+            # 阈值别设太小：dream 整理记忆时持锁会久一点，抢早了就是两个进程同时写。
             try:
-                if time.time() - lock.stat().st_mtime > 5.0:
+                if time.time() - lock.stat().st_mtime > STALE_LOCK_SECONDS:
                     try:
                         lock.unlink()
                     except OSError:
@@ -814,17 +830,31 @@ def _locked(path: Path, timeout: float = 10.0):
             except OSError:
                 pass
             if time.time() > deadline:
-                log_event("lock", f"等不到写锁：{path.name}（10s 超时）", level="error", path=path.name)
+                log_event("lock", f"等不到写锁：{path.name}（{timeout:.0f}s 超时）", level="error", path=path.name)
                 raise TimeoutError(f"等不到写锁：{path}")
             time.sleep(0.05)
     try:
         yield
     finally:
         _HELD_LOCKS.discard(str(lock))
-        try:
-            lock.unlink()
-        except OSError:
-            pass
+        # 只删自己建的锁（锁文件里记着 pid）
+        if _lock_owner(lock) in (None, os.getpid()):
+            try:
+                lock.unlink()
+            except OSError:
+                pass
+
+
+STALE_LOCK_SECONDS = 30.0
+
+
+def _lock_owner(lock: Path) -> int | None:
+    """读锁文件里记录的持有者 pid；读不到/格式不对返回 None。"""
+    try:
+        raw = lock.read_text(encoding="utf-8", errors="ignore").strip()
+        return int(raw.split()[0]) if raw else None
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _locked_save_all(records: list) -> None:
@@ -843,9 +873,14 @@ def _strengthen_write(touched: list) -> None:
 
     上万条记忆时，旧实现（_locked_save_all 整库 merge + 全量重写 3 个文件）让每次
     recall 都背上整库 I/O；这里按层分组、只 patch 命中的行，开销与命中数成正比。
+
+    注意只 patch 强化字段：touched 里的记录是 recall 开头无锁读的旧快照，
+    若整条 update 回去，会把期间别人并发写入的 review/layer/tags 用旧值覆盖掉
+    （例：刚 review confirm 的记忆被 recall 一碰又回到 pending）。
     """
     if READONLY or not touched:
         return
+    patch_fields = ("access_count", "stability", "last_access", "detail")
     with _locked(HOME / "hippocampus.jsonl"):
         by_layer: dict = {}
         for m in touched:
@@ -861,7 +896,9 @@ def _strengthen_write(touched: list) -> None:
             for r in rows:
                 u = updates.get(r.get("id"))
                 if u:
-                    r.update(u)
+                    for f in patch_fields:
+                        if f in u:
+                            r[f] = u[f]
             write_jsonl(p, rows)
 
 
@@ -963,9 +1000,31 @@ def save_all(records: list) -> None:
         # archive 记录走专用通道（load_archive 维护），不带进整库覆写，避免把归档文件清空
         if layer != ARCHIVE_LAYER:
             groups[layer if layer in groups else "hippo"].append(r)
-    write_jsonl(HOME / "hippocampus.jsonl", groups["hippo"])
-    write_jsonl(HOME / "cortex.jsonl", groups["cortex"])
-    write_jsonl(HOME / "dust.jsonl", groups["dust"])
+    # 三文件尽量同步落盘：先把三个临时文件都写好，再依次 replace。
+    # 把"存了一半"的窗口压到最小——只有进程恰好在两次 replace 之间挂掉才可能不一致，
+    # 而不是像原来那样每写一个文件就有一个完整窗口。
+    targets = [("hippocampus.jsonl", groups["hippo"]),
+               ("cortex.jsonl", groups["cortex"]),
+               ("dust.jsonl", groups["dust"])]
+    staged = []
+    try:
+        for fname, rows in targets:
+            p = HOME / fname
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _tmp_path(p)
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                for r in rows:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            staged.append((tmp, p))
+    except Exception:
+        for tmp, _ in staged:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        raise
+    for tmp, p in staged:
+        _replace_retry(tmp, p)
 
 
 # ---------------------------------------------------------------- 文本与相似度
@@ -1415,16 +1474,20 @@ def work_flush(why: str = "会话结束前决定留下", skip_done: bool = False
     skip_done=True 时，已经 `work done` 标记完成的条目直接丢弃、不落盘——
     做完的事就该放下，不必再占长期记忆。返回 {"saved": [...], "dropped": n}。
     """
-    rows = load_working()
-    saved, dropped = [], 0
-    for r in rows:
-        if skip_done and not r.get("open", True):
-            dropped += 1
-            continue
-        tags = ["工作记忆"] + ([r["tag"]] if r.get("tag") else [])
-        rec, how = remember(r["text"], kind="episode", tags=tags, source="ai")
-        saved.append({"id": rec["id"], "text": rec["text"], "how": how})
-    work_clear()
+    # 读-转-清 一次加锁完成：不加锁的话，两个终端同时 flush / add，
+    # 后 flush 的会拿旧快照把并发新增的暂存条目一起清掉（静默丢失）。
+    with _locked(WORKING_FILE):
+        rows = load_working()
+        saved, dropped = [], 0
+        for r in rows:
+            if skip_done and not r.get("open", True):
+                dropped += 1
+                continue
+            tags = ["工作记忆"] + ([r["tag"]] if r.get("tag") else [])
+            rec, how = remember(r["text"], kind="episode", tags=tags, source="ai")
+            saved.append({"id": rec["id"], "text": rec["text"], "how": how})
+        # 已持锁：直接清空，不能再调 work_clear()（它会重复抢同一把锁→自锁超时）
+        write_jsonl(WORKING_FILE, [])
     if saved:
         try:
             import growth
@@ -1486,23 +1549,22 @@ def capture(payload: str, tag: str = "", kind: str = "episode",
 
     ts = now_ts()
     # 1) 原文归档：无论如何先留一份完整快照，一个字都不改
-    if not raw_only:
-        VERBATIM_DIR.mkdir(parents=True, exist_ok=True)
-        archive = VERBATIM_DIR / f"{datetime.fromtimestamp(ts).strftime('%Y%m%d_%H%M%S')}.md"
-        k = 1
-        while archive.exists():
-            archive = VERBATIM_DIR / f"{datetime.fromtimestamp(ts).strftime('%Y%m%d_%H%M%S')}_{k}.md"
-            k += 1
-        head = [f"# 上下文封存 · {fmt_time(ts)}", ""]
-        if tag:
-            head.append(f"标签：{tag}")
-        head.append(f"字符数：{len(payload)}")
-        head.append("")
-        archive.write_text("\n".join(head) + payload + "\n", encoding="utf-8")
-    else:
-        archive = None
+    VERBATIM_DIR.mkdir(parents=True, exist_ok=True)
+    archive = VERBATIM_DIR / f"{datetime.fromtimestamp(ts).strftime('%Y%m%d_%H%M%S')}.md"
+    k = 1
+    while archive.exists():
+        archive = VERBATIM_DIR / f"{datetime.fromtimestamp(ts).strftime('%Y%m%d_%H%M%S')}_{k}.md"
+        k += 1
+    head = [f"# 上下文封存 · {fmt_time(ts)}", ""]
+    if tag:
+        head.append(f"标签：{tag}")
+    head.append(f"字符数：{len(payload)}")
+    head.append("")
+    archive.write_text("\n".join(head) + payload + "\n", encoding="utf-8")
 
-    # 2) 逐段进海马体，标记 verbatim，做梦不会把它淡化或丢进淡忘区
+    # 2) 逐段进海马体（--raw-only 时跳过：只留原文快照，不污染记忆库）
+    if raw_only:
+        return {"saved": [], "skipped": 0, "archive": archive, "chars": len(payload)}
     records = load_all()
     existing = [terms(m.get("text", "")) for m in records if m.get("layer") != "dust"]
     tags = ["封存"] + ([tag] if tag else [])
@@ -2522,7 +2584,9 @@ def update_persona(updates: dict, why: str = "做梦整理", source: str = "",
         old = p["traits"][key]
         try:
             if why == "做梦整理" and isinstance(val, (int, float)):
-                new = int(old or 50) + int(val)   # 做梦只做微调（增量 ±3 以内）
+                # old 可能是合法的 0：不能用 `old or 50`（0 会被当成 50）
+                base = 50 if old is None else int(old)
+                new = base + int(val)              # 做梦只做微调（增量 ±3 以内）
             else:
                 new = int(val)                     # 面板 / CLI：绝对值 0-100
             new = max(0, min(100, new))
@@ -3130,12 +3194,19 @@ def onboarding_state() -> dict:
 
 # ---------------------------------------------------------------- 做梦 / 巩固
 
+# 聚类池上限：记忆多了之后 O(n²) 两两比对会拖垮每晚的巩固，
+# 超过就按重要度取前 N 条，剩下的留到下轮（反正 consolidate 是按批推进的）。
+_MAX_CLUSTER_POOL = 400
+
+
 def cluster_memories(records: list, max_clusters: int = 6, include_ids: set | None = None) -> list:
     include_ids = include_ids or set()
     pool = [m for m in records if m.get("layer") != "dust"
             and (not m.get("consolidated") or m["id"] in include_ids)]
     if not pool:
         return []
+    if len(pool) > _MAX_CLUSTER_POOL:
+        pool = sorted(pool, key=lambda m: m.get("importance", 0), reverse=True)[:_MAX_CLUSTER_POOL]
     parent = {m["id"]: m["id"] for m in pool}
 
     def find(x):
@@ -3189,8 +3260,10 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
               "archived": [], "clusters": []}
 
     # 读-改-写整体加锁：dream 用 save_all 整库快照覆写，
-    # 不加锁会把锁外并发写入的新记忆用旧快照整库覆盖丢。dry_run 不写盘也走锁（只读场景无所谓）
-    with _locked(HOME / "hippocampus.jsonl"):
+    # 不加锁会把锁外并发写入的新记忆用旧快照整库覆盖丢。
+    # dry_run 纯预览不写盘，就别去抢锁——只读记忆库（HOME 不可写）下抢锁会直接报错。
+    lock_ctx = (nullcontext() if dry_run else _locked(HOME / "hippocampus.jsonl"))
+    with lock_ctx:
         records = load_all()
         archived_recs = []
 
@@ -3358,9 +3431,16 @@ def apply_dream(result: dict) -> dict:
             pending_id = (json.loads(pending_path.read_text("utf-8")) or {}).get("task_id")
         except Exception:
             pending_id = None
-    task_id = result.get("task_id") or pending_id
+    task_id = result.get("task_id")
     if pending_id is None:
         raise ValueError("没有待应用的任务：dreams/pending.json 不存在")
+    if not task_id:
+        # 以前这里 fallback 到 pending_id，等于"缺 task_id 但也放行"——
+        # 上一场漏写 task_id 的 apply.json 会静默套用到这一场。改为必须显式带上。
+        raise ValueError(
+            f"apply 里没有 task_id：为防止把上一场的整理结果套用到这一场，拒绝应用。"
+            f"请在 apply.json 里带上 \"task_id\": \"{pending_id}\"。"
+        )
     if task_id != pending_id:
         raise ValueError(
             f"任务对不上：apply 里的 task_id={task_id!r}，与 pending.json 的 {pending_id!r} 不一致，拒绝应用。"

@@ -217,6 +217,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
     def _body(self):
+        """读并解析 JSON 请求体。
+
+        返回 dict = 正常；返回 None = 已经回了错误响应（调用方直接 return），
+        绝不再把"解析失败"当成空对象放过去——否则非法请求会被当成合法空操作。
+        """
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -228,9 +233,21 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return None
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8-sig"))
+            raw = self.rfile.read(length).decode("utf-8-sig")
         except Exception:
+            self._json({"error": "无法读取请求体"}, 400)
+            return None
+        if not raw.strip():
             return {}
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            self._json({"error": "请求体不是合法 JSON"}, 400)
+            return None
+        if not isinstance(obj, dict):
+            self._json({"error": "请求体必须是 JSON 对象"}, 400)
+            return None
+        return obj
 
     def _origin_ok(self) -> bool:
         """只接受本机页面的请求，挡住跨站表单与 DNS rebinding。
@@ -266,6 +283,8 @@ class Handler(BaseHTTPRequestHandler):
         # 与 do_POST 对齐的兜底：任意一条数据损坏都不能让整个接口断连无响应
         try:
             self._route_get()
+        except FileExistsError as exc:
+            self._json({"error": str(exc)}, 409)
         except (ValueError, KeyError, PermissionError) as exc:
             self._json({"error": str(exc)}, 400)
         except Exception:
@@ -364,8 +383,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         # 只读门控：写接口在数据目录不可写时直接 403（展示/预览接口放行）
         if brain.READONLY and path in _WRITE_ENDPOINTS:
-            self._json({"error": "readonly", "message": "数据目录当前只读，写操作已被禁用。"}, 403)
-            return
+            # 预览类不写盘：daily 的 dry_run 预演、self-review（内部自带只读保护）应放行，
+            # 否则面板上这两个"只读按钮"在只读模式下会莫名 403
+            preview_ok = ((path == "/api/daily" and bool(data.get("dry_run")))
+                          or path == "/api/skill/self-review")
+            if not preview_ok:
+                self._json({"error": "readonly", "message": "数据目录当前只读，写操作已被禁用。"}, 403)
+                return
         try:
             if path == "/api/remember":
                 text = (data.get("text") or "").strip()
@@ -684,8 +708,9 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "result": res, "workspace": workspace()})
                     return
                 elif act == "uninstall":
-                    # 会删全局技能目录里的东西，记一笔日志，事后能查是谁在面板上删的
-                    res = growth.uninstall_skill(data.get("name", ""))
+                    # 会删全局技能目录里的东西，记一笔日志，事后能查是谁在面板上删的；
+                    # managed_only 只允许卸载灵枢装过的技能，防止误删用户其他全局插件
+                    res = growth.uninstall_skill(data.get("name", ""), managed_only=True)
                     brain.log_event("panel", f"卸载技能 {data.get('name', '')} → {res.get('state')}")
                     self._json({"ok": True, "result": res,
                                 "workspace": workspace()})
@@ -767,6 +792,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._json({"error": "not found"}, 404)
+        except FileExistsError as exc:
+            # 已有同名技能/扩展/笔记：409 冲突比 500 内部错误更符合事实，前端也能直接提示
+            self._json({"error": str(exc)}, 409)
         except (ValueError, KeyError, PermissionError) as exc:
             # 业务异常：消息本身就是给用户看的，直接回显
             self._json({"error": str(exc)}, 400)

@@ -9,6 +9,8 @@
     --text:#e9e6df; --muted:#8b919b; --faint:#5d646e;
     --amber:#d9a441; --amber-soft:rgba(217,164,65,.14);
     --teal:#5fa8a0; --red:#c96b5f; --violet:#8d86c9;
+    /* 语义色别名：供情绪/欲望条等内联样式引用，避免 var(--accent/--good/--bad) 取不到值变透明 */
+    --accent:var(--amber); --good:var(--teal); --bad:var(--red);
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
@@ -988,7 +990,7 @@ function renderOverview(){
 
   const traits = p.traits || {};
   $("p-traits").innerHTML = Object.keys(traits).length
-    ? Object.entries(traits).map(([k, v]) => `<div class="trait"><span>${esc(k)}</span><div class="bar"><i style="width:${v}%"></i></div><b>${v}</b></div>`).join("")
+    ? Object.entries(traits).map(([k, v]) => `<div class="trait"><span>${esc(k)}</span><div class="bar"><i style="width:${esc(v)}%"></i></div><b>${esc(v)}</b></div>`).join("")
     : `<div class="sub">还没有性格设定：等初识，或由它自己决定。</div>`;
 
   const evo = p.evolved || {};
@@ -1116,7 +1118,7 @@ function renderMood(){
       ? m.active.map(x => `<span class="chip">${esc(x.group || "")} · ${esc(x.emotion)} ${Math.round(x.weight * 100)}%${x.why ? " — " + esc(x.why) : ""}</span>`).join(" ")
       : `<span class="chip">情绪已散去，现在是中性状态</span>`;
     if (m.storm) html += `<span class="chip bad" style="border-color:rgba(201,107,95,.5);color:#e8a89f">情绪激动 · 理智被压住</span>`;
-    if (m.complex) html += `<span class="chip">${esc(m.complex)}</span>`;
+    if (m.complex) html += `<span class="chip">悲喜交加 · 情绪复杂</span>`;
     actEl.innerHTML = html;
   }
   const grpEl = $("emo-groups");
@@ -1758,7 +1760,7 @@ function renderOnboarding(){
   if (ob.completed) {
     box.innerHTML = `<div class="chips">
         <span class="chip good">名字 ${esc(ob.name || "还没有")}</span>
-        ${Object.entries(ob.traits || {}).slice(0, 6).map(([k, v]) => `<span class="chip">${esc(k)} ${v}</span>`).join("")}
+        ${Object.entries(ob.traits || {}).slice(0, 6).map(([k, v]) => `<span class="chip">${esc(k)} ${esc(v)}</span>`).join("")}
         ${(ob.likes || []).slice(0, 6).map(x => `<span class="chip good">喜欢 ${esc(x)}</span>`).join("")}
       </div>
       <div class="sub" style="margin-top:10px">初识已完成。想改名字或性格，去「人格」里改；每次改动都会留下历史。</div>
@@ -1816,8 +1818,15 @@ function indexMemories(rows){
   (rows || []).forEach(m => { S.memIndex[m.id] = m; });
 }
 
+let _memSeq = 0, _memTimer = null;
+// 输入框逐字触发会打爆接口、且响应乱序会把列表刷成旧结果：统一防抖 + 序号丢弃
+function scheduleMemList(){
+  clearTimeout(_memTimer);
+  _memTimer = setTimeout(renderMemoryList, 220);
+}
 async function renderMemoryList(){
   if (!S.ov) return;
+  const seq = ++_memSeq;
   const p = new URLSearchParams();
   const q = $("search").value.trim();
   if (q) p.set("q", q);
@@ -1837,6 +1846,7 @@ async function renderMemoryList(){
   p.set("limit", "200");
   try {
     const rows = await api("/api/memories?" + p.toString());
+    if (seq !== _memSeq) return;   // 已有更新的请求在路上，丢弃这次旧结果，防止乱序覆盖
     indexMemories(rows);
     $("mem-list").innerHTML = rows.length ? rows.map(memCard).join("")
       : `<div class="empty">没有匹配的记忆。放宽筛选，或者按回车做一次模糊回忆。</div>`;
@@ -1926,10 +1936,10 @@ document.querySelectorAll("nav button").forEach(b => b.addEventListener("click",
 const dshFilter = $("dsh-plugins-filter");
 if (dshFilter) dshFilter.addEventListener("input", () => renderDshPlugins());
 
-$("search").addEventListener("input", renderMemoryList);
+$("search").addEventListener("input", scheduleMemList);
 $("search").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
-["layerFilter", "impFilter", "timeFilter", "sortFilter"].forEach(id => $(id).addEventListener("change", renderMemoryList));
-["tagFilter", "emoFilter"].forEach(id => $(id).addEventListener("input", renderMemoryList));
+["layerFilter", "impFilter", "timeFilter", "sortFilter"].forEach(id => $(id).addEventListener("change", scheduleMemList));
+["tagFilter", "emoFilter"].forEach(id => $(id).addEventListener("input", scheduleMemList));
 $("btn-search").addEventListener("click", doSearch);
 $("btn-inject").addEventListener("click", openInject);
 $("btn-conflicts").addEventListener("click", loadConflicts);
@@ -2591,12 +2601,20 @@ $("skill-list").addEventListener("click", async (e) => {
         if (!confirm("全局目录已有同名技能，确认覆盖？")) return;
         r = await post("/api/skill", {action: "install", name: ins.dataset.skinstall, force: true});
       }
+      // 装灵枢本体要过风险告知：install 返回 risk_required 不等于"已装好"
+      if (r.result && r.result.state === "risk_required") {
+        const risks = (r.result.risks || []).map(x => "· " + x).join("\n");
+        if (!confirm("安装「灵枢」前请确认它安装后会：\n\n" + risks + "\n\n我已了解并接受这套行为，继续安装？")) return;
+        r = await post("/api/skill", {action: "install", name: ins.dataset.skinstall, force: false, yes: true});
+      }
+      if (r.result && r.result.state === "risk_required") { toast("未接受风险告知，已取消安装", true); return; }
       toast(r.result.state === "already" ? "已是最新" : "已安装到全局技能目录");
       await loadWS();
     }
     if (del) {
       if (!confirm("删除自己写的技能？全局已安装的副本不会自动删除。")) return;
-      await post("/api/skill", {action: "delete", name: del.dataset.skdel});
+      const r = await post("/api/skill", {action: "delete", name: del.dataset.skdel});
+      if (!r.ok) { toast("删除失败（可能已不存在）", true); return; }
       toast("已删除");
       await loadWS();
     }
