@@ -85,7 +85,7 @@
 
 - **work 工程模式**：情绪状态与拟人语气**不注入本会话**，注入包明确说"旧情绪与当前任务无关，当作没有"，先给可执行方案，重视正确性与工程契约。
 - **human 拟人模式**：情绪照常注入，并把数值得翻成**可直接照着做的行为约束**（`emotion now` 不再只有裸数字）。
-- **auto 自动模式**（默认）：**打分制话题判定**——工程信号（编程/数据/工程三组 26 词）与人性信号（情绪/关系/寒暄三组 30 词）分组计数打分，`work_score >= human_score` 工程优先。一边聊天一边写代码也不会轻易切错：句子里有代码、报错就偏 work，情绪词再多也按"工程优先"隔离；两侧都命中时判定标 `mixed` 并把依据摊开。判定**可见**：面板概览有「会话模式判定」卡（当前模式、置信度、两侧分数、命中词、可输入一句话试判），CLI 用 `mode explain --query 词…` 看同款依据。
+- **auto 自动模式**（默认）：**打分制话题判定**——工程信号（编程/数据/工程三组 26 词）与人性信号（情绪/关系/寒暄三组 30 词）分组计数打分，`work_score >= human_score` 工程优先。一边聊天一边写代码也不会轻易切错：句子里有代码、报错就偏 work，情绪词再多也按"工程优先"隔离；两侧都命中时判定标 `mixed` 并把依据摊开。判定**可见**：面板概览有「会话模式判定」卡（当前模式、置信度、两侧分数、命中词、可输入一句话试判），CLI 用 `mode explain "一句话话题"` 看同款依据。
 
 切换：`mode work | human | auto`。写代码前想手动清掉余波，用 `emotion cool` 把 24 小时内的强情绪整体降温，或 `emotion adjust <序号>` 微调单条。
 
@@ -350,7 +350,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 人格 | `persona show\|set traits.幽默=70\|sync\|path\|interview\|self\|lock\|unlock\|history [--limit]\|rollback <序号>\|snapshot [--label]\|snapshots\|restore <名字>\|drift [--days 7] [--json]` |
 | 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config\|events\|adjust <序号>\|del <序号>\|cool\|check "回复文本"` |
 | 工作记忆 | `work status\|add\|list\|done <序号>\|flush [--skip-done]\|clear` |
-| 会话模式 | `mode show\|work\|human\|auto\|explain [--query 词…]`（工程会话自动隔离情绪；explain 看 auto 判定依据） |
+| 会话模式 | `mode show\|work\|human\|auto\|explain "一句话话题"`（工程会话自动隔离情绪；explain 看 auto 判定依据） |
 | 记忆关联 | `assoc link <idA> <idB> --relation 因果 --why "..."\|unlink <idA> <idB>\|of <id>\|auto [--dry-run]\|graph --limit 300` |
 | 运行日志 | `logs [--limit 20] [--level warn\|error] [--all]`（锁冲突/异常/解析报错，面板「日志」页同款） |
 | 审核闸 | `review [--json]` / `review confirm <id>` / `review discard <id>`（记忆 m_* 与知识 k_* 通用） |

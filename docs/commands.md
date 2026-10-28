@@ -28,7 +28,7 @@
 | 人格编辑 | `persona set traits.幽默=70`（逐字段改，写进历史可回滚） |
 | 初识 | `persona interview [--name ... --traits ...\|--unsure]` → `persona self [--name ... --traits ... --likes ... --dislikes ... --habits ...]` |
 | 理智/好奇 | `mind [state\|weigh "事" --benefit 7 --cost 3\|tune --curiosity +5 --reason -3 --why "..."]` |
-| 会话模式 | `mode show\|work\|human\|auto\|explain [--query 词…]`（工程会话自动隔离情绪；explain 打印 auto 判定依据） |
+| 会话模式 | `mode show\|work\|human\|auto\|explain "一句话话题"`（工程会话自动隔离情绪；explain 打印 auto 判定依据） |
 | 审核闸 / 自查 | `review [--json]` → `review confirm <id>` / `review discard <id>`（记忆 m_* 与知识 k_* 通用）；`audit [--json]` |
 | 心情（七情六欲） | `emotion [now\|arc\|list\|feel 情绪名 --intensity 0.7 --why "..."\|desire 欲望名 --amount 20]` |
 | 情绪事件/微调 | `emotion events`（带序号）→ `emotion adjust <序号> [--intensity 0.3] [--emotion-name 委屈] [--why "..."]` / `emotion del <序号>` / `emotion cool` |

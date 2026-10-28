@@ -121,10 +121,10 @@ lingshu.user.md 用户附加规则（更新技能永不覆盖，每会话自动�
 
 - **work 工程模式**：情绪状态与拟人语气**不进注入包**，明确"旧情绪与当前任务无关"，先给可执行方案，重视正确性与工程契约。
 - **human 拟人模式**：情绪照常注入，并把好奇心/理智/心情数值翻成**行为约束**（直接照做，不是裸数字）。
-- **auto 自动模式**（默认）：**打分制话题判定**——工程信号（编程/数据/工程）与人性信号（情绪/关系/寒暄）分组计数打分，`work_score >= human_score` 工程优先，两侧都命中标 mixed；判定依据面板概览卡或 `mode explain --query 词…` 随时可见。
+- **auto 自动模式**（默认）：**打分制话题判定**——工程信号（编程/数据/工程）与人性信号（情绪/关系/寒暄）分组计数打分，`work_score >= human_score` 工程优先，两侧都命中标 mixed；判定依据面板概览卡或 `mode explain "一句话话题"` 随时可见。
 
 ```bash
-python scripts/brain.py mode show|work|human|auto|explain --query "帮我修下这个报错"
+python scripts/brain.py mode show|work|human|auto|explain "帮我修下这个报错"
 ```
 
 写代码前想亲手清掉余波：`emotion cool`（24h 内强情绪整体降温）或 `emotion adjust <序号>` 微调单条。
