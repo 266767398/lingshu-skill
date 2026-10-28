@@ -653,9 +653,21 @@ def save_registry(reg: dict) -> None:
     brain.atomic_json(SKILL_REG, reg)
 
 
+# 中文显示名 → kebab-case 目录名。DSH 的文件系统技能发现只认 kebab-case 的 name，
+# 中文名会被静默跳过（装完像"改名"或干脆不出现），所以装/查/删都统一折算成英文 slug。
+_SKILL_NAME_ALIASES = {
+    "灵枢": "lingshu",
+    "灵枢-lite": "lingshu-lite",
+    "灵枢-tiny": "lingshu-tiny",
+}
+# 灵枢本体的所有可识别名字（旧中文名 + 新 kebab 名），用于风险确认与"这是我自己"判定
+_SELF_NAMES = ("灵枢", "lingshu")
+
+
 def _require_slug(name: str) -> str:
     # 统一归一化：大小写、空格、下划线都折算成连字符，保证 new / show / rm 用同一个名字都能找到
     name = (name or "").strip().lower().replace(" ", "-").replace("_", "-")
+    name = _SKILL_NAME_ALIASES.get(name, name)   # 中文名折算成 kebab-case（DSH 才认）
     if not SLUG_RE.match(name):
         raise ValueError("技能名不合法：只能用字母/数字/连字符/下划线/中文，1-63 个字符")
     return name
@@ -795,6 +807,49 @@ def edit_skill(name: str, body: str | None = None, append: str | None = None,
     return {"name": name, "version": version, "path": cur["path"]}
 
 
+def _ver(v) -> object:
+    """版本号容错：自建技能是自增整数，本体是语义化版本（2.11.2）。
+    直接 int('2.11.2') 会抛 ValueError 把 skill list 整个搞崩，这里退化成原串。"""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return str(v or "1").strip() or "1"
+
+
+def list_installed() -> list:
+    """列出已装进全局技能目录的技能。
+
+    DSH 的文件系统技能发现只认 kebab-case 的 name，中文名会被静默跳过，
+    所以这里额外核对「目录名 == frontmatter name（kebab）」：不一致就标 ✗，
+    让用户一眼看出为什么装了却不出现。
+    """
+    out = []
+    if not GLOBAL_SKILLS.exists():
+        return out
+    for d in sorted(GLOBAL_SKILLS.iterdir()):
+        p = d / "SKILL.md"
+        if not p.is_file():
+            continue
+        try:
+            meta, _ = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
+        except OSError:
+            meta = {}
+        name = (meta.get("name") or d.name).strip()
+        try:
+            ok = d.name == _require_slug(name)
+        except ValueError:
+            ok = False
+        out.append({
+            "dir": d.name,
+            "name": name,
+            "version": _ver(meta.get("version", 1)),
+            "ok": ok,
+            "agents": (d / "AGENTS.md").exists(),
+            "path": str(p),
+        })
+    return out
+
+
 def list_skills() -> list:
     reg = load_registry()
     out = []
@@ -809,7 +864,7 @@ def list_skills() -> list:
             out.append({
                 "name": name,
                 "description": meta.get("description", ""),
-                "version": int(meta.get("version", reg.get(name, {}).get("version", 1)) or 1),
+                "version": _ver(meta.get("version", reg.get(name, {}).get("version", 1) or 1)),
                 "lines": len(body.splitlines()),
                 "updated": p.stat().st_mtime,
                 "installed": (installed_dir / "SKILL.md").exists(),
@@ -914,10 +969,11 @@ def _upsert_agents_block(path: Path, generated: str) -> str:
 def _is_lingshu(name: str, meta: dict, from_dir: str | None = None) -> bool:
     """判断这次装的是不是灵枢本体（会自动记忆/整理/自编辑的那一个）。
 
-    只认名字叫「灵枢」的本体：AI 自己建的技能默认 origin 也是"灵枢"，
+    只认名字叫「灵枢 / lingshu」的本体：AI 自己建的技能默认 origin 也是"灵枢"，
     不能因为来源字符串里带"灵枢"就被当成本体去走风险确认（否则每个自建技能都装不进去）。
     """
-    is_name = (name or "").strip() == "灵枢" or (meta.get("name") or "").strip() == "灵枢"
+    is_name = (name or "").strip().lower() in _SELF_NAMES or \
+        (meta.get("name") or "").strip().lower() in _SELF_NAMES
     if is_name:
         return True
     if from_dir:
@@ -925,7 +981,7 @@ def _is_lingshu(name: str, meta: dict, from_dir: str | None = None) -> bool:
         if p.exists():
             try:
                 m2, _ = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
-                if (m2.get("name") or "").strip() == "灵枢":
+                if (m2.get("name") or "").strip().lower() in _SELF_NAMES:
                     return True
             except OSError:
                 pass
@@ -1095,7 +1151,15 @@ def self_review(force: bool = False, days: int = 3) -> dict:
     last = float(cfg.get("last_self_review", 0) or 0)
     due = force or (now - last >= days * brain.DAY)
     material = digest(max(2, days))
-    global_path = GLOBAL_SKILLS / "灵枢" / "SKILL.md"
+    # 全局副本目录名随名字改过（灵枢 → lingshu），两个都看，先新后旧
+    global_path = None
+    for _n in ("lingshu", "灵枢"):
+        _p = GLOBAL_SKILLS / _n / "SKILL.md"
+        if _p.exists():
+            global_path = _p
+            break
+    if global_path is None:
+        global_path = GLOBAL_SKILLS / "lingshu" / "SKILL.md"
     installed = global_path.exists()
     if installed:
         try:
@@ -1106,7 +1170,7 @@ def self_review(force: bool = False, days: int = 3) -> dict:
             global_line = "全局副本已安装：{}".format(global_path)
     else:
         global_line = "全局副本未安装（可用 skill install 灵枢 --from <本技能目录> --yes 安装）"
-    checks = [c for c in check_skill() if c["name"] == "灵枢"]
+    checks = [c for c in check_skill() if c["name"] in _SELF_NAMES]
     check_line = "✓ 技能自检通过" if (checks and checks[0]["ok"]) else \
         ("△ 技能自检提示：" + "；".join(checks[0]["issues"] if checks else ["本地技能库没有「灵枢」副本"])[:200])
     summary = "\n".join([
@@ -1254,7 +1318,7 @@ def search_skills(query: str, limit: int = 12) -> list:
                 "description": desc,
                 "path": str(p),
                 "score": round(score, 2),
-                "self": name == "灵枢",
+                "self": (name or "").lower() in _SELF_NAMES,
             })
     out.sort(key=lambda x: (x["score"], x["source"] == "自己"), reverse=True)
     return out[:limit]
@@ -1739,6 +1803,8 @@ def _run(argv=None) -> int:
     a.add_argument("--description", default=None)
     a = ss.add_parser("list", help="列出我写的技能")
     a.add_argument("--json", action="store_true")
+    a.add_argument("--global", dest="installed_list", action="store_true",
+                   help="改为列出已安装到全局目录的技能（核对目录名是否 kebab-case）")
     a = ss.add_parser("show", help="查看技能")
     a.add_argument("name")
     a = ss.add_parser("check", help="自检技能规范")
@@ -2005,6 +2071,18 @@ def _run(argv=None) -> int:
                 print(f"技能已更新：{res['path']}（v{res['version']}）")
             return 0
         if args.act == "list":
+            if getattr(args, "installed_list", False):
+                rows = list_installed()
+                if args.json:
+                    print(json.dumps(rows, ensure_ascii=False, indent=2))
+                elif not rows:
+                    print(f"全局技能目录里还没有安装任何技能：{GLOBAL_SKILLS}")
+                else:
+                    for r in rows:
+                        mark = "✓" if r["ok"] else "✗ 目录名/name 不是 kebab-case，DSH 会跳过"
+                        print(f"{r['dir']}  name={r['name']}  v{r['version']}  {mark}")
+                        print(f"  {r['path']}\n")
+                return 0
             rows = list_skills()
             if args.json:
                 print(json.dumps(rows, ensure_ascii=False, indent=2))

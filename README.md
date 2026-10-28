@@ -2,7 +2,7 @@
 
 > 名字取自《黄帝内经》：**算力给思考，人格给灵魂，记忆给生命。**
 
-> 当前版本 **v2.11.1**（变更见 [CHANGELOG.md](CHANGELOG.md)）
+> 当前版本 **v2.11.2**（变更见 [CHANGELOG.md](CHANGELOG.md)）
 
 > ⚠️ **能力天花板（先读）**：灵枢是「提示词 + 脚本」的机制，**不能从底层强制约束模型**。当模型发生强幻觉时依然会无视全部规则；效果上限取决于底层大模型本身的推理、记忆与指令遵循能力。中强模型（7B+、云端）可完整遵守；**3B 以下本地小模型会出现大量规则漏执行**（忘走 startup、跳过写盘、纪律打折）——请据此降低预期，或改用 `SKILL-lite.md`（精简版）/ `SKILL-tiny.md`（最小试用版）。
 
@@ -291,6 +291,14 @@ SYSTEM """你运行在本地，有记忆系统「灵枢」。每轮先按需执�
 - `dream` 会自动把一批短期记忆打包喂给模型，短期记忆越多，当次 token 消耗越大。
 
 **建议的养生方案**：每周一次 `backup`（默认保留最近 20 份，自动修剪）；沉眠记忆交给**冷热自动归档**（每次做梦顺带雪藏进 archive 层，或 `archive run` 手工触发），不用再手动逐条删除——需要时 `archive search` / `archive restore` 找回；知识库定期 `knowledge review` 确认。真到数据膨胀影响手感的层级，把 `--home` 指向新目录再 `restore` 最近备份，旧目录留档。
+
+## 技能名为什么是 lingshu
+
+`SKILL.md` 的 frontmatter 是 `name: lingshu`（中文名放在 `title: 灵枢`）。原因是 **DSH 的文件系统技能发现只认 kebab-case 名字**，中文 `name` 会被静默跳过——表现就是"装了却看不到 / 像被改名"。
+
+- 安装时用中文名或英文名都行：`skill install 灵枢 --from <本目录> --yes` 与 `skill install lingshu ...` 等价，目录与 frontmatter 统一落成 `lingshu`。
+- 装完想确认有没有被认出来：`python scripts/brain.py skill list --global`，正常显示 `✓`；若是旧版中文目录会标 `✗ 目录名/name 不是 kebab-case，DSH 会跳过`，删掉该目录按上面重装即可。
+- 手动拷进 DSH 技能目录时，**目录名和 frontmatter name 都要用 kebab-case**（`lingshu` / `lingshu-lite` / `lingshu-tiny`）。
 
 ## 如何更新灵枢
 

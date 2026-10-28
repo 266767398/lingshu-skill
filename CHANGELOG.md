@@ -2,6 +2,16 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.11.2 — 名字改 kebab-case：DSH 终于认得出、bat 也不再乱码
+
+用户反馈：装完技能在 DSH 里不出现（"改名"）、`start-panel.bat` 一跑满屏乱码命令报错。根因两个，都修：
+
+- **frontmatter `name` 从中文改 kebab-case**：`name: 灵枢` → `name: lingshu`（另两者 `lingshu-lite` / `lingshu-tiny`）。DSH 的文件系统技能发现只认 kebab-case 名字，中文名会被静默跳过——这就是"装完像改名/消失"的原因。中文名保留到新增的 `title: 灵枢` 字段作展示用。
+- **安装器跟随**：`_require_slug` 增加中文别名折算（`灵枢`→`lingshu`），装/查/删仍可用中文名或英文名，目录与 frontmatter 统一写 kebab；本体识别、全局副本路径、风险确认判定同时认新旧两个名字。
+- **新增 `skill list --global`**：列出全局技能目录里已装的技能，并核对「目录名 == name(kebab)」，旧版中文目录会被标 `✗`，一眼看出为什么不出现（以前命令只能列自己写的技能，装了啥无从自查）。
+- **修复 `skill list` 遇语义化版本号崩溃**：`int('2.11.2')` 直接 ValueError 整列表崩掉，改为容错（自建技能整数版本照常，semver 原样展示）。
+- **`start-panel.bat` 重写**：原文件是 UTF-8 + LF 换行，cmd 按 GBK 解析产生乱码并把 `if` 语句拆成裸命令执行。改为**纯 ASCII + CRLF**，任何代码页下解析都稳定，面板启动提示改用英文。
+
 ## v2.11.1 — 稳定性加固：坏行自愈不再与并发写打架
 
 v2.11 后的自查加固，不改功能只堵隐患：
