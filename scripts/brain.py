@@ -574,6 +574,25 @@ def bulk_memory_action(ids: list, action: str, value=None) -> dict:
         raise ValueError("没有选中任何记忆")
     if action not in ("confirm", "discard", "importance", "add_tags", "remove_tags"):
         raise ValueError("不支持的批量操作")
+    # 预校验参数：坏值在动库之前就报清楚，别让 float(None) 之类变成 500
+    imp_val = None
+    tag_list = None
+    if action == "importance":
+        try:
+            imp_val = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("重要性必须是数字（1-10）")
+        if imp_val < 0 or imp_val > 10:
+            raise ValueError("重要性要在 0-10 之间")
+    elif action in ("add_tags", "remove_tags"):
+        if isinstance(value, str):
+            tag_list = [t.strip() for t in re.split(r"[,，;；、\n]+", value) if t.strip()]
+        elif isinstance(value, (list, tuple)):
+            tag_list = [str(t).strip() for t in value if str(t).strip()]
+        else:
+            raise ValueError("标签必须是数组，或逗号分隔的文本")
+        if not tag_list:
+            raise ValueError("没有可用的标签")
     want = set(ids)
     updated = 0
     with _locked(HOME / "hippocampus.jsonl"):
@@ -589,17 +608,15 @@ def bulk_memory_action(ids: list, action: str, value=None) -> dict:
                 m["forgotten_at"] = now_ts()
                 m["review"] = "discarded"
             elif action == "importance":
-                imp = float(value)
-                m["importance"] = round(max(0.0, min(1.0, imp / 10 if imp > 1 else imp)), 3)
+                m["importance"] = round(max(0.0, min(1.0, imp_val / 10 if imp_val > 1 else imp_val)), 3)
             elif action == "add_tags":
-                add = [str(t).strip() for t in (value or []) if str(t).strip()]
                 cur = [str(t) for t in (m.get("tags") or [])]
-                for t in add:
+                for t in tag_list:
                     if t not in cur:
                         cur.append(t)
                 m["tags"] = cur
             elif action == "remove_tags":
-                drop = {str(t).strip() for t in (value or [])}
+                drop = set(tag_list)
                 m["tags"] = [str(t) for t in (m.get("tags") or []) if str(t) not in drop]
             updated += 1
         if updated:

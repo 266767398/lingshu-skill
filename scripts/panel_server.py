@@ -97,10 +97,17 @@ def overview() -> dict:
         "emotion_alerts": brain.emotion_checks_recent(10),
         "dream_draft": brain.load_dream_draft(),
         "mode_detail": brain.resolve_mode_detail(""),
-        "log_summary": {"warn": len(brain.read_logs(100, level="warn")),
-                        "error": len(brain.read_logs(100, level="error"))},
+        "log_summary": _log_summary(),
         "home": str(brain.HOME),
     }
+
+
+def _log_summary() -> dict:
+    """最近 100 条里 error / warn（不含 error）各自多少条，一次读取避免重复解析。"""
+    recent = brain.read_logs(200, level=None)
+    errs = sum(1 for r in recent if r.get("level") == "error")
+    warns = sum(1 for r in recent if r.get("level") == "warn")
+    return {"warn": warns, "error": errs}
 
 
 def load_config_last_review() -> float:
@@ -564,7 +571,14 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "draft": None})
                     return
                 if isinstance(draft, str):
-                    draft = json.loads(draft)  # 允许前端直接传 JSON 文本
+                    try:
+                        draft = json.loads(draft)  # 允许前端直接传 JSON 文本
+                    except json.JSONDecodeError as exc:
+                        self._json({"error": f"草稿 JSON 解析失败：{exc}"}, 400)
+                        return
+                if not isinstance(draft, dict):
+                    self._json({"error": "草稿必须是 JSON 对象"}, 400)
+                    return
                 brain.save_dream_draft(draft)
                 self._json({"ok": True, "draft": brain.load_dream_draft()})
                 return

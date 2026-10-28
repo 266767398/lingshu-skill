@@ -974,8 +974,14 @@ function renderOverview(){
   const mdEl = $("mode-detail-text");
   if (mdEl) {
     const md = ov.mode_detail || {};
-    if (md.fixed) mdEl.innerHTML = `当前固定为 <b>${esc(modeLabel(ov.mode))}</b>（用户手动设定，不随话题变）。`;
-    else mdEl.innerHTML = `当前 <b>auto</b>：按本轮话题自动判定 → <b>${esc(modeLabel(md.mode || ov.mode))}</b>。下面输入一句话题，可预览会怎么切。`;
+    if (md.fixed) {
+      mdEl.innerHTML = `当前固定为 <b>${esc(modeLabel(ov.mode))}</b>（用户手动设定，不随话题变）。`;
+    } else if (!(md.confidence > 0)) {
+      // 没有本轮话题时只是默认拟人，不该说成"已判定为拟人"
+      mdEl.innerHTML = `当前 <b>auto</b>：等本轮话题再判定。下面输入一句话题，可预览会怎么切。`;
+    } else {
+      mdEl.innerHTML = `当前 <b>auto</b>：按本轮话题自动判定 → <b>${esc(modeLabel(md.mode || ov.mode))}</b>（置信度 ${Math.round((md.confidence || 0) * 100)}%）。下面输入一句话题，可预览会怎么切。`;
+    }
   }
   renderAlerts(ov);
   if ($("chk-alerts")) renderChkAlerts(ov.emotion_alerts || []);
@@ -1536,14 +1542,22 @@ function renderDream(ov){
         <ul class="list">${(c.texts || []).slice(0, 6).map(t => `<li>(${esc(KIND[t.kind] || t.kind)}) ${esc(t.text)}</li>`).join("")}</ul>
       </div>`).join("") : `<div class="empty">碎片太少，梦很安静。</div>`);
     $("apply-box").classList.remove("hidden");
-    // 优先回填上次在网页里保存的草稿（task_id 对得上才用，避免拿旧草稿套新任务）
-    const draft = ov.dream_draft;
-    if (draft && draft.task_id === pend.task_id) {
-      $("apply-json").value = JSON.stringify(draft, null, 2);
-      $("draft-state").textContent = "已载入上次保存的草稿";
+    // 任务变了就丢掉旧的编辑标记；任务没变且正在编辑，绝不覆盖用户的未保存修改
+    if (S.dreamTask !== pend.task_id) {
+      S.dreamTask = pend.task_id;
+      S.dreamDirty = false;
+    }
+    if (S.dreamDirty) {
+      $("draft-state").textContent = "有未保存修改（当前页内容保留，改完点保存草稿）";
     } else {
-      $("apply-json").value = JSON.stringify(dreamBlankTemplate(pend), null, 2);
-      $("draft-state").textContent = "草稿未保存";
+      const draft = ov.dream_draft;
+      if (draft && draft.task_id === pend.task_id) {
+        $("apply-json").value = JSON.stringify(draft, null, 2);
+        $("draft-state").textContent = "已载入上次保存的草稿";
+      } else {
+        $("apply-json").value = JSON.stringify(dreamBlankTemplate(pend), null, 2);
+        $("draft-state").textContent = "草稿未保存";
+      }
     }
   }
   $("reports").innerHTML = (ov.dreams || []).length
@@ -2227,6 +2241,7 @@ $("btn-draft-save").addEventListener("click", async () => {
   catch (e) { toast("JSON 格式不对：" + e.message, true); return; }
   try {
     await post("/api/dream/draft", {draft: parsed});
+    S.dreamDirty = false;
     $("draft-state").textContent = "草稿已保存";
     toast("草稿已保存，稍后回来能接着改");
   } catch (e) { toast(e.message, true); }
@@ -2237,7 +2252,15 @@ $("btn-draft-reset").addEventListener("click", () => {
   if (!pend) { toast("现在没有待整理的梦", true); return; }
   if (!confirm("用空模板覆盖当前编辑内容？未保存的修改会丢。")) return;
   $("apply-json").value = JSON.stringify(dreamBlankTemplate(pend), null, 2);
+  S.dreamDirty = true;
   $("draft-state").textContent = "草稿未保存";
+});
+
+// 编辑即标记"有未保存修改"，避免切换页面回来时被自动回填覆盖
+$("apply-json").addEventListener("input", () => {
+  S.dreamDirty = true;
+  const st = $("draft-state");
+  if (st) st.textContent = "有未保存修改（改完点保存草稿）";
 });
 
 // ---- 批量操作（记忆）
