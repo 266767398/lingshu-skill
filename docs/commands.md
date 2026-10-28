@@ -28,11 +28,12 @@
 | 人格编辑 | `persona set traits.幽默=70`（逐字段改，写进历史可回滚） |
 | 初识 | `persona interview [--name ... --traits ...\|--unsure]` → `persona self [--name ... --traits ... --likes ... --dislikes ... --habits ...]` |
 | 理智/好奇 | `mind [state\|weigh "事" --benefit 7 --cost 3\|tune --curiosity +5 --reason -3 --why "..."]` |
-| 会话模式 | `mode show\|work\|human\|auto`（工程会话自动隔离情绪） |
+| 会话模式 | `mode show\|work\|human\|auto\|explain [--query 词…]`（工程会话自动隔离情绪；explain 打印 auto 判定依据） |
 | 审核闸 / 自查 | `review [--json]` → `review confirm <id>` / `review discard <id>`（记忆 m_* 与知识 k_* 通用）；`audit [--json]` |
 | 心情（七情六欲） | `emotion [now\|arc\|list\|feel 情绪名 --intensity 0.7 --why "..."\|desire 欲望名 --amount 20]` |
 | 情绪事件/微调 | `emotion events`（带序号）→ `emotion adjust <序号> [--intensity 0.3] [--emotion-name 委屈] [--why "..."]` / `emotion del <序号>` / `emotion cool` |
 | 事件→情绪（认知评价） | `emotion evaluate "事件" [--polarity auto\|positive\|negative\|neutral] [--intensity 0.8]` |
+| 情绪-输出一致性 | `emotion check "回复文本"`（内部情绪 vs 回复语气是否背离，重度背离时告警） |
 | 共情 / 情感设置 | `emotion mirror "用户情绪" [--intensity 0.7]` / `emotion config [--empathy mirror\|mild\|off] [--gain 0.5] [--max-intensity 0.8] [--suppress "怒,恶"] [--notes "..."]` |
 | 记忆关联 | `assoc [link <idA> <idB> --relation 因果 --weight 1\|unlink <idA> <idB>\|of <id>\|auto [--dry-run]\|graph --limit 300]` |
 | 每日例行 | `daily [--dry-run] [--force]`（写日记 + 沉淀知识 + 过期的梦自动做掉） |
@@ -51,6 +52,7 @@
 | 成长 | `growth status` / `growth review --days 7` |
 | 进化日志 | `evolve log "标题" --kind persona\|skill\|knowledge\|thinking\|self` / `evolve list` |
 | 统计 | `stats` |
+| 运行日志 | `logs [--limit 20] [--level warn\|error] [--all]`（锁冲突/异常/解析报错，面板「日志」页同款） |
 | 列表 / 忘记 | `list` / `forget <id>` |
 | 配置 | `config show` / `config set <key> <value>` / `config unset <key>` |
 | 记忆冲突检查 | `detect-conflicts [--json] [--limit 50]` |
@@ -63,6 +65,15 @@ python scripts/brain.py serve
 ```
 
 浏览器打开 http://127.0.0.1:8765 ：记忆时间线与保留率、人格档案与好奇心/理智、**此刻理智状态（被情绪压住多少）**、知识库、笔记日志、技能自编辑、成长指标与复盘素材、**每日例行与自我总结**、进化轨迹、手动做梦与梦报告。仅监听本机。v2.3 起侧栏还显示**会话模式**（可点击切换）、**待审核项计数**、**人格漂移告警**；记忆列表里的待审核条目可直接 ✓/✗ 确认或废弃。
+
+新增（v2.11 后）：
+
+- **概览 · 会话模式判定卡**：当前模式 + 置信度 + 工程/情绪两侧命中分数与命中词；输入一句话点"试判"，看 auto 会怎么切、为什么切。
+- **记忆页 · 批量条**：勾选（含全选）后批量 confirm/discard 待审核、批量设重要性、批量加/减标签；每条卡片底部显示 `id xxx` 方便复制去做关联。
+- **梦页 · 草稿编辑**：pending 草稿自动落盘 `dreams/apply_draft.json`，文本框里直接改 JSON 再 apply；apply 成功自动清草稿，旧任务草稿不会串台。
+- **心情页 · 情绪-输出一致性核对**：输入一段回复点"核对"，判定语气与内部情绪状态是否严重背离，并列出最近告警。
+- **联想页 · 手动建立关联**：填 A/B 记忆 id + 关系名 + 为什么，一键连线，配合 3D 星图看网络。
+- **日志页**：按 warn/error/全部过滤查看运行日志（锁冲突/异常/解析报错），概览显示近期 warn/error 计数。
 
 新增两块：
 

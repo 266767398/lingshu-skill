@@ -2,6 +2,49 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.11 — 判定透明 + 面板批量操作：为什么切模式、批量审核、网页改梦草稿、运行日志都看得见
+
+六个"用起来差一口气"的地方，本版本补齐：
+
+**auto 话题判定升级为打分制 + 依据透出**
+
+- 不再"命中任一关键词就归 work"：`_WORK_SIGNALS`（编程/数据/工程三组 26 词）与 `_HUMAN_SIGNALS`（情绪/关系/寒暄三组 30 词）分组信号词，`analyze_topic()` 统计**命中数打分**，`work_score >= human_score` 工程优先（写代码时情绪隔离更安全）。
+- 面板概览新增「会话模式判定」卡：显示当前模式、置信度、工程/情绪两侧分数、命中词依据；可输入一句话**试判**，看 auto 会怎么切、为什么切。
+- CLI 新增 `mode explain [--query 词…]`：打印判定结果、置信度、工程信号命中、情绪信号命中、mixed 依据。
+
+**面板批量操作**
+
+- 记忆页新增批量条：复选框多选（含全选）后，一次**批量 confirm / discard 待审核条目**、**批量设重要性**、**批量加/减标签**。
+- 底层 `bulk_memory_action()` 单次写锁内完成全部更新（一次读-改-写整库），N 条不再逐条反复覆写文件。
+
+**dream 梦草稿网页编辑**
+
+- 梦页在 apply 区新增草稿态：pending 草稿会自动落盘为 `dreams/apply_draft.json`，面板可直接**网页编辑草稿 JSON** 再 apply，不再必须命令行改文件。
+- 草稿按 `task_id` 与当前 pending 匹配才回填，防旧草稿套新任务；apply 成功自动清草稿。
+- 新增 `save_dream_draft/load_dream_draft/clear_dream_draft`（面板 `/api/dream/draft`）。
+
+**情绪-输出一致性告警**
+
+- 新增后置轻量校验 `emotion_consistency_check()`：对回复文本做正/负词极性估计（感叹号放大），当内部情绪强度足够、回复语气与内部数值**严重背离**时给出告警。
+- 告警落盘 `emotion_checks.jsonl`（滚动保留 200 条）；面板心情页新增「情绪-输出一致性核对」卡（输入回复试查 + 最近告警列表）。
+- CLI 新增 `emotion check "回复文本"`：打印内部情绪、回复极性、是否告警、建议。
+
+**运行日志（面板可看）**
+
+- 新增轻量运行日志 `lingshu.log`（JSONL，>512KB 滚动保留后半）：锁冲突、内部异常、解析报错等打点（read_jsonl 坏块、write_jsonl 失败、`_locked` 超时、load_loose_json 失败、面板接口异常、CLI 崩溃兜底）。
+- 日志函数**绝不抛异常、不进写锁**——日志本身不当崩溃源。
+- 面板新增「日志」页：按级别（warn/error/全部）过滤、刷新查看；概览显示近期 warn/error 计数。
+- CLI 新增 `logs [--limit N] [--level warn|error] [--all]`。
+
+**记忆关联（assoc）补齐教程与手动建关联**
+
+- 面板联想页新增「手动建立关联」卡：输入 A/B 记忆 id、关系名、为什么，一键 link。
+- README 新增「记忆关联（联想图谱）」教程章节：从建记忆 → 手动 link → assoc auto 自动补边 → 面板 3D 图查看，带完整示例。
+
+**文档同步**
+
+- 版本号 2.10→2.11（SKILL / lite / tiny / README）；README 更新模式判定、面板、命令速查；docs/commands.md 同步新命令与新面板功能；本 CHANGELOG 新增本条。
+
 ## v2.10 — 冷热归档 + 万条性能：回忆不再随记忆增长变慢
 
 记忆上万条后，逐个 JSONL 全量 read + 正则分词的 recall/remember 会线性变慢；且冷数据只能靠手动 `forget` / `backup` 处理。本版本引入**冷热归档层** + **候选剪枝预筛**，让"记忆越多越卡"变成"记忆越多越有条理"。

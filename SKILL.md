@@ -1,7 +1,7 @@
 ---
 name: 灵枢
-version: 2.10
-description: 类脑持久记忆、人格与成长系统，名字取自《黄帝内经》：算力给思考，人格给灵魂，记忆给生命。当用户需要 AI 跨会话记住事情、拥有自己长出来的人格/性格/喜好、在上下文将满时自动整理记忆（像做梦一样巩固与遗忘），或提到"记忆""记住我""人格""设定""知识库""笔记""日志""成长""自我进化""工作记忆""上下文快满了""做梦整理""更新灵枢技能"时使用。内置：分层记忆（海马体/皮层/淡忘区/冷热归档）与艾宾浩斯遗忘曲线、模糊联想回忆（万条级子串预筛）、无种子的人格初识与演化历史、好奇心与理智双驱（数值由用户态度长成）、工作记忆暂存（默认不落盘）、学习闭环（先查知识库再联网）、技能搜索/调用/借鉴与自我进化日志、七情六欲与理智约束（认知评价/共情/情感设置）、记忆关联（联想图谱 3D 空间）、每日例行与自我总结。纯本地零依赖，Python 标准库即可运行。
+version: 2.11
+description: 类脑持久记忆、人格与成长系统，名字取自《黄帝内经》：算力给思考，人格给灵魂，记忆给生命。当用户需要 AI 跨会话记住事情、拥有自己长出来的人格/性格/喜好、在上下文将满时自动整理记忆（像做梦一样巩固与遗忘），或提到"记忆""记住我""人格""设定""知识库""笔记""日志""成长""自我进化""工作记忆""上下文快满了""做梦整理""更新灵枢技能"时使用。内置：分层记忆（海马体/皮层/淡忘区/冷热归档）与艾宾浩斯遗忘曲线、模糊联想回忆（万条级子串预筛）、显式记忆关联图谱（assoc 手动连线+3D 星图）、无种子的人格初识与演化历史、好奇心与理智双驱（数值由用户态度长成）、工作记忆暂存（默认不落盘）、打分制 auto 话题判定与判定依据透出、情绪-输出一致性核对、轻量运行日志（锁冲突/异常/解析报错可在面板查看）、学习闭环（先查知识库再联网）、技能搜索/调用/借鉴与自我进化日志、七情六欲与理智约束（认知评价/共情/情感设置）、每日例行与自我总结。纯本地零依赖，Python 标准库即可运行。
 ---
 
 # 灵枢 · 类脑记忆、人格与成长
@@ -121,10 +121,10 @@ lingshu.user.md 用户附加规则（更新技能永不覆盖，每会话自动�
 
 - **work 工程模式**：情绪状态与拟人语气**不进注入包**，明确"旧情绪与当前任务无关"，先给可执行方案，重视正确性与工程契约。
 - **human 拟人模式**：情绪照常注入，并把好奇心/理智/心情数值翻成**行为约束**（直接照做，不是裸数字）。
-- **auto 自动模式**（默认）：按本轮话题关键词自动判——代码/报错/接口/数据/项目 → work；日常聊天 → human。
+- **auto 自动模式**（默认）：**打分制话题判定**——工程信号（编程/数据/工程）与人性信号（情绪/关系/寒暄）分组计数打分，`work_score >= human_score` 工程优先，两侧都命中标 mixed；判定依据面板概览卡或 `mode explain --query 词…` 随时可见。
 
 ```bash
-python scripts/brain.py mode show|work|human|auto
+python scripts/brain.py mode show|work|human|auto|explain --query "帮我修下这个报错"
 ```
 
 写代码前想亲手清掉余波：`emotion cool`（24h 内强情绪整体降温）或 `emotion adjust <序号>` 微调单条。
@@ -214,10 +214,12 @@ python scripts/brain.py check-context --used 68      # 60 清点 / 75 做梦 / 9
 python scripts/brain.py capture "原文" --tag 逃生
 python scripts/brain.py dream --auto                 # 做梦整理
 python scripts/brain.py daily                        # 每日例行
-python scripts/brain.py mode show|work|human|auto    # 会话模式
+python scripts/brain.py mode show|work|human|auto|explain  # 会话模式（explain 看 auto 判定依据）
 python scripts/brain.py review | audit               # 审核闸 / 自查
 python scripts/brain.py persona show|history|snapshot|drift
 python scripts/brain.py emotion now|feel|events|adjust|cool
+python scripts/brain.py emotion check "回复文本"      # 情绪-输出一致性核对（语气与内部情绪严重背离时告警）
+python scripts/brain.py logs [--level warn|error]     # 运行日志（锁冲突/异常/解析报错）
 python scripts/brain.py user-rules add "<长期规则>"   # 更新永不覆盖
 python scripts/brain.py ext new|list|edit|run|rm      # 扩展模块（可执行钩子）
 python scripts/brain.py knowledge add|search|review

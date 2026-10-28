@@ -29,6 +29,7 @@ _WRITE_ENDPOINTS = {
     "/api/memory", "/api/memory/review", "/api/knowledge", "/api/knowledge/review",
     "/api/note", "/api/skill", "/api/skill/install", "/api/skill/uninstall",
     "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/apply",
+    "/api/dream/draft", "/api/memory/bulk",
     "/api/emotion", "/api/mode", "/api/work", "/api/assoc", "/api/link",
     "/api/forget", "/api/daily", "/api/user-rules", "/api/sync", "/api/config",
 }
@@ -93,6 +94,11 @@ def overview() -> dict:
         "mode": str(brain.load_config().get("mode", "auto") or "auto").lower(),
         "review_counts": brain.review_counts(),
         "persona_drift": brain.persona_drift(7),
+        "emotion_alerts": brain.emotion_checks_recent(10),
+        "dream_draft": brain.load_dream_draft(),
+        "mode_detail": brain.resolve_mode_detail(""),
+        "log_summary": {"warn": len(brain.read_logs(100, level="warn")),
+                        "error": len(brain.read_logs(100, level="error"))},
         "home": str(brain.HOME),
     }
 
@@ -264,6 +270,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             import traceback
             traceback.print_exc()
+            brain.log_event("panel", "GET 接口内部错误", level="error",
+                            trace=traceback.format_exc()[-400:])
             self._json({"error": "面板内部错误，详情见运行日志"}, 500)
 
     def _route_get(self):
@@ -331,6 +339,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/assoc":
             mid = (parse_qs(url.query).get("id") or [""])[0]
             self._json({"id": mid, "neighbors": brain.assoc_of(mid)})
+            return
+        if path == "/api/mode/explain":
+            q = (parse_qs(url.query).get("q") or [""])[0]
+            self._json(brain.resolve_mode_detail(q))
+            return
+        if path == "/api/logs":
+            limit = _int_param(url, "limit", 200, 1, 2000)
+            level = (parse_qs(url.query).get("level") or [""])[0] or None
+            if level == "all":
+                level = None
+            self._json({"logs": brain.read_logs(limit, level=level)})
             return
         self._json({"error": "not found"}, 404)
 
@@ -428,6 +447,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/emotion":
                 act = data.get("action", "now")
+                if act == "check":
+                    r = brain.emotion_consistency_check(data.get("text", ""))
+                    self._json({"ok": True, "result": r,
+                                "alerts": brain.emotion_checks_recent(10)})
+                    return
                 if act == "feel":
                     brain.feel(data.get("emotion", ""), data.get("intensity", 0.6),
                                why=data.get("why", ""), about=data.get("about", ""),
@@ -531,6 +555,18 @@ class Handler(BaseHTTPRequestHandler):
                     result = json.loads(result)
                 applied = brain.apply_dream(result)
                 self._json({"ok": True, "applied": applied, "overview": overview()})
+                return
+
+            if path == "/api/dream/draft":
+                draft = data.get("draft")
+                if draft is None:
+                    brain.clear_dream_draft()  # 传 null = 清空草稿
+                    self._json({"ok": True, "draft": None})
+                    return
+                if isinstance(draft, str):
+                    draft = json.loads(draft)  # 允许前端直接传 JSON 文本
+                brain.save_dream_draft(draft)
+                self._json({"ok": True, "draft": brain.load_dream_draft()})
                 return
 
             if path == "/api/memory":
@@ -698,6 +734,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "memory": r, "review_counts": brain.review_counts()})
                 return
 
+            if path == "/api/memory/bulk":
+                try:
+                    r = brain.bulk_memory_action(data.get("ids") or [],
+                                                 data.get("action", ""), data.get("value"))
+                except (ValueError, PermissionError) as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
+                self._json({"ok": True, "result": r, "review_counts": r.get("review_counts")})
+                return
+
             if path == "/api/mode":
                 mode = str(data.get("mode", "") or "").lower()
                 if mode not in ("work", "human", "auto"):
@@ -714,6 +760,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # 其它异常：日志里留全栈，响应只给通用文案，避免回显本机路径
             import traceback
             traceback.print_exc()
+            brain.log_event("panel", "POST 接口内部错误", level="error",
+                            trace=traceback.format_exc()[-400:])
             self._json({"error": "面板内部错误，详情见运行日志"}, 500)
 
 

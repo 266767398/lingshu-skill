@@ -58,6 +58,9 @@ ARCHIVE_MAX_IMPORTANCE = 0.5    # 重要度高于此不自动归档（怕误伤�
 ARCHIVE_RETENTION = 0.20        # 保留度低于此才考虑（长期没访问自然衰减到很低）
 ARCHIVE_IDLE_DAYS = 180         # 被想起过的记忆，还需静置超过半年
 
+# 运行日志：锁冲突 / 内部异常 / 解析报错留痕，面板「日志」页可看
+LOG_FILE = HOME / "lingshu.log"
+
 # 工作记忆：当前上下文本身就是工作记忆，默认不落盘。
 # 只有 AI 自己决定留一手时才写 working.jsonl（会话级暂存，容量 7±2，过期即弃）。
 WORKING_FILE = HOME / "working.jsonl"
@@ -128,6 +131,60 @@ def load_config() -> dict:
     return cfg
 
 
+def log_event(kind: str, message: str, level: str = "info", **extra) -> None:
+    """轻量运行日志（lingshu.log）：锁冲突、内部异常、解析报错等留痕，面板「日志」页可看。
+
+    约束：日志本身绝不当崩溃源——写失败静默跳过，不进写锁、不抛异常。
+    """
+    if READONLY:
+        return
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        row = {"ts": now_ts(), "kind": kind, "level": level, "msg": str(message)[:500]}
+        if extra:
+            for k, v in list(extra.items())[:4]:
+                if not isinstance(v, (str, int, float, bool, type(None))):
+                    try:
+                        v = json.dumps(v, ensure_ascii=False)[:200]
+                    except Exception:
+                        v = str(v)[:200]
+                row[k] = v
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # 超过 512KB 滚动：保留后半（最新），避免单文件无限膨胀
+        try:
+            if LOG_FILE.stat().st_size > 512 * 1024:
+                data = (LOG_FILE.read_text(encoding="utf-8-sig") or "").splitlines()
+                keep = data[-(len(data) // 2):]
+                LOG_FILE.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
+def read_logs(limit: int = 200, level: str | None = None, kind: str | None = None) -> list:
+    """读最近 N 条运行日志（最新在前）。level/kind 任一匹配即保留。"""
+    if not LOG_FILE.exists():
+        return []
+    try:
+        lines = [x for x in LOG_FILE.read_text(encoding="utf-8-sig").splitlines() if x.strip()]
+    except OSError:
+        return []
+    rows = []
+    for ln in lines[-limit * 2:]:
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if level and r.get("level") not in (level, "error"):
+            continue
+        if kind and r.get("kind") != kind:
+            continue
+        rows.append(r)
+    return rows[::-1][:limit]
+
+
 def _slurp_json(path, default=None):
     """读本地 JSON：兼容 BOM（记事本存的档带 BOM，裸 utf-8 会解析失败）；坏了返回 default，
     绝不当作"档案丢了"去覆盖写盘。"""
@@ -176,6 +233,7 @@ def load_loose_json(path, label: str = "JSON") -> dict | list:
                 except Exception:
                     break
     snippet = raw[:120].replace("\n", " ")
+    log_event("parse", f"{label}解析失败：{p.name} 不是合法 JSON", level="warn", path=p.name)
     raise ValueError(f"{label}解析失败：{p} 不是合法 JSON（开头：{snippet}…）。"
                      "模型输出里多半混了说明文字或代码块——请只保留 JSON 主体再试。")
 
@@ -240,18 +298,76 @@ def model_tier() -> str:
 
 # ---------------------------------------------------------------- 会话模式
 
-def _looks_like_work(query: str) -> bool:
-    """工程/工作场景粗判：写代码、排错、部署、数据分析这类任务。
+# 工程场景信号词（分组，便于在面板/CLI 里解释"为什么判定成工程模式"）
+_WORK_SIGNALS = {
+    "编程": ("代码", "报错", "bug", "调试", "编译", "函数", "变量", "接口", "重构", "单元测试",
+             "python", "javascript", "typescript", "java", "sql", "shell", "docker", "git",
+             "脚本", "算法", "爬虫", "部署", "上线", "排错", "依赖", "仓库"),
+    "数据": ("数据", "表格", "excel", "csv", "数据库", "统计", "报表", "查询语句"),
+    "工程": ("项目", "工程", "服务器", "接口文档", "运维", "自动化", "配置文件", "性能优化"),
+}
+# 拟人 / 情绪场景信号词
+_HUMAN_SIGNALS = {
+    "情绪": ("难过", "开心", "生气", "委屈", "焦虑", "好烦", "累", "崩溃", "压力", "害怕",
+             "失望", "孤独", "想你", "谢谢", "对不起", "抱歉", "安慰", "emo"),
+    "关系": ("喜欢", "讨厌", "爱你", "朋友", "家人", "恋人", "分手", "在一起", "陪伴"),
+    "寒暄": ("哈哈", "晚安", "早安", "好久不见", "在吗", "聊聊", "陪我", "聊天", "心情"),
+}
 
-    只是启发式；命中与否在注入包里明说，模型可结合上下文自行判断。
+
+def analyze_topic(query: str = "") -> dict:
+    """auto 模式的话题判定：打分制 + 命中依据（解释"为什么切到 work/human"）。
+
+    比单纯"命中任一关键词就 work"稳：混合话题（一边聊天一边写代码）也能给出
+    工程/情绪两边的命中数与置信度，面板和 CLI 可把判定依据摊开给人看。
     """
-    if not query:
-        return False
-    wk = ("代码", "报错", "bug", "调试", "部署", "编译", "运行", "接口", "函数", "变量",
-          "python", "javascript", "typescript", "sql", "shell", "docker", "git",
-          "服务器", "项目", "工程", "脚本", "单元测试", "重构", "数据库", "接口文档",
-          "excel", "表格", "数据", "算法", "爬虫", "自动化", "上线", "排错", "bug", "报错")
-    return any(w in query.lower() for w in wk)
+    q = (query or "").strip().lower()
+    if not q:
+        return {"mode": "human", "confidence": 0.0, "work_score": 0.0, "human_score": 0.0,
+                "work_hits": [], "human_hits": [], "mixed": False,
+                "reason": "没有话题内容，默认拟人模式"}
+    work_hits, human_hits = [], []
+    for _cat, words in _WORK_SIGNALS.items():
+        for w in words:
+            if w in q:
+                work_hits.append(w)
+    for _cat, words in _HUMAN_SIGNALS.items():
+        for w in words:
+            if w in q:
+                human_hits.append(w)
+    work_hits = list(dict.fromkeys(work_hits))
+    human_hits = list(dict.fromkeys(human_hits))
+    work_score, human_score = float(len(work_hits)), float(len(human_hits))
+    mixed = bool(work_hits) and bool(human_hits)
+    total = work_score + human_score
+    if total == 0:
+        return {"mode": "human", "confidence": 0.0, "work_score": 0.0, "human_score": 0.0,
+                "work_hits": [], "human_hits": [], "mixed": False,
+                "reason": "没命中工程或情绪信号，按日常对话处理（human）"}
+    # 工程优先：写代码时情绪隔离更安全；混合话题（势均力敌）也归 work，但标注 mixed
+    if work_score >= human_score:
+        mode = "work"
+        confidence = work_score / total
+    else:
+        mode = "human"
+        confidence = human_score / total
+    if mixed:
+        reason = (f"混合话题：工程信号 {len(work_hits)} 个（{'、'.join(work_hits[:5])}）"
+                  f" vs 情绪信号 {len(human_hits)} 个（{'、'.join(human_hits[:5])}），"
+                  f"按工程优先 → {mode}")
+    elif mode == "work":
+        reason = f"命中工程信号：{'、'.join(work_hits[:6])}"
+    else:
+        reason = f"命中情绪/关系信号：{'、'.join(human_hits[:6])}"
+    return {"mode": mode, "confidence": round(confidence, 2),
+            "work_score": work_score, "human_score": human_score,
+            "work_hits": work_hits, "human_hits": human_hits,
+            "mixed": mixed, "reason": reason}
+
+
+def _looks_like_work(query: str) -> bool:
+    """工程/工作场景粗判（保留兼容；内部走打分判定）。"""
+    return analyze_topic(query)["mode"] == "work"
 
 
 def resolve_mode(query: str = "") -> str:
@@ -262,7 +378,19 @@ def resolve_mode(query: str = "") -> str:
     m = str(load_config().get("mode", "auto") or "auto").lower()
     if m in ("work", "human"):
         return m
-    return "work" if _looks_like_work(query) else "human"
+    return analyze_topic(query)["mode"]
+
+
+def resolve_mode_detail(query: str = "") -> dict:
+    """带判定依据的模式结果（面板 / CLI 用）：fixed=用户固定，否则 auto 打分。"""
+    m = str(load_config().get("mode", "auto") or "auto").lower()
+    if m in ("work", "human"):
+        return {"mode": m, "fixed": True, "confidence": 1.0,
+                "work_score": 0.0, "human_score": 0.0, "work_hits": [], "human_hits": [],
+                "mixed": False, "reason": f"用户固定为 {m} 模式"}
+    d = analyze_topic(query)
+    d["fixed"] = False
+    return d
 
 
 def _behavior_map() -> list:
@@ -431,6 +559,55 @@ def review_counts() -> dict:
             "persona": len(rep["persona"])}
 
 
+def bulk_memory_action(ids: list, action: str, value=None) -> dict:
+    """面板批量操作：一次写锁内完成，避免 N 条逐条读-改-写整库。
+
+    action:
+      confirm / discard      —— 审核转正 / 废弃（移入淡忘区）
+      importance             —— 批量设置重要性（value: 0-1 或 0-10）
+      add_tags / remove_tags —— 批量加 / 删标签（value: list[str]）
+    """
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法批量修改。")
+    ids = [str(x) for x in (ids or []) if str(x).strip()]
+    if not ids:
+        raise ValueError("没有选中任何记忆")
+    if action not in ("confirm", "discard", "importance", "add_tags", "remove_tags"):
+        raise ValueError("不支持的批量操作")
+    want = set(ids)
+    updated = 0
+    with _locked(HOME / "hippocampus.jsonl"):
+        records = load_all()
+        for m in records:
+            if m.get("id") not in want:
+                continue
+            if action == "confirm":
+                m["review"] = "confirmed"
+                m["review_at"] = now_ts()
+            elif action == "discard":
+                m["layer"] = "dust"
+                m["forgotten_at"] = now_ts()
+                m["review"] = "discarded"
+            elif action == "importance":
+                imp = float(value)
+                m["importance"] = round(max(0.0, min(1.0, imp / 10 if imp > 1 else imp)), 3)
+            elif action == "add_tags":
+                add = [str(t).strip() for t in (value or []) if str(t).strip()]
+                cur = [str(t) for t in (m.get("tags") or [])]
+                for t in add:
+                    if t not in cur:
+                        cur.append(t)
+                m["tags"] = cur
+            elif action == "remove_tags":
+                drop = {str(t).strip() for t in (value or [])}
+                m["tags"] = [str(t) for t in (m.get("tags") or []) if str(t) not in drop]
+            updated += 1
+        if updated:
+            save_all(records)
+    return {"updated": updated, "requested": len(ids), "action": action,
+            "review_counts": review_counts()}
+
+
 def audit() -> dict:
     """一次自查：待审核项 + 冲突记忆 + 该做什么。"""
     rep = review_report()
@@ -533,6 +710,8 @@ def read_jsonl(path: Path) -> list:
     if bad_blocks:
         # 有损坏块：好记录写回，坏块原样（可含多行）挪到 .corrupt 备份，
         # 绝不静默当作没发生、也不让后续保存把它们永久抹掉。
+        log_event("parse", f"{path.name} 有 {len(bad_blocks)} 个坏块，已挪到 .corrupt 备份",
+                  level="warn", path=path.name)
         try:
             corrupt = path.with_name(path.name + ".corrupt")
             with open(corrupt, "a", encoding="utf-8") as cf:
@@ -562,6 +741,8 @@ def write_jsonl(path: Path, rows: list) -> None:
             return
         except PermissionError:
             if attempt == 5:
+                log_event("io", f"写 {path.name} 失败：文件被占用，重试 6 次仍无果",
+                          level="error", path=path.name)
                 try:
                     os.unlink(tmp)
                 except OSError:
@@ -597,6 +778,7 @@ def _locked(path: Path):
             except OSError:
                 pass
             if time.time() > deadline:
+                log_event("lock", f"等不到写锁：{path.name}（10s 超时）", level="error", path=path.name)
                 raise TimeoutError(f"等不到写锁：{path}")
             time.sleep(0.05)
     try:
@@ -1692,6 +1874,72 @@ def mood_tone_hint() -> str:
         tail = f"（{d['desire']}只有 {d['level']:.0f}：{d['hint']}）"
         hint = (hint + "；" if hint else "") + "心里有件小事没被满足" + tail
     return hint
+
+
+# 情绪-输出一致性：回复语气的启发式极性词表（只做背离告警，不追求精确）
+_REPLY_POS_WORDS = ("太好了", "真好", "好棒", "太棒", "开心", "高兴", "喜欢", "哈哈", "嘿嘿",
+                    "没问题", "当然可以", "乐意", "恭喜", "爱你", "抱抱", "不错", "好呀")
+_REPLY_NEG_WORDS = ("烦死", "气死", "难受", "难过", "失望", "糟糕", "崩溃", "无语", "算了",
+                    "不想", "讨厌", "够了", "委屈", "痛苦", "郁闷", "唉", "懒得")
+
+
+def _reply_valence(text: str) -> float:
+    """粗估一段回复的情绪极性 -1~1。纯启发式，只用于背离告警。"""
+    t = (text or "").lower()
+    if not t:
+        return 0.0
+    pos = sum(t.count(w) for w in _REPLY_POS_WORDS)
+    neg = sum(t.count(w) for w in _REPLY_NEG_WORDS)
+    if pos == 0 and neg == 0:
+        return 0.0
+    raw = (pos - neg) / max(1, pos + neg)
+    excite = t.count("!") + t.count("！")
+    return max(-1.0, min(1.0, raw * (1 + 0.15 * min(3, excite))))
+
+
+def _log_emotion_check(row: dict) -> None:
+    if READONLY:
+        return
+    try:
+        ensure_home()
+        p = HOME / "emotion_checks.jsonl"
+        rows = read_jsonl(p)[-199:]
+        rows.append(row)
+        write_jsonl(p, rows)
+    except Exception:
+        pass
+
+
+def emotion_consistency_check(reply_text: str, record: bool = True) -> dict:
+    """后置轻量校验：内部情绪状态 vs 回复语气是否严重背离。
+
+    只做提醒，不改任何记忆。背离时 alert=True，面板「心情」页亮告警。
+    典型背离：心里正难过/生气却满屏"哈哈太好了"；或正开心却冷淡敷衍。
+    """
+    m = mood_now()
+    rv = _reply_valence(reply_text)
+    mv = float(m.get("valence", 0))
+    mi = float(m.get("intensity", 0))
+    alert, reason = False, ""
+    # 内部情绪够强 + 回复极性够明确 + 符号相反 + 落差够大，才告警（避免误报）
+    if mi >= 0.25 and abs(mv) >= 0.35 and abs(rv) >= 0.3 and (mv * rv) < 0:
+        if abs(mv - rv) >= 0.7:
+            alert = True
+            direction = "负面" if mv < 0 else "正面"
+            reply_dir = "热情/正面" if rv > 0 else "冷淡/负面"
+            reason = (f"内部情绪{direction}（{m.get('label', '')}，valence {mv:+.2f}，强度 {mi:.0%}）"
+                      f"，但回复语气偏{reply_dir}（极性 {rv:+.2f}），两者背离较大")
+    result = {"alert": alert, "reason": reason, "mood_label": m.get("label", ""),
+              "mood_valence": round(mv, 3), "mood_intensity": round(mi, 3),
+              "reply_valence": round(rv, 3), "ts": now_ts()}
+    if alert and record:
+        _log_emotion_check(result)
+    return result
+
+
+def emotion_checks_recent(limit: int = 20) -> list:
+    """最近的情绪-输出一致性告警（最新在前）。"""
+    return read_jsonl(HOME / "emotion_checks.jsonl")[::-1][:limit]
 
 
 def emotion_arc(days: int = 7) -> dict:
@@ -3021,6 +3269,38 @@ def write_dream_report(report: dict) -> Path:
     return path
 
 
+def load_dream_pending() -> dict | None:
+    """当前待整理的梦任务（pending.json）；不存在/损坏返回 None。"""
+    return _slurp_json(HOME / "dreams" / "pending.json", None)
+
+
+def dream_draft_path() -> Path:
+    return HOME / "dreams" / "apply_draft.json"
+
+
+def load_dream_draft() -> dict | None:
+    """上次在面板里编辑、还没应用的 apply.json 草稿。"""
+    return _slurp_json(dream_draft_path(), None)
+
+
+def save_dream_draft(obj) -> dict:
+    """把 apply.json 草稿存盘（面板网页编辑→保存，避免模型合并出错时只能命令行改文件）。"""
+    if READONLY:
+        raise PermissionError("记忆库当前只读，无法保存草稿。")
+    ensure_home()
+    if not isinstance(obj, dict):
+        raise ValueError("草稿必须是 JSON 对象")
+    atomic_json(dream_draft_path(), obj)
+    return {"ok": True, "path": str(dream_draft_path())}
+
+
+def clear_dream_draft() -> None:
+    try:
+        dream_draft_path().unlink()
+    except (FileNotFoundError, OSError):
+        pass
+
+
 def load_dream_state() -> dict:
     path = HOME / "dream_state.json"
     if path.exists():
@@ -3112,6 +3392,7 @@ def apply_dream(result: dict) -> dict:
         path.write_text("\n".join(body) + "\n", encoding="utf-8")
     if pending_path.exists():
         pending_path.unlink()
+    clear_dream_draft()  # 应用成功后，网页里编辑过的那份草稿也一并清掉
     return applied
 
 
@@ -4131,7 +4412,7 @@ def _main(argv=None) -> int:
     p_emo = sub.add_parser("emotion", help="情绪系统：认知评价/共情/记感受/看心情/看轨迹/改情感设置")
     p_emo.add_argument("action", nargs="?", default="now",
                        choices=["feel", "evaluate", "mirror", "config", "now", "arc", "list",
-                                "desire", "events", "adjust", "del", "cool"])
+                                "desire", "events", "adjust", "del", "cool", "check"])
     p_emo.add_argument("emotion", nargs="?", default="",
                        help="feel：情绪名；evaluate/mirror：事件或描述；desire：欲望名；adjust/del：序号")
     p_emo.add_argument("--intensity", type=float, default=None, help="这件事当时有多重 0-1")
@@ -4165,6 +4446,11 @@ def _main(argv=None) -> int:
     p_stats = sub.add_parser("stats", help="记忆统计")
     p_stats.add_argument("--json", action="store_true")
 
+    p_logs = sub.add_parser("logs", help="运行日志：锁冲突 / 内部异常 / 解析报错（面板「日志」页同源）")
+    p_logs.add_argument("--limit", type=int, default=30)
+    p_logs.add_argument("--level", default="warn", choices=["info", "warn", "error"])
+    p_logs.add_argument("--all", action="store_true", help="不过滤级别，全部显示")
+
     p_cfg = sub.add_parser("config", help="查看 / 修改配置")
     p_cfg.add_argument("action", nargs="?", default="show",
                        choices=["show", "set", "unset"])
@@ -4177,7 +4463,8 @@ def _main(argv=None) -> int:
 
     p_mode = sub.add_parser("mode", help="会话模式：work 工程（情绪隔离）/ human 拟人 / auto 按场景自动切")
     p_mode.add_argument("action", nargs="?", default="show",
-                        choices=["show", "work", "human", "auto"])
+                        choices=["show", "work", "human", "auto", "explain"])
+    p_mode.add_argument("query", nargs="*", default=[], help="explain：一段话题话，看 auto 会怎么判定")
 
     p_rev = sub.add_parser("review", help="审核 AI 整理出来的记忆 / 知识 / 人格变更（防幻觉沉淀成事实）")
     p_rev.add_argument("action", nargs="?", default="list",
@@ -4800,6 +5087,20 @@ def _main(argv=None) -> int:
             print(f"已冷却 {r['cooled']} 条情绪余波。此刻心情：{r['mood']}（强度 {r['intensity']:.0%}）。")
             print("刚聊完情绪化话题要写代码 / 做正事前，先来这一步，旧情绪就不再干扰工作会话。")
             return 0
+        if args.action == "check":
+            if not args.emotion:
+                print("用法：emotion check \"<你刚发的回复>\" —— 把内部情绪状态和回复语气做一致性核对",
+                      file=sys.stderr)
+                return 2
+            r = emotion_consistency_check(args.emotion)
+            print(f"此刻内部情绪：{r['mood_label']}（valence {r['mood_valence']:+.2f}，强度 {r['mood_intensity']:.0%}）")
+            print(f"回复语气极性：{r['reply_valence']:+.2f}")
+            if r["alert"]:
+                print(f"[一致性告警] {r['reason']}")
+                print("建议：要么先处理内部情绪（emotion cool / feel 说清楚），要么把回复语气拉回与情绪一致，别让字面与状态拧着。")
+            else:
+                print("未见明显背离：内部情绪与回复语气基本一致。")
+            return 0
         m = mood_now()
         grp = f" · 七情[{m['category']}]" if m.get("groups") else ""
         print(f"此刻心情：{m['label']}（valence {m['valence']:+.2f}，arousal {m['arousal']:.2f}，"
@@ -4957,6 +5258,18 @@ def _main(argv=None) -> int:
         print("  work clear       丢掉")
         return 0
 
+    if args.cmd == "logs":
+        lvl = None if args.all else args.level
+        rows = read_logs(args.limit, level=lvl)
+        if not rows:
+            print("还没有运行日志。有锁冲突 / 内部异常 / 解析报错时，这里会显示原因。")
+            return 0
+        print(f"运行日志（最新 {len(rows)} 条，{'全部级别' if args.all else '≥' + args.level}）：")
+        for r in rows:
+            t = fmt_time(r.get("ts", 0)) if r.get("ts") else "??"
+            print(f"  {t} [{r.get('level', 'info')}] {r.get('kind', '?')} · {r.get('msg', '')}")
+        return 0
+
     if args.cmd == "stats":
         s = stats()
         if args.json:
@@ -4994,6 +5307,18 @@ def _main(argv=None) -> int:
         labels = {"work": "工程模式（情绪隔离、理性优先）",
                   "human": "拟人模式（情绪照常流露）",
                   "auto": "自动（按本轮话题判断，工程话题自动隔离情绪）"}
+        if args.action == "explain":
+            q = " ".join(args.query).strip()
+            d = resolve_mode_detail(q)
+            print(f"话题：{q or '（空）'}")
+            print(f"判定结果：{d['mode']}（{'用户固定' if d['fixed'] else 'auto 自动判定'}）"
+                  f" · 置信度 {d['confidence']:.0%}")
+            if d["work_hits"]:
+                print(f"  工程信号 {d['work_score']:.0f} 个：{'、'.join(d['work_hits'][:8])}")
+            if d["human_hits"]:
+                print(f"  情绪信号 {d['human_score']:.0f} 个：{'、'.join(d['human_hits'][:8])}")
+            print(f"  依据：{d['reason']}")
+            return 0
         if args.action in ("work", "human", "auto"):
             config_set("mode", args.action)
             print(f"会话模式 → {args.action}：{labels[args.action]}")
@@ -5201,11 +5526,20 @@ def main(argv=None) -> int:
     try:
         return _main(argv)
     except (ValueError, KeyError, FileExistsError, PermissionError) as exc:
+        log_event("run", f"CLI 出错：{exc}", level="error")
         print(f"[错误] {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         print("\n已停止")
         return 130
+    except Exception as exc:  # 兜底：不甩裸堆栈，但完整写进运行日志供排查
+        import traceback
+        log_event("run", f"未捕获异常：{type(exc).__name__}: {exc}", level="error",
+                  trace=traceback.format_exc()[-400:])
+        print(f"[错误] {type(exc).__name__}: {exc}"
+              "（详情已写入运行日志，可用 `python scripts/brain.py logs --all` 查看）",
+              file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

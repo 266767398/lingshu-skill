@@ -222,6 +222,7 @@
       <button data-tab="graph"><span class="ic">⌬</span><span>联想</span></button>
       <button data-tab="growth"><span class="ic">↗</span><span>成长</span></button>
       <button data-tab="dream"><span class="ic">✦</span><span>梦</span></button>
+      <button data-tab="logs"><span class="ic">☰</span><span>日志</span></button>
     </nav>
     <div class="sidefoot" id="sidefoot"></div>
   </aside>
@@ -275,6 +276,22 @@
         <div class="traits" id="p-traits"></div>
       </div>
 
+      <div class="card" style="margin-bottom:14px">
+        <div class="row" style="flex-wrap:wrap">
+          <div>
+            <h2 style="margin-bottom:4px">会话模式判定</h2>
+            <div class="sub" id="mode-detail-text">auto 模式按本轮话题自动切换，下面会显示判定依据。</div>
+          </div>
+          <div class="row" style="margin-left:auto;flex-wrap:wrap">
+            <input id="mode-try-q" placeholder="输入一句话题试试，如：帮我修下这个报错" style="min-width:280px;flex:1">
+            <button class="ghost" id="btn-mode-try">试试判定</button>
+          </div>
+        </div>
+        <div id="mode-try-out" class="sub" style="margin-top:10px"></div>
+      </div>
+
+      <div id="alert-box"></div>
+
       <div class="split">
         <div class="card">
           <h2>最近写下的事</h2>
@@ -325,6 +342,19 @@
         <button class="ghost" id="btn-inject">注入预览</button>
         <button class="ghost" id="btn-conflicts">冲突检查</button>
         <button class="btn" id="btn-add">＋ 写一条</button>
+      </div>
+      <div id="bulk-bar" class="card" style="margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 16px">
+        <label class="sub" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="bulk-all"> 全选
+        </label>
+        <span class="sub" id="bulk-count" style="min-width:70px">已选 0 条</span>
+        <button class="ghost" id="bulk-confirm">✓ 批量确认</button>
+        <button class="ghost" id="bulk-discard">✗ 批量废弃</button>
+        <input id="bulk-imp" type="number" min="1" max="10" placeholder="重要性 1-10" style="width:118px">
+        <button class="ghost" id="bulk-imp-btn">批量设重要性</button>
+        <input id="bulk-tag" placeholder="标签，逗号分隔" style="width:150px">
+        <button class="ghost" id="bulk-tag-add">批量加标签</button>
+        <button class="ghost" id="bulk-tag-rm">批量删标签</button>
       </div>
       <div class="card hidden" id="conflict-box" style="margin-bottom:14px;border-color:rgba(201,107,95,.4)">
         <h2>可能冲突的记忆</h2>
@@ -489,6 +519,18 @@
         <div id="eva-out" style="margin-top:12px"></div>
       </div>
 
+      <div class="card" style="margin-bottom:14px">
+        <h2>情绪-输出一致性核对</h2>
+        <div class="sub">后置轻量校验：把内部情绪状态和回复语气放一起比——心里正难过却满屏"哈哈太好了"，或正开心却冷冰冰敷衍，都会在这里亮告警。只提醒，不改任何记忆。</div>
+        <div class="row" style="margin-top:10px;flex-wrap:wrap">
+          <textarea id="chk-reply" placeholder="把要发给用户（或刚发出去）的那段话粘进来" rows="2" spellcheck="false" style="flex:1;min-width:240px"></textarea>
+          <button class="btn" id="btn-chk">核对</button>
+        </div>
+        <div id="chk-out" style="margin-top:12px"></div>
+        <h2 style="margin-top:18px">最近的一致性告警</h2>
+        <div id="chk-alerts" class="sub" style="margin-top:8px">暂无告警。</div>
+      </div>
+
       <div class="split">
         <div class="card">
           <h2>共情 · 跟着你的情绪走</h2>
@@ -553,6 +595,17 @@
       <div class="card" style="margin-top:14px">
         <div class="row"><h2 style="margin:0">关联明细</h2><span class="sub" id="graph-stat" style="margin-left:auto"></span></div>
         <div id="graph-neighbors" class="sub" style="margin-top:10px">点一个节点，看它连着什么。</div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h2>手动建立关联</h2>
+        <div class="sub" style="margin-bottom:10px">在记忆列表里找两条相关的（展示里点「✎」旁的 id，或记忆卡片右下角看 id），把它们连起来——点「自动联想」也能按共享实体/标签批量补边。</div>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <input id="link-a" placeholder="来源记忆 id，如 m_..." style="flex:1;min-width:150px">
+          <input id="link-b" placeholder="目标记忆 id" style="flex:1;min-width:150px">
+          <input id="link-rel" placeholder="关系（相关/因果/情绪…）" value="相关" style="width:120px">
+          <button class="btn" id="btn-link">连接</button>
+        </div>
+        <div id="link-info" class="sub" style="margin-top:8px">关联不需要太精确——能看出「为什么它们会一起被想起」就行。连多了，整片星图会自然长出记忆网络。</div>
       </div>
     </section>
 
@@ -645,11 +698,13 @@
         <div id="pending-box"><div class="empty">现在没有悬而未决的梦。点上方按钮触发一次。</div></div>
         <div id="apply-box" class="hidden" style="margin-top:16px">
           <div class="field">
-            <label>把碎片压缩成长期记忆，写成 apply.json（可以改下面的模板）</label>
+            <label>把碎片压缩成长期记忆，写成 apply.json（可以改下面的模板，也能在网页里直接保存草稿再应用）</label>
             <textarea id="apply-json" rows="14" spellcheck="false"></textarea>
           </div>
-          <div class="row">
-            <span class="sub">应用到皮层后，碎片会建立链接并标记为已巩固。</span>
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            <span class="sub" id="draft-state">草稿未保存</span>
+            <button class="ghost" id="btn-draft-save">保存草稿</button>
+            <button class="ghost" id="btn-draft-reset">重填空模板</button>
             <button class="btn" id="btn-apply">沉淀这份记忆</button>
           </div>
         </div>
@@ -658,6 +713,27 @@
       <div class="card">
         <h2>梦日志</h2>
         <div id="reports"></div>
+      </div>
+    </section>
+
+    <!-- 运行日志 -->
+    <section class="view" id="view-logs">
+      <div class="card" style="margin-bottom:14px">
+        <div class="row" style="flex-wrap:wrap">
+          <div>
+            <h2 style="margin-bottom:4px">运行日志</h2>
+            <div class="sub">锁冲突 / 内部异常 / 解析报错都留在这里。与数据目录里的 <code>lingshu.log</code> 同源；命令行也可用 <code>python scripts/brain.py logs</code> 查看。</div>
+          </div>
+          <div class="row" style="margin-left:auto;flex-wrap:wrap">
+            <select id="log-level" style="width:120px">
+              <option value="warn">警告 + 错误</option>
+              <option value="all">全部级别</option>
+              <option value="error">仅错误</option>
+            </select>
+            <button class="ghost" id="btn-log-refresh">刷新</button>
+          </div>
+        </div>
+        <div id="log-list" style="margin-top:12px"><div class="empty">加载中…</div></div>
       </div>
     </section>
   </main>
@@ -818,6 +894,7 @@ function memCard(m){
   const pct = Math.round((m.retention || 0) * 100);
   const pending = m.review === "pending";
   return `<article class="mem">
+    <input type="checkbox" class="mem-check" data-id="${esc(m.id)}" title="加入批量操作" style="margin-top:4px;accent-color:var(--amber)">
     <div class="ring" style="--p:${pct}"><b>${pct}%</b></div>
     <div class="mem-body">
       <div class="mem-top">
@@ -829,7 +906,10 @@ function memCard(m){
         <span class="date">${esc(m.created_text)}</span>
       </div>
       <p>${esc(m.display)}</p>
-      ${(m.tags && m.tags.length) ? `<div class="tags">${m.tags.map(t => `<span>#${esc(t)}</span>`).join("")}</div>` : ""}
+      <div class="mem-foot" style="display:flex;gap:10px;align-items:center;margin-top:6px">
+        <span class="sub" style="font-size:10.5px" title="记忆 id：手动建关联时填这里">id ${esc(m.id)}</span>
+        ${(m.tags && m.tags.length) ? `<div class="tags" style="margin:0;flex:1">${m.tags.map(t => `<span>#${esc(t)}</span>`).join("")}</div>` : ""}
+      </div>
     </div>
     <div class="acts">
       ${pending ? `<button class="iconbtn" title="确认（转正为事实）" data-review="confirm" data-id="${esc(m.id)}">✓</button>`
@@ -889,6 +969,16 @@ function renderOverview(){
   const roBanner = $("ro-banner");
   if (roBanner) roBanner.classList.toggle("hidden", !ov.readonly);
   applyReadonlyUI(!!ov.readonly);
+
+  // 会话模式判定依据 + 需要注意事项
+  const mdEl = $("mode-detail-text");
+  if (mdEl) {
+    const md = ov.mode_detail || {};
+    if (md.fixed) mdEl.innerHTML = `当前固定为 <b>${esc(modeLabel(ov.mode))}</b>（用户手动设定，不随话题变）。`;
+    else mdEl.innerHTML = `当前 <b>auto</b>：按本轮话题自动判定 → <b>${esc(modeLabel(md.mode || ov.mode))}</b>。下面输入一句话题，可预览会怎么切。`;
+  }
+  renderAlerts(ov);
+  if ($("chk-alerts")) renderChkAlerts(ov.emotion_alerts || []);
 
   const traits = p.traits || {};
   $("p-traits").innerHTML = Object.keys(traits).length
@@ -1423,6 +1513,16 @@ function renderHistory(p){
     : `<div class="sub">还没有人格变更记录。</div>`;
 }
 
+function dreamBlankTemplate(pend){
+  return {
+    task_id: pend.task_id,
+    memories: [],
+    persona_updates: {mood: {value: "", reason: ""}, traits: {}, habits: [], likes: [], dislikes: [], insights: []},
+    forget: [],
+    narrative: ""
+  };
+}
+
 function renderDream(ov){
   const pend = ov.pending;
   if (!pend) {
@@ -1436,13 +1536,15 @@ function renderDream(ov){
         <ul class="list">${(c.texts || []).slice(0, 6).map(t => `<li>(${esc(KIND[t.kind] || t.kind)}) ${esc(t.text)}</li>`).join("")}</ul>
       </div>`).join("") : `<div class="empty">碎片太少，梦很安静。</div>`);
     $("apply-box").classList.remove("hidden");
-    $("apply-json").value = JSON.stringify({
-      task_id: pend.task_id,
-      memories: [],
-      persona_updates: {mood: {value: "", reason: ""}, traits: {}, habits: [], likes: [], dislikes: [], insights: []},
-      forget: [],
-      narrative: ""
-    }, null, 2);
+    // 优先回填上次在网页里保存的草稿（task_id 对得上才用，避免拿旧草稿套新任务）
+    const draft = ov.dream_draft;
+    if (draft && draft.task_id === pend.task_id) {
+      $("apply-json").value = JSON.stringify(draft, null, 2);
+      $("draft-state").textContent = "已载入上次保存的草稿";
+    } else {
+      $("apply-json").value = JSON.stringify(dreamBlankTemplate(pend), null, 2);
+      $("draft-state").textContent = "草稿未保存";
+    }
   }
   $("reports").innerHTML = (ov.dreams || []).length
     ? ov.dreams.map(d => `<div class="card" style="margin-bottom:8px;padding:14px 16px">
@@ -1667,6 +1769,26 @@ function renderOnboarding(){
     <div class="field" style="margin-top:10px"><label><input type="checkbox" id="ob-unsure"> 用户说「不知道」，这部分由 AI 自己定</label></div>`;
 }
 
+function renderAlerts(ov){
+  const box = $("alert-box");
+  if (!box) return;
+  const items = [];
+  const ea = (ov.emotion_alerts || [])[0];
+  if (ea && ea.alert) {
+    items.push(`<b style="color:#e66450">情绪-输出背离</b>：${esc(ea.reason)}（去「心情」页核对）`);
+  }
+  const ls = ov.log_summary || {};
+  if (ls.error) items.push(`<b style="color:#e66450">运行错误 ${ls.error} 条</b>：去「日志」页看原因（锁冲突 / 异常 / 解析报错）`);
+  else if (ls.warn) items.push(`运行警告 ${ls.warn} 条：去「日志」页看看`);
+  const rc = ov.review_counts || {};
+  if (rc.memories) items.push(`<b style="color:var(--amber)">待审核记忆 ${rc.memories} 条</b>：去「记忆」页勾选后可批量确认 / 废弃`);
+  if (!items.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="card" style="margin-bottom:14px;border-color:rgba(230,100,80,.35)">
+    <h2 style="color:#e66450">需要注意</h2>
+    <ul class="list">${items.map(x => `<li>${x}</li>`).join("")}</ul>
+  </div>`;
+}
+
 async function load(){
   try {
     S.ov = await api("/api/overview");
@@ -1704,6 +1826,7 @@ async function renderMemoryList(){
     indexMemories(rows);
     $("mem-list").innerHTML = rows.length ? rows.map(memCard).join("")
       : `<div class="empty">没有匹配的记忆。放宽筛选，或者按回车做一次模糊回忆。</div>`;
+    bulkUpdateCount();
   } catch (e) { toast(e.message, true); }
 }
 
@@ -1768,12 +1891,14 @@ function switchTab(tab){
     emotion: ["心情", "七情六欲：会来、会散，也会被满足"],
     graph: ["联想", "记忆之间的关联，铺成一片 3D 空间"],
     growth: ["成长", "记忆、知识、笔记、技能长成了什么"],
-    dream: ["梦", "把经历压缩成长期记忆"]
+    dream: ["梦", "把经历压缩成长期记忆"],
+    logs: ["日志", "运行记录：锁冲突 / 内部异常 / 解析报错"]
   };
   $("pageTitle").textContent = titles[tab][0];
   $("pageSub").textContent = titles[tab][1];
   if (tab === "memories") renderMemoryList();
   if (tab === "graph") loadGraph(Number($("graph-limit").value || 300));
+  if (tab === "logs") loadLogs();
   if (["knowledge", "notes", "skills", "growth"].includes(tab)) {
     if (S.ws) { renderKnowledge(); renderNotes(); renderSkills(); renderDshPlugins(); renderGrowth(); renderOnboarding(); }
     else loadWS();
@@ -2093,6 +2218,149 @@ $("btn-apply").addEventListener("click", async () => {
     const a = r.applied;
     toast(`沉淀完成：新增 ${a.memories} 条，遗忘 ${a.forgotten} 条` + (a.rejected.length ? `，拒绝 ${a.rejected.length} 项人格修改` : ""));
     S.ov = r.overview; renderOverview(); renderMemoryList();
+  } catch (e) { toast(e.message, true); }
+});
+
+$("btn-draft-save").addEventListener("click", async () => {
+  let parsed;
+  try { parsed = JSON.parse($("apply-json").value); }
+  catch (e) { toast("JSON 格式不对：" + e.message, true); return; }
+  try {
+    await post("/api/dream/draft", {draft: parsed});
+    $("draft-state").textContent = "草稿已保存";
+    toast("草稿已保存，稍后回来能接着改");
+  } catch (e) { toast(e.message, true); }
+});
+
+$("btn-draft-reset").addEventListener("click", () => {
+  const pend = S.ov && S.ov.pending;
+  if (!pend) { toast("现在没有待整理的梦", true); return; }
+  if (!confirm("用空模板覆盖当前编辑内容？未保存的修改会丢。")) return;
+  $("apply-json").value = JSON.stringify(dreamBlankTemplate(pend), null, 2);
+  $("draft-state").textContent = "草稿未保存";
+});
+
+// ---- 批量操作（记忆）
+function bulkSelected(){
+  return [...document.querySelectorAll("#mem-list .mem-check:checked")].map(x => x.dataset.id);
+}
+function bulkUpdateCount(){
+  const n = bulkSelected().length;
+  const el = $("bulk-count"); if (el) el.textContent = `已选 ${n} 条`;
+  const all = $("bulk-all");
+  if (all) {
+    const total = document.querySelectorAll("#mem-list .mem-check").length;
+    all.checked = total > 0 && n === total;
+    all.indeterminate = n > 0 && n < total;
+  }
+}
+$("mem-list").addEventListener("change", e => {
+  if (e.target.classList && e.target.classList.contains("mem-check")) bulkUpdateCount();
+});
+$("bulk-all").addEventListener("change", () => {
+  const on = $("bulk-all").checked;
+  document.querySelectorAll("#mem-list .mem-check").forEach(x => x.checked = on);
+  bulkUpdateCount();
+});
+async function bulkRun(action, value, confirmMsg){
+  const ids = bulkSelected();
+  if (!ids.length) { toast("先勾选记忆", true); return; }
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  try {
+    const r = await post("/api/memory/bulk", {ids, action, value});
+    toast(`已处理 ${r.result.updated} 条`);
+    await load();
+    bulkUpdateCount();
+  } catch (e) { toast(e.message, true); }
+}
+$("bulk-confirm").addEventListener("click", () => bulkRun("confirm", null, null));
+$("bulk-discard").addEventListener("click", () => bulkRun("discard", null, "把选中的记忆全部移入淡忘区？"));
+$("bulk-imp-btn").addEventListener("click", () => {
+  const v = Number($("bulk-imp").value);
+  if (!v || v < 1 || v > 10) { toast("重要性填 1-10", true); return; }
+  bulkRun("importance", v, `把选中记忆的重要性都设为 ${v}/10？`);
+});
+function bulkTags(rm){
+  const tags = split($("bulk-tag").value);
+  if (!tags.length) { toast("先填标签", true); return; }
+  bulkRun(rm ? "remove_tags" : "add_tags", tags, null);
+}
+$("bulk-tag-add").addEventListener("click", () => bulkTags(false));
+$("bulk-tag-rm").addEventListener("click", () => bulkTags(true));
+
+// ---- 会话模式判定预览
+$("btn-mode-try").addEventListener("click", async () => {
+  const q = $("mode-try-q").value.trim();
+  const out = $("mode-try-out");
+  if (!q) { out.textContent = "先输入一句话题。"; return; }
+  try {
+    const d = await api("/api/mode/explain?q=" + encodeURIComponent(q));
+    out.innerHTML = `会切到 <b>${esc(modeLabel(d.mode))}</b> · 置信度 ${Math.round((d.confidence || 0) * 100)}%`
+      + (d.fixed ? "（当前为手动固定，auto 下才会按话题切）" : "")
+      + `<br>${esc(d.reason)}`;
+  } catch (e) { out.textContent = e.message; }
+});
+$("mode-try-q").addEventListener("keydown", e => { if (e.key === "Enter") $("btn-mode-try").click(); });
+
+// ---- 运行日志
+async function loadLogs(){
+  const box = $("log-list"); if (!box) return;
+  box.innerHTML = `<div class="sub">加载中…</div>`;
+  try {
+    const lvl = $("log-level").value;
+    const r = await api("/api/logs?limit=300&level=" + encodeURIComponent(lvl));
+    const rows = r.logs || [];
+    if (!rows.length) { box.innerHTML = `<div class="empty">没有匹配的日志，一切正常。</div>`; return; }
+    box.innerHTML = rows.map(x => {
+      const t = x.ts ? new Date(x.ts * 1000).toLocaleString("zh-CN").slice(5, 17) : "??";
+      const color = x.level === "error" ? "#e66450" : (x.level === "warn" ? "var(--amber)" : "var(--muted)");
+      return `<div class="mem" style="padding:10px 14px"><div class="mem-body" style="width:100%">
+        <div class="row" style="gap:8px">
+          <span class="badge" style="color:${color};border:1px solid ${color}">${esc(x.level || "info")}</span>
+          <span class="badge">${esc(x.kind || "?")}</span>
+          <span class="date">${esc(t)}</span>
+        </div>
+        <p style="margin-top:4px">${esc(x.msg || "")}</p>
+        ${x.trace ? `<pre class="pre small" style="margin-top:6px;max-height:120px;overflow:auto">${esc(x.trace)}</pre>` : ""}
+      </div></div>`;
+    }).join("");
+  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+$("btn-log-refresh").addEventListener("click", loadLogs);
+$("log-level").addEventListener("change", loadLogs);
+
+// ---- 情绪-输出一致性核对
+function renderChkAlerts(rows){
+  const box = $("chk-alerts"); if (!box) return;
+  if (!rows || !rows.length) { box.textContent = "暂无告警。"; return; }
+  box.innerHTML = rows.map(a => `<div style="margin-bottom:6px">· ${esc(a.ts ? new Date(a.ts * 1000).toLocaleString("zh-CN").slice(5, 17) : "")} ${esc(a.reason || "")}</div>`).join("");
+}
+async function runChk(){
+  const text = $("chk-reply").value.trim();
+  if (!text) { toast("先粘贴一段回复", true); return; }
+  try {
+    const r = await post("/api/emotion", {action: "check", text});
+    const res = r.result;
+    const sv = (res.mood_valence > 0 ? "+" : "") + Number(res.mood_valence).toFixed(2);
+    const rv = (res.reply_valence > 0 ? "+" : "") + Number(res.reply_valence).toFixed(2);
+    $("chk-out").innerHTML = `<div class="sub">内部情绪：${esc(res.mood_label)}（valence ${sv}，强度 ${Math.round(res.mood_intensity * 100)}%）· 回复极性 ${rv}</div>`
+      + (res.alert
+        ? `<div class="sub" style="color:#e66450;margin-top:6px">[一致性告警] ${esc(res.reason)}</div>`
+        : `<div class="sub" style="color:var(--teal);margin-top:6px">未见明显背离。</div>`);
+    renderChkAlerts(r.alerts || []);
+  } catch (e) { toast(e.message, true); }
+}
+$("btn-chk").addEventListener("click", runChk);
+
+// ---- 手动建立关联
+$("btn-link").addEventListener("click", async () => {
+  const a = $("link-a").value.trim(), b = $("link-b").value.trim();
+  if (!a || !b) { toast("两条记忆 id 都要填", true); return; }
+  try {
+    await post("/api/link", {action: "link", a, b, relation: ($("link-rel").value.trim() || "相关"), weight: 1});
+    toast("已建立关联");
+    $("link-info").textContent = "已连接：点上方「刷新」看星图变化。";
+    loadGraph(Number($("graph-limit").value || 300));
   } catch (e) { toast(e.message, true); }
 });
 

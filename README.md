@@ -2,7 +2,7 @@
 
 > 名字取自《黄帝内经》：**算力给思考，人格给灵魂，记忆给生命。**
 
-> 当前版本 **v2.10**（变更见 [CHANGELOG.md](CHANGELOG.md)）
+> 当前版本 **v2.11**（变更见 [CHANGELOG.md](CHANGELOG.md)）
 
 > ⚠️ **能力天花板（先读）**：灵枢是「提示词 + 脚本」的机制，**不能从底层强制约束模型**。当模型发生强幻觉时依然会无视全部规则；效果上限取决于底层大模型本身的推理、记忆与指令遵循能力。中强模型（7B+、云端）可完整遵守；**3B 以下本地小模型会出现大量规则漏执行**（忘走 startup、跳过写盘、纪律打折）——请据此降低预期，或改用 `SKILL-lite.md`（精简版）/ `SKILL-tiny.md`（最小试用版）。
 
@@ -21,6 +21,7 @@
   - [审核闸：AI 产物先过目，AI 自己审](#审核闸ai-产物先过目ai-自己审)
 - [情绪与类人机制](#情绪与类人机制)
 - [模糊联想回忆](#模糊联想回忆)
+- [记忆关联（联想图谱）](#记忆关联联想图谱)
 - [人格](#人格)
 - [成长路径](#成长路径)
   - [知识库](#知识库)
@@ -59,7 +60,7 @@
 上下文超过 75% 时触发"做梦"——灵枢重放短期记忆、按主题合并碎片、巩固到长期皮层，并把不重要的淡忘。梦完成后输出一份报告，告诉你巩固了什么、淡忘了什么、哪些还没想明白。
 
 - `dream --auto`：内置自愈——重放 → 启发式合并 → 沉淀，不依赖任何外部脚本。
-- 手动三步：`dream --trigger context` → 读 pending 填 apply.json → `dream --apply apply.json`。
+- 手动三步：`dream --trigger context` → 读 pending 填 apply.json → `dream --apply apply.json`。面板梦页可直接**网页编辑草稿**（`dreams/apply_draft.json`）再 apply，不必命令行改文件。
 
 ### 上下文水位三级防线
 
@@ -84,7 +85,7 @@
 
 - **work 工程模式**：情绪状态与拟人语气**不注入本会话**，注入包明确说"旧情绪与当前任务无关，当作没有"，先给可执行方案，重视正确性与工程契约。
 - **human 拟人模式**：情绪照常注入，并把数值得翻成**可直接照着做的行为约束**（`emotion now` 不再只有裸数字）。
-- **auto 自动模式**（默认）：按本轮话题关键词自动判——工程话题（代码/报错/接口/数据……）走 work，其余走 human。
+- **auto 自动模式**（默认）：**打分制话题判定**——工程信号（编程/数据/工程三组 26 词）与人性信号（情绪/关系/寒暄三组 30 词）分组计数打分，`work_score >= human_score` 工程优先。一边聊天一边写代码也不会轻易切错：句子里有代码、报错就偏 work，情绪词再多也按"工程优先"隔离；两侧都命中时判定标 `mixed` 并把依据摊开。判定**可见**：面板概览有「会话模式判定」卡（当前模式、置信度、两侧分数、命中词、可输入一句话试判），CLI 用 `mode explain --query 词…` 看同款依据。
 
 切换：`mode work | human | auto`。写代码前想手动清掉余波，用 `emotion cool` 把 24 小时内的强情绪整体降温，或 `emotion adjust <序号>` 微调单条。
 
@@ -96,7 +97,7 @@
 - **AI 整理的知识**（`knowledge tidy`）标 `status="pending"`。
 - **AI 发起的人格变更**记 `source`（dream/自我总结/…）与 `evidence`（依据的记忆/事件 id），`persona history` 可溯源。
 - **审核由 AI 自审**：AI 每会话先看 `review`（全部待审项）→ `review confirm <id>` 转正 / `review discard <id>` 废弃（记忆 m_* 与知识 k_* 通用，后者等同 `knowledge confirm/discard`）；整体自查用 `audit`（待审计数 + 冲突记忆 + 该做什么）。注入包一出现 `[待审核]` / `[人格漂移]` 就先处理再继续。
-- **用户随时可介入**：人工复核走同一套命令即可，不用把用户变成质检员——AI 自审在前，人在必要处兜底。
+- **用户随时可介入**：人工复核走同一套命令即可，不用把用户变成质检员——AI 自审在前，人在必要处兜底。面板记忆页支持**多选批量 confirm/discard**、批量改重要性/打标签，大量待审条目不必逐条点。
 
 每个会话的注入包会主动提醒有 `[待审核]` 项、有 `[人格漂移]`，不让幻觉静默沉淀。
 
@@ -113,12 +114,48 @@
 - **杏仁核劫持**：情绪最强烈时理智权重被压下，但上限封在 40%——再上头也得给人留余地。
 - **峰终定律**：对一段体验的记忆，几乎只由"最强烈的一刻"和"结尾"决定，情绪总结按这个口径出。
 - **首因效应**：最早留下的印象占权更高，首次被想起的记忆强化更深。
+- **情绪-输出一致性核对**：`emotion check "回复文本"` 做后置轻量校验——内部情绪强度足够、而回复语气与内部数值**严重背离**时告警（落 `emotion_checks.jsonl`，面板心情页可看最近告警），防止"心里难过却满口欢快"的违和。
 
 ### 模糊联想回忆
 
 `recall` 不靠精确匹配：中文用字符二元组、英文/数字用词做模糊联想，按 **相关度 + 近期性 + 重要性 + 首因** 加权排序，并在命中后自动强化（越用越牢）。数字/编号被保留为独立词元，不会把"版本0"和"版本1"误当成同一条。
 
 **上万条也不慢**：带查询词时先用子串包含预筛剪枝候选（查询词必是来源文本连续子串，数学上不丢召回），只对命中候选做分词打分；无查询词（startup 注入）直接走快速路径，不再构建全量词表。实测 1 万条记忆 `recall` 从约 3.5s 降到 76ms（约 47 倍），`remember` 约 100ms。
+
+## 记忆关联（联想图谱）
+
+模糊回忆靠"字面像不像"，但人脑还会靠**联想**串记忆："A 导致了 B""提到 A 就想起 C"。灵枢把这些关系存成**显式关联边**（`assoc.jsonl`，无向，带关系名与权重）。`recall` 命中一条记忆时，会沿关联边把邻居也带起来（联想扩散），关联越重带得越明显。
+
+**怎么手动建立关联（完整示例）**
+
+```bash
+# 1) 先建两条记忆，记下各自的 id（remember 会打印 id，如 m_3f2a...）
+python scripts/brain.py remember "服务器崩了是因为内存泄漏" --kind fact --importance 8
+python scripts/brain.py remember "把 JVM 堆从 2G 调到 4G 之后不再崩" --kind fact --importance 7
+
+# 2) 手动连线：idA idB --relation 关系名 --weight 权重 --why 为什么
+python scripts/brain.py assoc link m_3f2a... m_9c1d... --relation "因果" --weight 1 --why "调堆是内存泄漏的缓解结果"
+
+# 3) 看这条记忆连着什么
+python scripts/brain.py assoc of m_3f2a...
+
+# 4) 懒人补网：按共享实体/标签自动成边（先 --dry-run 预览要连哪些）
+python scripts/brain.py assoc auto --dry-run
+python scripts/brain.py assoc auto
+
+# 5) 看整张网（节点数 / 边数 / 有多少节点被连成网）
+python scripts/brain.py assoc graph --limit 300
+
+# 6) 连错了就断开
+python scripts/brain.py assoc unlink m_3f2a... m_9c1d...
+```
+
+**要点**
+
+- 关系名随你定：`因果` / `相关` / `情绪` / `反例` 都行；同一对记忆反复 `link` 会**加重**（权重上限 3），越常被想起的联想越强。
+- **不用背 id**：面板记忆页每条卡片底部直接显示 `id xxx`，复制即可；也可用 `list` / `recall` 结果里的 id。
+- **面板看网络**：`serve` 后进「联想」页——每条记忆一个节点、连线是关联的 **3D 空间**（虚空星图），拖拽旋转、滚轮缩放、点节点看详情与邻居；页面顶部还有「手动建立关联」卡，填 A/B 的 id + 关系名 + 为什么，一键连上，不用命令行。
+- **没显式连过也能看**：`assoc auto` 会按共享实体/标签先补一批边，让图先"长"出来；再按需手动精修。
 
 ## 人格
 
@@ -160,11 +197,16 @@
 `brain.py serve` 启动本地面板（仅监听 127.0.0.1，`start-panel.bat` 一键启动）：
 
 - 记忆浏览：层 + 重要性区间 + 时间范围 + 标签 + 情绪 + 排序的**组合筛选**；置顶、编辑、忘记
+- **批量操作**：多选（含全选）后一次批量 confirm/discard 待审核条目、批量设重要性、批量加/减标签
 - **注入包预览**：直接看 `startup` 会注入给模型的完整记忆包（只读，不落盘、不加强记忆）
 - **冲突检查**：启发式扫出"可能矛盾/已过时"的记忆对，只提醒不下结论
+- **会话模式判定卡**：当前模式 + 置信度 + 工程/情绪两侧分数 + 命中词依据，可输入一句话试判 auto 会怎么切
 - 人格、内驱数值实时查看与微调；**人格历史可一键回滚**
 - 知识库（含 **⏳待审核 / 已确认 / 已废弃** 状态，可 confirm/discard）、笔记、技能（含 DSH 插件区块）、成长、进化日志
-- 做梦报告、备份恢复
+- **心情页**：情绪-输出一致性核对（输入回复看语气与内部情绪是否背离 + 最近告警）、七情/六欲/认知评价/共情
+- **联想页（3D 星图）**：记忆网络可视化 + 手动建立关联卡（填 A/B id 一键连线）
+- 做梦报告、**网页编辑 apply 草稿再 apply**、备份恢复
+- **日志页**：锁冲突 / 内部异常 / 解析报错按级别查看，不用再去翻本地日志文件
 - **只读降级有醒目横幅**：目录不可写时页面顶部直接提示"修改不会保存"
 
 **安全**：面板自带随机 token 鉴权（页面加载时注入，所有 API 请求必须携带），并校验 Host/Origin，挡住 DNS rebinding 与无来源直连偷读记忆。
@@ -176,6 +218,7 @@
 - **备份/恢复**：`backup` 打包整个记忆库（含 verbatim/ 与 skills/），自动修剪旧备份；`restore` 恢复前先留现状备份，校验 zip 合法性并防 zip-slip 路径穿越
 - **只读降级**：沙箱写盘被拒时自动降级为只读注入，已有的记忆照样带回；`--home` 支持把数据目录迁到工作区
 - **原子写入**：所有文件写入走临时文件 + `os.replace`，不会出现写一半的脏文件
+- **运行日志可见**：锁冲突、内部异常、解析报错写进 `lingshu.log`（滚动截断），面板「日志」页按级别查看——出问题先看这里，不用翻文件
 
 ## 脚本 vs 模型：谁在真正干活
 
@@ -305,9 +348,11 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 做梦 | `dream` / `dream --apply apply.json` / `dream --auto` |
 | 冷热归档 | `archive show\|search <词>\|restore <id>\|run [--dry-run]\|count`（沉眠记忆自动雪藏，原文保留可回捞） |
 | 人格 | `persona show\|set traits.幽默=70\|sync\|path\|interview\|self\|lock\|unlock\|history [--limit]\|rollback <序号>\|snapshot [--label]\|snapshots\|restore <名字>\|drift [--days 7] [--json]` |
-| 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config\|events\|adjust <序号>\|del <序号>\|cool` |
+| 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config\|events\|adjust <序号>\|del <序号>\|cool\|check "回复文本"` |
 | 工作记忆 | `work status\|add\|list\|done <序号>\|flush [--skip-done]\|clear` |
-| 会话模式 | `mode show\|work\|human\|auto`（工程会话自动隔离情绪） |
+| 会话模式 | `mode show\|work\|human\|auto\|explain [--query 词…]`（工程会话自动隔离情绪；explain 看 auto 判定依据） |
+| 记忆关联 | `assoc link <idA> <idB> --relation 因果 --why "..."\|unlink <idA> <idB>\|of <id>\|auto [--dry-run]\|graph --limit 300` |
+| 运行日志 | `logs [--limit 20] [--level warn\|error] [--all]`（锁冲突/异常/解析报错，面板「日志」页同款） |
 | 审核闸 | `review [--json]` / `review confirm <id>` / `review discard <id>`（记忆 m_* 与知识 k_* 通用） |
 | 用户规则 | `user-rules show\|add <规则>\|clear`（写在数据目录 lingshu.user.md，更新永不覆盖，每会话自动注入） |
 | 自查 | `audit [--json]`（待审计数 + 冲突记忆 + 该做什么） |
@@ -358,6 +403,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 ├── archive.jsonl           # 归档层（冷热自动归档的沉眠记忆，原文保留）
 ├── working.jsonl           # 工作记忆（会话暂存）
 ├── emotions.jsonl          # 情绪事件流（心情按半衰期从这里叠加出来）
+├── emotion_checks.jsonl    # 情绪-输出一致性告警记录（滚动保留 200 条）
 ├── desires.json            # 六欲状态（生、耳目口鼻感官欲等底层需要）
 ├── assoc.jsonl             # 记忆关联边（联想图谱）
 ├── persona.json            # 人格档案
@@ -373,7 +419,8 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 ├── skills/                 # 自己写的技能
 ├── extensions/             # 扩展模块（可执行钩子 inject/run，更新永不覆盖）
 ├── lingshu.user.md         # 用户附加规则（更新永不覆盖，每会话自动注入）
-├── dreams/                 # 梦报告与 pending
+├── lingshu.log             # 运行日志（锁冲突/异常/解析报错，面板「日志」页可看）
+├── dreams/                 # 梦报告与 pending（apply 草稿 apply_draft.json 也在这）
 ├── verbatim/               # capture 原样封存的保险柜
 └── backups/                # 备份
 ```
