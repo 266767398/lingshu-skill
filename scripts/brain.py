@@ -48,6 +48,16 @@ RETENTION_FLOOR = 0.10
 KINDS = ("episode", "fact", "preference", "emotion", "insight", "identity", "habit")
 LAYERS = ("hippo", "cortex", "dust")
 
+# 冷热归档层：长期没被想起、保留度极低的沉眠记忆雪藏到这里。
+# 与 dust（淡忘：细节模糊、include_dust 才查）不同，archive 原文完整保留、永不删，
+# 只是移出 recall 的热遍历集合——记忆上万条后，热集只扫活跃记忆，冷数据按需 archive search 捞。
+# 触发：dream 时顺带自动归档（零额外遍历成本），或 `archive run` 手动。
+ARCHIVE_LAYER = "archive"
+ARCHIVE_MIN_AGE_DAYS = 30       # 新记忆至少满月才可能被归档，给足被想起的机会
+ARCHIVE_MAX_IMPORTANCE = 0.5    # 重要度高于此不自动归档（怕误伤用户在意的事）
+ARCHIVE_RETENTION = 0.20        # 保留度低于此才考虑（长期没访问自然衰减到很低）
+ARCHIVE_IDLE_DAYS = 180         # 被想起过的记忆，还需静置超过半年
+
 # 工作记忆：当前上下文本身就是工作记忆，默认不落盘。
 # 只有 AI 自己决定留一手时才写 working.jsonl（会话级暂存，容量 7±2，过期即弃）。
 WORKING_FILE = HOME / "working.jsonl"
@@ -436,12 +446,17 @@ def audit() -> dict:
                     "`persona history` 看来源，跑偏就 `persona rollback <序号>`。")
     if conf:
         tips.append(f"有 {len(conf)} 组疑似冲突记忆：`detect-conflicts` 查看，别让旧记忆继续误导。")
+    n_arch = len(load_archive())
+    if n_arch:
+        tips.append(f"归档层有 {n_arch} 条冷记忆（默认不参与回忆，原文保留）："
+                    "`archive search <词>` 找、`archive restore <id>` 回捞。")
     if not tips:
         tips.append("干净：没有待审核项、没有明显冲突。")
     return {"counts": {"memories": len(rep["memories"]),
                        "knowledge": len(rep["knowledge"]),
                        "persona": len(rep["persona"]),
-                       "conflicts": len(conf)},
+                       "conflicts": len(conf),
+                       "archive": n_arch},
             "review": rep, "conflicts": conf, "tips": tips}
 
 
@@ -539,7 +554,20 @@ def write_jsonl(path: Path, rows: list) -> None:
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    os.replace(tmp, path)
+    # Windows 上 os.replace 覆盖"正被别的进程打开读取"的文件会抛 PermissionError。
+    # 写方之间有锁互斥，但读方（stats/recall/面板）不加锁；短暂重试几次等读句柄释放。
+    for attempt in range(6):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 5:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 @contextmanager
@@ -591,8 +619,121 @@ def _locked_save_all(records: list) -> None:
         save_all(merged)
 
 
+def _strengthen_write(touched: list) -> None:
+    """recall 强化后的定向写回：只重写被"想起"记忆所在的层文件。
+
+    上万条记忆时，旧实现（_locked_save_all 整库 merge + 全量重写 3 个文件）让每次
+    recall 都背上整库 I/O；这里按层分组、只 patch 命中的行，开销与命中数成正比。
+    """
+    if READONLY or not touched:
+        return
+    with _locked(HOME / "hippocampus.jsonl"):
+        by_layer: dict = {}
+        for m in touched:
+            if m.get("layer") == ARCHIVE_LAYER:
+                continue  # 归档记忆只读展示，不给强化（需要时 archive restore 回热）
+            by_layer.setdefault(m.get("layer", "hippo"), {})[m["id"]] = m
+        if not by_layer:
+            return
+        fname = {"hippo": "hippocampus.jsonl", "cortex": "cortex.jsonl", "dust": "dust.jsonl"}
+        for layer, updates in by_layer.items():
+            p = HOME / fname.get(layer, "hippocampus.jsonl")
+            rows = read_jsonl(p)
+            for r in rows:
+                u = updates.get(r.get("id"))
+                if u:
+                    r.update(u)
+            write_jsonl(p, rows)
+
+
 def load_all() -> list:
     return read_jsonl(HOME / "hippocampus.jsonl") + read_jsonl(HOME / "cortex.jsonl") + read_jsonl(HOME / "dust.jsonl")
+
+
+def load_archive() -> list:
+    """归档层独立读取：load_all 不含 archive，热查询集保持精简。
+
+    所有现有路径（recall/forget/dream/remember…）行为不变；需要全量计数或展示时
+    （stats / 面板 / audit / archive 命令）再显式合并 load_archive()。
+    """
+    return read_jsonl(HOME / "archive.jsonl")
+
+
+def _hay(m: dict) -> str:
+    """廉价的"可检索全文"拼接（小写）：text + tags + entities。
+
+    用于 recall/remember/archive search 的第一道预筛（子串包含测试）。数学上不丢召回：
+    relevance/jaccard 非零当且仅当查询 term 与文档 terms 共享，而共享 term 必然是
+    本文档某段文本的连续子串 → `t in hay` 必为真。统一小写，英文词忽略大小写。
+    """
+    parts = [str(m.get("text") or "")]
+    for k in ("tags", "entities"):
+        parts.append(" ".join(str(x) for x in (m.get(k) or [])))
+    return "\n".join(parts).lower()
+
+
+def _is_archivable(m: dict, now: int) -> bool:
+    """单条判断：是否该被雪藏进归档层。archive_candidates / dream 共用同一套条件，避免漂移。"""
+    if m.get("layer") not in ("hippo", "cortex"):
+        return False
+    if m.get("pinned") or m.get("verbatim") or m.get("kind") == "identity":
+        return False
+    if m.get("review") == "pending":
+        return False
+    try:
+        imp = float(m.get("importance", 0.5))
+        age = now - float(m.get("created", now))
+        R = retention(m, now)
+        idle = now - float(m.get("last_access", m.get("created", now)))
+    except (TypeError, ValueError):
+        return False
+    if imp > ARCHIVE_MAX_IMPORTANCE or R >= ARCHIVE_RETENTION:
+        return False
+    if age < ARCHIVE_MIN_AGE_DAYS * DAY:
+        return False
+    if int(m.get("access_count", 0) or 0) > 0 and idle < ARCHIVE_IDLE_DAYS * DAY:
+        return False
+    return True
+
+
+def archive_candidates(records: list, now: int | None = None) -> list:
+    """选出符合"沉眠"条件的记忆：保留度极低 + 低重要 + 满月 + 长期没被想起。
+
+    不碰 pinned / 封存原文 / 身份记忆 / 待审核项。返回记录本身（调用方决定是否落盘）。
+    """
+    now = now or now_ts()
+    return [m for m in records if _is_archivable(m, now)]
+
+
+def archive_run(dry_run: bool = False) -> dict:
+    """手动触发归档：把沉眠记忆雪藏进 archive 层（原文保真，永不删）。
+
+    读-改-写整体放在写锁里（统一锚点 hippocampus.jsonl），与 remember/dream 互斥。
+    """
+    if READONLY and not dry_run:
+        raise PermissionError("记忆库当前只读，无法归档。")
+    now = now_ts()
+    if dry_run:
+        # 预览不写盘，也不抢写锁（只读环境下锁文件也可能建不了）
+        cand = archive_candidates(load_all(), now)
+        return {"count": len(cand),
+                "archived": [{"id": m["id"], "gist": m.get("gist") or heuristic_gist(m.get("text", ""))}
+                             for m in cand],
+                "dry_run": True}
+    with _locked(HOME / "hippocampus.jsonl"):
+        records = load_all()
+        cand = archive_candidates(records, now)
+        arch = [{"id": m["id"], "gist": m.get("gist") or heuristic_gist(m.get("text", ""))}
+                for m in cand]
+        if not dry_run and cand:
+            for m in cand:
+                m["layer"] = ARCHIVE_LAYER
+                m["archived_at"] = now
+            keep_ids = {m["id"] for m in cand}
+            # 归档层文件单独维护：只在本次真的新增了归档时才重写，绝不整库覆写清空
+            write_jsonl(HOME / "archive.jsonl", load_archive() + cand)
+            save_all([m for m in records if m.get("id") not in keep_ids])
+    return {"count": len(arch), "archived": arch, "dry_run": dry_run}
 
 
 def save_all(records: list) -> None:
@@ -600,7 +741,9 @@ def save_all(records: list) -> None:
     for r in records:
         layer = r.get("layer", "hippo")
         # 未知层名（损坏的手改数据）归入海马回，绝不静默丢弃
-        groups[layer if layer in groups else "hippo"].append(r)
+        # archive 记录走专用通道（load_archive 维护），不带进整库覆写，避免把归档文件清空
+        if layer != ARCHIVE_LAYER:
+            groups[layer if layer in groups else "hippo"].append(r)
     write_jsonl(HOME / "hippocampus.jsonl", groups["hippo"])
     write_jsonl(HOME / "cortex.jsonl", groups["cortex"])
     write_jsonl(HOME / "dust.jsonl", groups["dust"])
@@ -743,7 +886,7 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
         raise ValueError(f"没有这种情绪：{emotion}"
                          f"（可用：开心/生气/难过/焦虑/感动…共 {len(EMOTIONS)} 种，"
                          "`brain.py emotion list` 查看全部）")
-    records = load_all()
+    records = None  # 锁内读取：见下方 _locked 作用域
     new_terms = terms(text)
     imp = importance if importance is not None else heuristic_importance(text, kind)
 
@@ -766,59 +909,85 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
     else:
         emo_name, stability_boost = "", 1.0
 
-    # 近重复合并：同一类记忆、文本高度相似 -> 强化旧记忆而不是堆新条
-    for m in records:
-        if m.get("layer") == "dust" or m.get("kind") != kind:
-            continue
-        if jaccard(new_terms, terms(m.get("text", ""))) >= 0.86:
-            # 保留更长/更完整的文本，别让一句简短的重复把原细节盖掉
-            old, new = m.get("text", ""), text
-            if len(new) > len(old):
-                m["text"] = new
-                m["gist"] = heuristic_gist(new)
-            else:
-                m["gist"] = heuristic_gist(old)
-            m["importance"] = round(max(0.0, min(1.0, max(m.get("importance", 0.5), float(imp) if imp <= 1 else imp / 10))), 3)
-            m["last_access"] = now_ts()
-            m["access_count"] = m.get("access_count", 0) + 1
-            m["stability"] = min(MAX_STABILITY, m.get("stability", DEFAULT_STABILITY) * 1.4 * stability_boost)
-            # 习惯化（享乐适应）：同一件事反复出现，新鲜感递减、重要性不再步步抬升。
-            # 就像警报器一直响就没人再在意——但保留一个下限，别把真重要的磨掉。
-            m["repeat"] = m.get("repeat", 0) + 1
-            if m["repeat"] >= 3 and m["importance"] > 0.25:
-                m["importance"] = round(m["importance"] - 0.02, 3)
-            if emo_name and not m.get("emotion"):
-                m["emotion"] = emo_name
-            m["tags"] = _dedupe(m.get("tags", []) + [t.strip().lstrip("#") for t in (tags or [])])
-            m["entities"] = _dedupe(m.get("entities", []) + (entities or []))
-            _locked_save_all(records)
-            return m, "merged"
+    # 读-改-写整体加锁：remember 走 save_all 整库快照覆写，若锁外先 load_all，
+    # 并发写的另一个进程 os.replace 覆盖我们正读着的文件会在 Windows 上报 PermissionError。
+    # 放进锁里后，读和写在锁内互斥，顺带杜绝"旧快照覆盖新写入"。
+    with _locked(HOME / "hippocampus.jsonl"):
+        records = load_all()
+        # 近重复合并：同一类记忆、文本高度相似 -> 强化旧记忆而不是堆新条
+        # 先做廉价子串预筛（jaccard≥0.86 必共享 term，共享 term 必是旧文本子串，数学上不丢召回），
+        # 上万条记忆时避免对每条都跑正则分词；archive 记录不参与合并（防归档记忆被悄悄复活）
+        for m in records:
+            if m.get("layer") in ("dust", ARCHIVE_LAYER) or m.get("kind") != kind:
+                continue
+            if new_terms and not any(t in _hay(m) for t in new_terms):
+                continue
+            old_text = m.get("text", "") or ""
+            if jaccard(new_terms, terms(old_text)) >= 0.86:
+                # 保留更长/更完整的文本，别让一句简短的重复把原细节盖掉
+                old, new = m.get("text", ""), text
+                if len(new) > len(old):
+                    m["text"] = new
+                    m["gist"] = heuristic_gist(new)
+                else:
+                    m["gist"] = heuristic_gist(old)
+                m["importance"] = round(max(0.0, min(1.0, max(m.get("importance", 0.5), float(imp) if imp <= 1 else imp / 10))), 3)
+                m["last_access"] = now_ts()
+                m["access_count"] = m.get("access_count", 0) + 1
+                m["stability"] = min(MAX_STABILITY, m.get("stability", DEFAULT_STABILITY) * 1.4 * stability_boost)
+                # 习惯化（享乐适应）：同一件事反复出现，新鲜感递减、重要性不再步步抬升。
+                # 就像警报器一直响就没人再在意——但保留一个下限，别把真重要的磨掉。
+                m["repeat"] = m.get("repeat", 0) + 1
+                if m["repeat"] >= 3 and m["importance"] > 0.25:
+                    m["importance"] = round(m["importance"] - 0.02, 3)
+                if emo_name and not m.get("emotion"):
+                    m["emotion"] = emo_name
+                m["tags"] = _dedupe(m.get("tags", []) + [t.strip().lstrip("#") for t in (tags or [])])
+                m["entities"] = _dedupe(m.get("entities", []) + (entities or []))
+                save_all(records)
+                return m, "merged"
 
-    rec = make_record(text, kind, importance, tags, entities, source, layer)
-    rec["importance"] = round(float(rec.get("importance", 0.5)) + (boost if emo_name else 0), 3)
-    rec["importance"] = max(0.0, min(1.0, rec["importance"]))
-    rec["stability"] = min(MAX_STABILITY, rec.get("stability", DEFAULT_STABILITY) * stability_boost)
-    if emo_name:
-        rec["emotion"] = emo_name
-        rec["emotional"] = round(emo_arousal, 2)
-    _locked_save_all([rec])
-    return rec, "created"
+        rec = make_record(text, kind, importance, tags, entities, source, layer)
+        rec["importance"] = round(float(rec.get("importance", 0.5)) + (boost if emo_name else 0), 3)
+        rec["importance"] = max(0.0, min(1.0, rec["importance"]))
+        rec["stability"] = min(MAX_STABILITY, rec.get("stability", DEFAULT_STABILITY) * stability_boost)
+        if emo_name:
+            rec["emotion"] = emo_name
+            rec["emotional"] = round(emo_arousal, 2)
+        records.append(rec)
+        save_all(records)
+        return rec, "created"
 
 
 def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
-           strengthen: bool = True, include_dust: bool = False) -> list:
+           strengthen: bool = True, include_dust: bool = False,
+           include_archive: bool = False) -> list:
     """模糊回忆：相关度 + 近期性 + 重要性 + 联想扩散。返回 [(record, score, parts), ...]"""
     ensure_home()
     cfg = load_config()
     w = cfg["weights"]
     records = [m for m in load_all() if m.get("layer") in layers or (include_dust and m.get("layer") == "dust")]
+    if include_archive:
+        records += load_archive()
     if not records:
         return []
     now = now_ts()
-    all_terms = {m["id"]: terms(m.get("text", "") + " " + " ".join(m.get("tags", [])) + " "
-                                + " ".join(m.get("entities", []))) for m in records}
-    idf = build_idf(list(all_terms.values()))
     q_terms = terms(query)
+    # 第一道预筛：带查询词时先做廉价的子串包含测试，只对可能相关的记忆做正则分词与打分。
+    # 上万条记忆时这一刀把"全量 terms + 全量 idf"砍成"候选集 terms"；数学上不丢召回
+    # （relevance>0 ⇔ 共享 term，而共享 term 必是本文档文本的连续子串）。
+    if q_terms:
+        cand = []
+        for m in records:
+            h = _hay(m)
+            if any(t in h for t in q_terms):
+                cand.append(m)
+        records = cand
+        if not records:
+            return []
+    # 无查询词（startup 注入等场景）不构建 terms/idf：relevance 恒为 0，省掉上万条的整库分词
+    all_terms = {m["id"]: terms(_hay(m)) for m in records} if q_terms else {}
+    idf = build_idf(list(all_terms.values())) if q_terms else {}
 
     scored = []
     # 首因效应：同一片记忆里最早留下的印象占权更高（第一次的印象比后来补的更深）
@@ -923,8 +1092,9 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
             m["last_access"] = now
             m["detail"] = min(1.0, float(m.get("detail", 1.0)) * 0.9 + 0.1)
         # 只写回被"想起"的这条，别把没加载进来的层（如 dust）覆盖清空；没想起就不动盘
+        # 定向写回：只重写命中记忆所在层，避免整库覆写（上万条时省掉大头 I/O）
         if touched:
-            _locked_save_all(touched)
+            _strengthen_write(touched)
 
     return [(m, round(s, 4), parts) for m, s, parts in result]
 
@@ -2730,12 +2900,14 @@ def cluster_memories(records: list, max_clusters: int = 6, include_ids: set | No
 def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
     ensure_home()
     now = now_ts()
-    report = {"trigger": trigger, "at": now, "forgotten": [], "promoted": [], "faded": 0, "clusters": []}
+    report = {"trigger": trigger, "at": now, "forgotten": [], "promoted": [], "faded": 0,
+              "archived": [], "clusters": []}
 
     # 读-改-写整体加锁：dream 用 save_all 整库快照覆写，
     # 不加锁会把锁外并发写入的新记忆用旧快照整库覆盖丢。dry_run 不写盘也走锁（只读场景无所谓）
     with _locked(HOME / "hippocampus.jsonl"):
         records = load_all()
+        archived_recs = []
 
         for m in records:
             if m.get("layer") == "dust" or m.get("pinned"):
@@ -2743,6 +2915,14 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
             # 封存的原文不做细节淡化、不进淡忘区：它的价值就是"一个字都没丢"
             verbatim = bool(m.get("verbatim"))
             R = retention(m, now)
+            # 冷热归档：久到想不起的沉眠记忆优先雪藏（原文保真、永不删、可 archive restore 回热），
+            # 而不是直接模糊淡忘。放在淡忘判断之前，避免低重要沉眠记忆先被 dust 吃掉。
+            if not verbatim and _is_archivable(m, now):
+                m["layer"] = ARCHIVE_LAYER
+                m["archived_at"] = now
+                archived_recs.append(m)
+                report["archived"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(m["text"])})
+                continue
             if (not verbatim and m.get("layer") == "hippo" and R < RETENTION_FLOOR
                     and m.get("importance", 0.5) < 0.75 and now - float(m.get("created", now)) > 2 * DAY):
                 m["layer"] = "dust"
@@ -2765,6 +2945,13 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
             if not m.get("gist"):
                 m["gist"] = heuristic_gist(m["text"])
 
+        # 冷热归档：长期没被想起、保留度极低的沉眠记忆雪藏进 archive 层
+        # （原文保真、永不删，只是移出 recall 的热遍历集合）。顺带归档几乎零额外成本。
+        if archived_recs:
+            records = [m for m in records if m.get("layer") != ARCHIVE_LAYER]
+            if not dry_run:
+                write_jsonl(HOME / "archive.jsonl", load_archive() + archived_recs)
+
         clusters = cluster_memories(records, include_ids={x["id"] for x in report["promoted"]})
         if not dry_run:
             save_all(records)
@@ -2781,7 +2968,7 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
                 "trigger": trigger,
                 "instructions": "把 clusters 里的碎片压缩成更抽象、更持久的长期记忆；提取人格变化；输出 apply.json 后执行 --apply。",
                 "clusters": clusters,
-                "report": {k: report[k] for k in ("forgotten", "promoted", "faded")},
+                "report": {k: report[k] for k in ("forgotten", "promoted", "faded", "archived")},
                 "apply_schema": {
                     "task_id": task_id,
                     "memories": [{"kind": "fact|preference|insight|habit|emotion",
@@ -2819,6 +3006,7 @@ def write_dream_report(report: dict) -> Path:
     lines.append(f"- 重放片段：{sum(len(c['texts']) for c in report['clusters'])} 条 / {len(report['clusters'])} 组")
     lines.append(f"- 巩固入长期：{len(report['promoted'])} 条")
     lines.append(f"- 淡忘归档：{len(report['forgotten'])} 条")
+    lines.append(f"- 雪藏冷档：{len(report.get('archived', []))} 条（原文保留，可 archive search / restore）")
     lines.append(f"- 模糊化细节：{report['faded']} 条")
     if report["clusters"]:
         lines += ["", "## 重放的主题"]
@@ -3163,6 +3351,7 @@ def stats() -> dict:
         "hippo": sum(1 for m in records if m.get("layer") == "hippo"),
         "cortex": sum(1 for m in records if m.get("layer") == "cortex"),
         "dust": sum(1 for m in records if m.get("layer") == "dust"),
+        "archive": len(load_archive()),
         "pinned": sum(1 for m in active if m.get("pinned")),
         "avg_retention": round(sum(decays) / len(decays), 3),
         "top_tags": sorted(tags.items(), key=lambda x: -x[1])[:10],
@@ -3401,6 +3590,80 @@ def cmd_restore(zip_path: str, yes: bool = False) -> int:
         print(f"[错误] 恢复被拒绝（当前环境可能只读）：{exc}", file=sys.stderr)
         return 3
     print(f"已从 {zp.name} 恢复记忆库 → {HOME}")
+    return 0
+
+
+# ---------------------------------------------------------------- archive（冷热归档）
+
+def cmd_archive(action: str = "show", arg: str = "", limit: int = 20,
+                dry_run: bool = False) -> int:
+    """归档层命令：查看 / 搜索 / 回捞 / 手动触发归档。
+
+    归档只把记忆从热遍历集合里移出，原文一字不丢；`archive restore <id>` 随时回热。
+    """
+    if action == "run":
+        try:
+            r = archive_run(dry_run=dry_run)
+        except PermissionError as exc:
+            print(f"[只读] {exc}", file=sys.stderr)
+            return 3
+        verb = "可归档" if dry_run else "已雪藏"
+        print(f"{verb} {r['count']} 条冷记忆 → 归档层（原文保留，archive search / restore 可找回）。")
+        for x in r["archived"][:max(limit, 1)]:
+            print(f"  {x['id']}  {x['gist']}")
+        return 0
+
+    rows = load_archive()
+    if action == "count":
+        print(len(rows))
+        return 0
+
+    if action == "search":
+        if not arg:
+            print("用法：archive search <关键词>", file=sys.stderr)
+            return 2
+        q = terms(arg)
+        hits = [m for m in rows if q and any(t in _hay(m) for t in q)]
+        if not hits:
+            print(f"归档层没找到「{arg}」。")
+            return 1
+        hits.sort(key=lambda m: m.get("archived_at", m.get("created", 0)), reverse=True)
+        print(f"归档层命中「{arg}」→ {len(hits)} 条\n")
+        for m in hits[:max(limit, 1)]:
+            _print_mem(m)
+        return 0
+
+    if action == "restore":
+        if not arg:
+            print("用法：archive restore <id>", file=sys.stderr)
+            return 2
+        if READONLY:
+            print("[只读] 记忆库当前不可写，无法回捞。", file=sys.stderr)
+            return 3
+        with _locked(HOME / "hippocampus.jsonl"):
+            rows = load_archive()
+            hit = next((m for m in rows if m.get("id") == arg), None)
+            if not hit:
+                print(f"归档层没有 {arg}。")
+                return 1
+            write_jsonl(HOME / "archive.jsonl", [m for m in rows if m.get("id") != arg])
+            hit["layer"] = "cortex"
+            hit.pop("archived_at", None)
+            hit["last_access"] = now_ts()
+            hot = load_all()
+            hot.append(hit)
+            save_all(hot)
+        print(f"已回捞 {arg} → 长期记忆（重新参与回忆）。")
+        return 0
+
+    # 默认 show
+    if not rows:
+        print("归档层是空的：还没有雪藏的记忆。")
+        return 0
+    rows.sort(key=lambda m: m.get("archived_at", m.get("created", 0)), reverse=True)
+    print(f"归档层 {len(rows)} 条（默认不参与 recall；archive search / restore 找回）：")
+    for m in rows[:max(limit, 1)]:
+        print(f"  {m['id']}  归档于 {fmt_time(m.get('archived_at', 0))} · {display_text(m)[:60]}")
     return 0
 
 
@@ -3818,6 +4081,8 @@ def _main(argv=None) -> int:
     p_rec.add_argument("query", nargs="*", default=[])
     p_rec.add_argument("--k", type=int, default=8)
     p_rec.add_argument("--json", action="store_true")
+    p_rec.add_argument("--include-archive", action="store_true",
+                       help="连归档层的冷记忆一起找（默认不搜归档）")
 
     p_inj = sub.add_parser("inject", help="生成记忆注入包")
     p_inj.add_argument("query", nargs="*", default=[])
@@ -3971,6 +4236,13 @@ def _main(argv=None) -> int:
     p_bak.add_argument("--out", default=None, help="目标目录或 zip 路径（默认 D:/brain-memory-backups 或桌面）")
     p_bak.add_argument("--keep", type=int, default=20, help="保留最近 N 份，删除更旧的（0=不修剪）")
 
+    p_arch = sub.add_parser("archive", help="冷热归档：把沉眠记忆雪藏出热查询集（原文保留，可随时回捞）")
+    p_arch.add_argument("action", nargs="?", default="show",
+                        choices=["show", "search", "restore", "run", "count"])
+    p_arch.add_argument("arg", nargs="?", default="", help="search：关键词 / restore：记忆 id")
+    p_arch.add_argument("--limit", type=int, default=20)
+    p_arch.add_argument("--dry-run", action="store_true", help="run：只预览可归档的，不落盘")
+
     p_res = sub.add_parser("restore", help="从备份恢复记忆库（恢复前自动留现状备份）")
     p_res.add_argument("archive", help="备份 zip 路径")
     p_res.add_argument("--yes", action="store_true", help="跳过确认")
@@ -4008,6 +4280,8 @@ def _main(argv=None) -> int:
             or (args.cmd == "config" and action in ("set", "unset"))
             or (args.cmd == "sync" and not args.dry_run)
             or (args.cmd == "review" and action in ("confirm", "discard"))
+            or (args.cmd == "archive" and (action == "restore"
+                                           or (action == "run" and not args.dry_run)))
             or (args.cmd == "assoc" and action in ("link", "unlink") )
             or (args.cmd == "assoc" and action == "auto" and not args.dry_run)
             or (args.cmd == "daily" and not args.dry_run)
@@ -4061,7 +4335,7 @@ def _main(argv=None) -> int:
             for m in recent(args.k):
                 _print_mem(m)
             return 0
-        results = recall(query, args.k)
+        results = recall(query, args.k, include_archive=args.include_archive)
         if args.json:
             print(json.dumps([{"memory": m, "score": s, "parts": p} for m, s, p in results], ensure_ascii=False, indent=2))
         else:
@@ -4862,6 +5136,9 @@ def _main(argv=None) -> int:
 
     if args.cmd == "backup":
         return cmd_backup(args.out, args.keep)
+
+    if args.cmd == "archive":
+        return cmd_archive(args.action, args.arg, args.limit, args.dry_run)
 
     if args.cmd == "restore":
         return cmd_restore(args.archive, args.yes)

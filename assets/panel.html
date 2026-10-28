@@ -113,6 +113,7 @@
   .badge.cortex{background:rgba(217,164,65,.12);color:#e3b96c}
   .badge.hippo{background:rgba(95,168,160,.12);color:#9fd2cb}
   .badge.dust{background:#191d23;color:#5d646e}
+  .badge.archive{background:rgba(120,120,160,.12);color:#8f92b8}
   .stars{color:var(--amber);font-size:10px;letter-spacing:1px}
   .date{color:var(--faint);font-size:11px;margin-left:auto;font-variant-numeric:tabular-nums}
   .mem p{margin:0;color:#d8d5ce;font-size:13.5px;word-break:break-word}
@@ -267,6 +268,7 @@
             <div class="metric"><div class="n" id="m-total">0</div><div class="l">总记忆</div></div>
             <div class="metric"><div class="n" id="m-cortex">0</div><div class="l">长期</div></div>
             <div class="metric"><div class="n" id="m-hippo">0</div><div class="l">短期</div></div>
+            <div class="metric"><div class="n" id="m-archive">0</div><div class="l">归档</div></div>
             <div class="metric"><div class="n" id="m-ret">0%</div><div class="l">保留率</div></div>
           </div>
         </div>
@@ -298,6 +300,7 @@
           <option value="cortex">长期记忆</option>
           <option value="hippo">短期记忆</option>
           <option value="dust">淡忘区</option>
+          <option value="archive">归档层</option>
         </select>
         <select id="impFilter">
           <option value="">重要性</option>
@@ -763,7 +766,7 @@ function applyReadonlyUI(ro){
   });
 }
 const KIND = {fact:"事实", preference:"偏好", emotion:"情绪", insight:"洞见", habit:"习惯", episode:"片段", identity:"身份"};
-const LAYER = {cortex:"长期", hippo:"短期", dust:"淡忘"};
+const LAYER = {cortex:"长期", hippo:"短期", dust:"淡忘", archive:"归档"};
 function tierLabel(t){
   return t === "small" ? "小模型模式（劝退自动 dreaming / 情绪评估）"
     : t === "large" ? "大模型模式" : "自动档";
@@ -872,6 +875,7 @@ function renderOverview(){
   $("m-total").textContent = st.total ?? 0;
   $("m-cortex").textContent = st.cortex ?? 0;
   $("m-hippo").textContent = st.hippo ?? 0;
+  $("m-archive").textContent = st.archive ?? 0;
   $("m-ret").textContent = Math.round((st.avg_retention || 0) * 100) + "%";
   const rc = ov.review_counts || {};
   const rcTotal = (rc.memories || 0) + (rc.knowledge || 0) + (rc.persona || 0);
@@ -905,6 +909,7 @@ function renderOverview(){
 
   $("stat-lines").innerHTML = [
     ["淡忘区", st.dust ?? 0],
+    ["归档层", st.archive ?? 0],
     ["置顶", st.pinned ?? 0],
     ["高频标签", (st.top_tags || []).slice(0, 4).map(x => x[0]).join("、") || "—"],
     ["情绪", st.mood || "还没记录"],
@@ -1101,7 +1106,7 @@ function renderDailyCards(){
 const GRAPH = { data: null, pos: [], yaw: 0.6, pitch: -0.35, dist: 360,
                 focus: {x: 0, y: 0, z: 0}, target: {x: 0, y: 0, z: 0}, targetDist: 360,
                 selected: null, hover: null, loaded: false, nbrs: null, anim: null };
-const LAYER_COLOR = { cortex: "#d9a441", hippo: "#5fa8a0", dust: "#5d646e" };
+const LAYER_COLOR = { cortex: "#d9a441", hippo: "#5fa8a0", dust: "#5d646e", archive: "#8f92b8" };
 
 function hashStr(s){
   let h = 2166136261;
@@ -1282,7 +1287,7 @@ function renderGraph(){
 }
 
 function docsOf(n){
-  return `${n.gist ? n.gist.slice(0, 40) : ""}${n.kind ? " · " + n.kind : ""} · 重要 ${Math.round((n.importance || 0) * 100)}% · ${LAYER_COLOR[n.layer] ? (n.layer === "cortex" ? "长期" : n.layer === "hippo" ? "短期" : "淡忘") : n.layer}${n.emotion ? ` · ♡ ${n.emotion}` : ""}`;
+  return `${n.gist ? n.gist.slice(0, 40) : ""}${n.kind ? " · " + n.kind : ""} · 重要 ${Math.round((n.importance || 0) * 100)}% · ${LAYER[n.layer] || n.layer || ""}${n.emotion ? ` · ♡ ${n.emotion}` : ""}`;
 }
 
 function focusGraphNode(i){

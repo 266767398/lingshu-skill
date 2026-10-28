@@ -2,7 +2,7 @@
 
 > 名字取自《黄帝内经》：**算力给思考，人格给灵魂，记忆给生命。**
 
-> 当前版本 **v2.9**（变更见 [CHANGELOG.md](CHANGELOG.md)）
+> 当前版本 **v2.10**（变更见 [CHANGELOG.md](CHANGELOG.md)）
 
 > ⚠️ **能力天花板（先读）**：灵枢是「提示词 + 脚本」的机制，**不能从底层强制约束模型**。当模型发生强幻觉时依然会无视全部规则；效果上限取决于底层大模型本身的推理、记忆与指令遵循能力。中强模型（7B+、云端）可完整遵守；**3B 以下本地小模型会出现大量规则漏执行**（忘走 startup、跳过写盘、纪律打折）——请据此降低预期，或改用 `SKILL-lite.md`（精简版）/ `SKILL-tiny.md`（最小试用版）。
 
@@ -50,8 +50,9 @@
 | **海马体**（hippo） | 短期：新写入的记忆，快速衰减 | 快（按访问衰减） |
 | **皮层**（cortex） | 长期：做梦/多次访问后巩固上来 | 慢 |
 | **淡忘区**（dust） | 久未访问、重要性低，自然遗忘 | 只留残余 |
+| **归档层**（archive） | 沉眠记忆雪藏（保留度 <0.2、重要度 ≤0.5、满月且长期没被想起）：**原文一字不丢**，移出热查询集，`recall` 默认不查 | 不衰减，可 `archive restore` 回热 |
 
-每条记忆按艾宾浩斯遗忘曲线衰减，但**访问会加固**（`recall` 命中即强化），重要性高的记忆衰减更慢，被置顶（`pinned`）的记忆永不遗忘。
+每条记忆按艾宾浩斯遗忘曲线衰减，但**访问会加固**（`recall` 命中即强化），重要性高的记忆衰减更慢，被置顶（`pinned`）的记忆永不遗忘。**冷热自动归档**：每次做梦时顺带把沉眠记忆雪藏进 archive 层（也可 `archive run` 手动），上万条记忆后热遍历集只扫活跃记忆——回忆速度不随记忆增长而变慢，需要时 `archive search` / `recall --include-archive` / `archive restore` 随时找回。
 
 ### 做梦：上下文将满时的整理
 
@@ -116,6 +117,8 @@
 ### 模糊联想回忆
 
 `recall` 不靠精确匹配：中文用字符二元组、英文/数字用词做模糊联想，按 **相关度 + 近期性 + 重要性 + 首因** 加权排序，并在命中后自动强化（越用越牢）。数字/编号被保留为独立词元，不会把"版本0"和"版本1"误当成同一条。
+
+**上万条也不慢**：带查询词时先用子串包含预筛剪枝候选（查询词必是来源文本连续子串，数学上不丢召回），只对命中候选做分词打分；无查询词（startup 注入）直接走快速路径，不再构建全量词表。实测 1 万条记忆 `recall` 从约 3.5s 降到 76ms（约 47 倍），`remember` 约 100ms。
 
 ## 人格
 
@@ -244,7 +247,7 @@ SYSTEM """你运行在本地，有记忆系统「灵枢」。每轮先按需执�
 - `recall` 模糊匹配要遍历全部记录，条数上万后每次命中会变慢（本地为毫秒级→百毫秒级，仍在可用区间）。
 - `dream` 会自动把一批短期记忆打包喂给模型，短期记忆越多，当次 token 消耗越大。
 
-**建议的养生方案**：每周一次 `backup`（默认保留最近 20 份，自动修剪）；长期不用的旧记忆用 `forget` 移入淡忘区（只留残余轮廓，不占活跃匹配）；知识库定期 `knowledge review` 确认。真到数据膨胀影响手感的层级，把 `--home` 指向新目录再 `restore` 最近备份，旧目录留档。
+**建议的养生方案**：每周一次 `backup`（默认保留最近 20 份，自动修剪）；沉眠记忆交给**冷热自动归档**（每次做梦顺带雪藏进 archive 层，或 `archive run` 手工触发），不用再手动逐条删除——需要时 `archive search` / `archive restore` 找回；知识库定期 `knowledge review` 确认。真到数据膨胀影响手感的层级，把 `--home` 指向新目录再 `restore` 最近备份，旧目录留档。
 
 ## 如何更新灵枢
 
@@ -300,6 +303,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 上下文水位 | `check-context --used 68`（60 清点 / 75 做梦 / 90 封存） |
 | 原样封存 | `capture "<原文>" [--tag 逃生]` |
 | 做梦 | `dream` / `dream --apply apply.json` / `dream --auto` |
+| 冷热归档 | `archive show\|search <词>\|restore <id>\|run [--dry-run]\|count`（沉眠记忆自动雪藏，原文保留可回捞） |
 | 人格 | `persona show\|set traits.幽默=70\|sync\|path\|interview\|self\|lock\|unlock\|history [--limit]\|rollback <序号>\|snapshot [--label]\|snapshots\|restore <名字>\|drift [--days 7] [--json]` |
 | 情绪 | `emotion now\|arc\|list\|feel\|evaluate\|mirror\|desire\|config\|events\|adjust <序号>\|del <序号>\|cool` |
 | 工作记忆 | `work status\|add\|list\|done <序号>\|flush [--skip-done]\|clear` |
@@ -351,6 +355,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 ├── hippocampus.jsonl       # 短期记忆（海马体）
 ├── cortex.jsonl            # 长期记忆（皮层）
 ├── dust.jsonl              # 淡忘区
+├── archive.jsonl           # 归档层（冷热自动归档的沉眠记忆，原文保留）
 ├── working.jsonl           # 工作记忆（会话暂存）
 ├── emotions.jsonl          # 情绪事件流（心情按半衰期从这里叠加出来）
 ├── desires.json            # 六欲状态（生、耳目口鼻感官欲等底层需要）

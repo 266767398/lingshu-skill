@@ -56,7 +56,7 @@ def memory_view(m: dict) -> dict:
 
 
 def overview() -> dict:
-    records = brain.load_all()
+    records = brain.load_all() + brain.load_archive()
     ordered = sorted(records, key=lambda m: m.get("created", 0), reverse=True)
     dreams = []
     ddir = brain.HOME / "dreams"
@@ -138,7 +138,7 @@ def filtered_memories(url) -> list:
     since = brain.now_ts() - days * 86400 if days else 0
 
     rows = []
-    for m in brain.load_all():
+    for m in brain.load_all() + brain.load_archive():
         if layer and m.get("layer") != layer:
             continue
         if tag and tag not in [str(t).lower() for t in (m.get("tags") or [])]:

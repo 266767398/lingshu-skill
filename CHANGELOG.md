@@ -2,6 +2,35 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.10 — 冷热归档 + 万条性能：回忆不再随记忆增长变慢
+
+记忆上万条后，逐个 JSONL 全量 read + 正则分词的 recall/remember 会线性变慢；且冷数据只能靠手动 `forget` / `backup` 处理。本版本引入**冷热归档层** + **候选剪枝预筛**，让"记忆越多越卡"变成"记忆越多越有条理"。
+
+**冷热归档（新的 archive 层）**
+
+- 新增第 4 层 `archive`（`archive.jsonl`）：把**沉眠记忆**（保留度 < 0.20、重要度 ≤ 0.5、创建满 30 天、从未被想起或静置超 180 天，且非置顶/封存/身份/待审核）雪藏出热查询集。与 `dust`（淡忘：细节被模糊）不同，归档**原文一字不丢**、永不删，`recall` 默认不查、需要时一键找回。
+- 自动触发：`dream` 每次做梦时顺带执行（本来就全量遍历，零额外成本），在淡忘（dust）判断**之前**，让"久到想不起的"先雪藏而不是被模糊掉。
+- 手动命令：`archive run`（立即归档，`--dry-run` 预览）/ `archive show` / `archive search <词>` / `archive restore <id>`（回热到 cortex）/ `archive count`。
+- `recall --include-archive` 连归档层一起模糊回忆；`audit` / `stats` / 面板层筛选与统计都认识归档层。
+- 归档记忆被 recall 命中时只读不强化，防止悄悄改写入库文件。
+
+**recall / remember 候选剪枝（性能主解）**
+
+- 带查询词的 `recall` 先做**廉价子串包含预筛**（term 必然是其来源文本的连续子串，数学上不丢召回），只对命中候选做正则分词 + IDF + 打分；`remember` 的近重复检测同样先预筛再算 jaccard。
+- 无查询词（startup 注入）不再构建全量 terms/idf（relevance 恒为 0），只跑轻量打分。
+- recall 强化写回从"整库 merge + 全量重写 3 文件"改为**只重写命中记忆所在层**（`_strengthen_write`）。
+- 实测（1 万条记忆）：`recall` 3.5s → **76ms（约 47 倍）**；`recall` 无查询词 3.5s → **68ms**；`remember` ∈ 100ms。
+
+**并发稳定性根治（Windows read-replace 竞态）**
+
+- 顺带修掉一个 v2.9 就存在的隐性竞态：`remember` 此前**锁外先 `load_all()` 读、锁内 `save_all` 原子替换**，并发写的另一个进程覆盖"正在被读"的文件会在 Windows 上抛 `PermissionError`（rc=2，偶发丢条目）。现在 `remember` 的读-改-写**整体入锁**。
+- `write_jsonl` 的 `os.replace` 加短暂重试：其他无锁读进程（stats/面板）短暂持有句柄时不再一次失败。
+- 实测：16 remember + dream + forget + archive run **混合并发**，全部成功、记忆数不丢、无锁残留；24 并发 remember 全通过。
+
+**文档同步**
+
+- 版本号 2.9→2.10（SKILL / lite / tiny / README）；README 增加 `archive` 命令表与性能说明；本 CHANGELOG 新增本条。
+
 ## v2.9 — 第三轮审查：数据安全与一致性修复
 
 对全部脚本与面板做第三轮只读审查 + 实测回归，按"真影响使用"修复残留问题：
