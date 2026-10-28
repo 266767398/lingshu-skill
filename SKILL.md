@@ -129,13 +129,13 @@ python scripts/brain.py mode show|work|human|auto
 
 写代码前想亲手清掉余波：`emotion cool`（24h 内强情绪整体降温）或 `emotion adjust <序号>` 微调单条。
 
-## 审核闸：AI 产物先过目（防幻觉沉淀）
+## 审核闸：AI 产物先过目，AI 自己审（防幻觉沉淀）
 
 你既是整理者又可能是编造者，幻觉会沿"记忆→做梦→知识库→人格"逐层沉淀。规矩：
 
-- **你参与整理出的记忆 / 知识、以及你发起的任何人格变更，都必须先经用户确认才算数。**
+- **你参与整理出的记忆 / 知识、以及你发起的任何人格变更，一律先标 pending，由你自己复核确认才算数；用户随时可介入复核。**
 - AI 整理的记忆标 `review="pending"`、知识标 `status="pending"`；人格变更自带 `source` / `evidence`（依据的记忆 id），`persona history` 可溯源。
-- 过目：`review` 看全部待审项 → `review confirm <id>` 转正 / `review discard <id>` 废弃（记忆 `m_*` 与知识 `k_*` 通用）；整体自查用 `audit`。
+- 自审：`review` 看全部待审项 → `review confirm <id>` 转正 / `review discard <id>` 废弃（记忆 `m_*` 与知识 `k_*` 通用）；整体自查用 `audit`。
 - 注入包出现 `[待审核]` / `[人格漂移]` 时，先处理再继续，别让幻觉静默沉淀。
 - 人格改错了：`persona history` 看来源 → `persona rollback <序号>` 撤；大改前 `persona snapshot --label "基准"` 拍快照，跑偏了 `persona restore <名字>`。
 
@@ -189,7 +189,7 @@ python scripts/brain.py ext rm <名字>                    # 删除
 
 - [ ] 跑了 `startup --query "..."`，返回码 0（10=只读、2=未初始化、64=命令写错）
 - [ ] 看见注入包里的"心里还惦记的未完成事"，相关的先 `work done` 或继续
-- [ ] 注入包里有 `[待审核]` / `[人格漂移]` → 先 `review` / `persona drift` 处理
+- [ ] 注入包里有 `[待审核]` / `[人格漂移]` → 先 `review` / `persona drift` **自己确认或废弃，别等用户催**
 - [ ] 本轮是工程任务（写代码/排错/数据）→ 确认 `mode` 为 work 或 auto，情绪不进工作会话
 
 会话中（触发了才做）：
