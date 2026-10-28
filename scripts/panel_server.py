@@ -175,25 +175,70 @@ def filtered_memories(url) -> list:
 
 
 def workspace() -> dict:
-    return {
-        "status": growth.growth_status(),
-        "knowledge": growth.list_knowledge(limit=100),
-        "knowledge_stats": growth.knowledge_stats(),
-        "tidy": growth.tidy_state(),
-        "notes": growth.list_notes(limit=100),
-        "note_stats": growth.note_stats(),
-        "skills": growth.list_skills(),
-        "dsh_plugins": growth.list_dsh_plugins(),
-        "evolution": growth.load_evolution(limit=30),
-        "onboarding": brain.onboarding_state(),
-        "readonly": bool(brain.READONLY),
-        "model_tier": brain.model_tier(),
-        "pending_knowledge": growth.knowledge_pending(),
-    }
+    """工作台数据汇总。任何一块读取失败都降级成空值并记日志——
+    否则一个坏掉的 knowledge/notes 文件会让所有写接口在写成功之后报 400，
+    前端以为失败又重试，等于重复写入。"""
+    out: dict = {}
+    errors: list = []
+
+    def safe(label, fn, fallback):
+        try:
+            out[label] = fn()
+        except Exception as exc:   # noqa: BLE001 —— 单块失败不影响其它块
+            out[label] = fallback
+            errors.append(f"{label}: {exc}")
+            brain.log_event("panel", f"workspace 读取 {label} 失败：{exc}", level="error")
+
+    safe("status", growth.growth_status, {})
+    safe("knowledge", lambda: growth.list_knowledge(limit=100), [])
+    safe("knowledge_stats", growth.knowledge_stats, {})
+    safe("tidy", growth.tidy_state, {})
+    safe("notes", lambda: growth.list_notes(limit=100), [])
+    safe("note_stats", growth.note_stats, {})
+    safe("skills", growth.list_skills, [])
+    safe("dsh_plugins", growth.list_dsh_plugins, [])
+    safe("evolution", lambda: growth.load_evolution(limit=30), [])
+    safe("onboarding", brain.onboarding_state, {})
+    safe("pending_knowledge", growth.knowledge_pending, [])
+    out["readonly"] = bool(brain.READONLY)
+    out["model_tier"] = brain.model_tier()
+    if errors:
+        out["workspace_errors"] = errors
+    return out
+
+
+def _bad_list(data: dict, *keys) -> str | None:
+    """这些字段必须是数组（前端传字符串会被当成字符列表逐字拆开）。"""
+    for key in keys:
+        val = data.get(key)
+        if val is not None and not isinstance(val, list):
+            return f"{key} 必须是数组"
+    return None
+
+
+# 这些写端点里有只读 action：只读模式下按 action 放行（skill 的 list/check/show、
+# emotion 的 now/check），别把纯查询按钮也一刀切 403
+_READONLY_ACTIONS = {
+    "/api/skill": {"", "list", "check", "show"},
+    "/api/emotion": {"", "now", "check"},
+}
+
+
+def _readonly_allowed(path: str, data: dict) -> bool:
+    if path == "/api/daily" and bool(data.get("dry_run")):
+        return True
+    if path == "/api/skill/self-review":
+        return True
+    allowed = _READONLY_ACTIONS.get(path)
+    if allowed is None:
+        return False
+    return str(data.get("action") or "") in allowed
 
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "LingShuPanel/1.0"
+    # 慢/坏客户端最多等 30 秒：没有这个，不读完请求体的连接能让线程永久挂住
+    timeout = 30
 
     def log_message(self, fmt, *args):
         pass
@@ -382,14 +427,9 @@ class Handler(BaseHTTPRequestHandler):
         if data is None:
             return
         # 只读门控：写接口在数据目录不可写时直接 403（展示/预览接口放行）
-        if brain.READONLY and path in _WRITE_ENDPOINTS:
-            # 预览类不写盘：daily 的 dry_run 预演、self-review（内部自带只读保护）应放行，
-            # 否则面板上这两个"只读按钮"在只读模式下会莫名 403
-            preview_ok = ((path == "/api/daily" and bool(data.get("dry_run")))
-                          or path == "/api/skill/self-review")
-            if not preview_ok:
-                self._json({"error": "readonly", "message": "数据目录当前只读，写操作已被禁用。"}, 403)
-                return
+        if brain.READONLY and path in _WRITE_ENDPOINTS and not _readonly_allowed(path, data):
+            self._json({"error": "readonly", "message": "数据目录当前只读，写操作已被禁用。"}, 403)
+            return
         try:
             if path == "/api/remember":
                 text = (data.get("text") or "").strip()
@@ -420,20 +460,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/persona/state":
-                p = brain.load_persona()
-                st = p.setdefault("state", {})
-                for key in ("mood", "mood_note"):
-                    if key in data:
-                        st[key] = data[key]
-                for key in ("energy", "closeness"):
-                    if key in data:
-                        st[key] = max(0, min(100, int(data[key])))
-                st["updated"] = brain.now_ts()
-                p.setdefault("history", []).append({
-                    "ts": brain.now_ts(), "field": "state", "from": None,
-                    "to": {k: data[k] for k in data}, "why": "面板编辑",
-                })
-                brain.save_persona(p)
+                # 读-改-写整段加锁：否则和 CLI/做梦的并发人格写入互相覆盖
+                with brain._locked(brain.HOME / "persona.json"):
+                    p = brain.load_persona()
+                    st = p.setdefault("state", {})
+                    for key in ("mood", "mood_note"):
+                        if key in data:
+                            st[key] = data[key]
+                    for key in ("energy", "closeness"):
+                        if key in data:
+                            st[key] = max(0, min(100, int(data[key])))
+                    st["updated"] = brain.now_ts()
+                    p.setdefault("history", []).append({
+                        "ts": brain.now_ts(), "field": "state", "from": None,
+                        "to": {k: data[k] for k in data}, "why": "面板编辑",
+                    })
+                    brain.save_persona(p)
                 self._json({"ok": True, "persona": p})
                 return
 
@@ -555,9 +597,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/daily":
-                r = brain.daily(dry_run=bool(data.get("dry_run")), force=bool(data.get("force")))
-                self._json({"ok": True, "result": r, "overview": overview() if not data.get("dry_run") else None,
-                            "workspace": workspace() if not data.get("dry_run") else None})
+                dry = bool(data.get("dry_run"))
+                # 真跑会整理/归档记忆：必须显式 confirm，避免空 body 的误触/重放直接写盘
+                if not dry and data.get("confirm") is not True:
+                    self._json({"error": "真跑每日整理需要显式传 confirm: true（或用 dry_run 先预演）"}, 400)
+                    return
+                r = brain.daily(dry_run=dry, force=bool(data.get("force")))
+                self._json({"ok": True, "result": r, "overview": overview() if not dry else None,
+                            "workspace": workspace() if not dry else None})
                 return
 
             if path == "/api/skill/self-review":
@@ -570,6 +617,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/dream":
+                # 做梦会重放/巩固/遗忘记忆：必须显式 confirm，空 body 不触发真实写盘
+                if data.get("confirm") is not True:
+                    self._json({"error": "开始做梦需要显式传 confirm: true"}, 400)
+                    return
                 report = brain.dream(trigger="panel")
                 self._json({"ok": True, "report": report, "overview": overview()})
                 return
@@ -639,6 +690,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/knowledge":
                 act = data.get("action", "add")
+                if act in ("add", "update"):
+                    bad = _bad_list(data, "points", "tags", "entities")
+                    if bad:
+                        self._json({"error": bad}, 400)
+                        return
                 if act == "add":
                     rec, how = growth.add_knowledge(
                         data.get("title", ""), data.get("body", ""), data.get("topic", ""),
@@ -672,6 +728,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/note":
                 act = data.get("action", "write")
+                if act in ("write", "update"):
+                    bad = _bad_list(data, "tags", "memory_ids")
+                    if bad:
+                        self._json({"error": bad}, 400)
+                        return
                 if act == "write":
                     rec, how = growth.write_note(
                         data.get("type", "journal"), data.get("title", ""), data.get("body", ""),
@@ -722,6 +783,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "checks": growth.check_skill(data.get("name"))})
                 elif act == "show":
                     self._json({"ok": True, "skill": growth.read_skill(data.get("name", ""))})
+                elif act == "list":
+                    self._json({"ok": True, "skills": growth.list_skills(), "workspace": workspace()})
                 else:
                     self._json({"error": "未知操作"}, 400)
                 return
@@ -815,6 +878,7 @@ def serve(port: int = 8765, open_browser: bool = True) -> None:
         print(f"[错误] 端口 {port} 被占用或不可用：{exc}", file=sys.stderr)
         print("换一个端口试试：python scripts/panel_server.py --port 8766", file=sys.stderr)
         raise SystemExit(1) from exc
+    httpd.daemon_threads = True   # 退出时不等挂住的请求线程，防止 Ctrl+C 后进程残留
     url = f"http://127.0.0.1:{port}"
     print(f"灵枢 · 记忆面板：{url}")
     print(f"记忆库：{brain.HOME}")

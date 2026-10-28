@@ -17,6 +17,23 @@
 - **面板**：非法 JSON 请求体返回 400（此前静默当空操作）；`FileExistsError` 归入 409；只读模式下 daily 预览、自我总结这两个"只读按钮"放行；面板卸载加白名单（只能卸灵枢装过的技能）；安装灵枢时先弹风险告知再装；删除失败会提示而不是假成功；记忆搜索防抖 + 丢弃乱序旧响应。
 - **数据落盘**：`save_all` 三文件先全写临时文件再一次替换（把"存一半"窗口压到最小）；`.corrupt` 坏块备份去重（修不动时不再每读一次就追加一遍）；`cluster_memories` 聚类池上限 400，防止记忆库变大后每晚巩固被 O(n²) 卡住。
 
+### v2.12 第二轮：并发写不再互相吞、面板不再假成功
+
+再往下一层查并发与面板交互，补的都是"平时看不出来、真撞上就丢数据"的点：
+
+- **写锁支持同线程重入**：`_locked` 发现本线程已持同一把锁时直接进入，不再傻等 10s 后超时。此前给"读-改-写"补锁时，`update_persona → save_persona` 这类嵌套会把自己锁死。
+- **人格读-改-写整体加锁**：`update_persona` / `set_persona_field` / `persona_rollback` / `edit_persona` / `persona_interview` / `persona_self_author` / `mind_set` / `mind_tune` / `persona_restore` / `save_emotion_cfg` 与面板 `persona/state`、CLI `persona lock/unlock` 统一走 `persona.json` 写锁。此前两个改动各自 load 旧档，后写者会把先写者改的字段覆盖回旧值。
+- **联想边与配置/欲望加锁**：`link_memory` / `unlink_memory`（`assoc.jsonl`）、`config_set` / `config_unset`（`config.json`）、`desire_satisfy`（`desires.json`）都改成锁内读-改-写，权重累加与配置项不再丢更新。
+- **`apply_dream` 原子化**：pending 的读取、task_id 校验、记忆写入与消费现在都在同一把锁里。并发/重复 apply 第二进锁就会因 pending 已删而拒绝，不会把同一场梦沉淀两遍；`memories` 非对象、`importance` 非数字、`source_ids` 非字符串一律防御性跳过；梦境笔记写失败不再把已成功的应用报成错误。
+- **`add_knowledge` / `write_note` / `update_note` / `delete_note` 加锁**：并发写入不再各自用旧快照覆盖，相似知识合并与同日日记追加都能稳定命中。
+- **`skill install --force` 镜像式更新**：源里已删除的文件会从全局副本一并清掉（AGENTS.md 除外），不再留着旧脚本/旧资源被宿主继续扫描加载；清理动作记入运行日志。
+- **面板 `workspace()` 防御化**：任一块数据读取失败只降级成空值并记日志，不再让"写已经成功"的接口整体报 400 诱发重复写。
+- **面板空请求体不再触发真实写**：`/api/daily` 真跑与 `/api/dream` 都必须显式带 `confirm: true`（前端已同步），空 body / 误触 / 重放不会直接整理或做梦。
+- **面板参数校验**：`/api/knowledge` 的 `points/tags/entities`、`/api/note` 的 `tags/memory_ids` 必须是数组，传字符串会被逐字拆碎的问题被挡住。
+- **只读模式按 action 放行**：`/api/skill` 的 list/check/show、`/api/emotion` 的 now/check 在只读目录下不再被整端点 403。
+- **`/api/skill` 补上 `list`**：该端点默认 action 就是 `list`，但此前没有对应分支，不带 action 的请求直接 400「未知操作」。
+- **面板前端**：技能版本号、知识版本号、情绪分组名全部 `esc()` 转义（存储型 XSS）；淡忘、知识废弃/删除、笔记删除都会检查 `ok`，不再"假成功"；慢连接 30s 超时 + `daemon_threads`，坏客户端挂不住面板进程。
+
 ## v2.11.4 — 更新不丢东西：重置前先留档、安装源防呆、删目录前核路径
 
 围绕"更新会不会把人格/记忆/技能弄丢"做的加固，都是"少一步手滑、多一层兜底"：

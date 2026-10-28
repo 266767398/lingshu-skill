@@ -1127,9 +1127,9 @@ function renderMood(){
     grpEl.innerHTML = gs.length
       ? gs.map(g => `
           <div class="desire-row">
-            <span style="width:36px">${g.group}</span>
-            <span class="bar"><i style="width:${g.pct}%;background:var(--accent)"></i></span>
-            <span style="width:44px;text-align:right">${g.pct}%</span>
+            <span style="width:36px">${esc(g.group)}</span>
+            <span class="bar"><i style="width:${Number(g.pct) || 0}%;background:var(--accent)"></i></span>
+            <span style="width:44px;text-align:right">${Number(g.pct) || 0}%</span>
           </div>`).join("")
       : `<div class="empty">没有正在起作用的情绪</div>`;
   }
@@ -1630,7 +1630,7 @@ function kgCard(k){
     <div class="mem-body" style="width:100%">
       <div class="mem-top">
         <span class="badge cortex">${esc(k.topic || "未分类")}</span>
-        <span class="badge">v${k.version || 1}</span>
+        <span class="badge">v${esc(k.version || 1)}</span>
         ${stBadge}
         ${k.pinned ? '<span class="badge">★ 置顶</span>' : ""}
         <span class="date">${esc(new Date((k.updated || 0) * 1000).toLocaleDateString("zh-CN"))}</span>
@@ -1704,7 +1704,7 @@ function renderSkills(out){
       <div class="mem-body" style="width:100%">
         <div class="mem-top">
           <span class="badge cortex">${esc(s.name)}</span>
-          <span class="badge">v${s.version}</span>
+          <span class="badge">v${esc(s.version)}</span>
           <span class="badge">${s.lines} 行</span>
           ${s.agents ? '<span class="badge">AGENTS.md</span>' : ""}
           <span class="date">${s.installed ? "已安装到全局" : "未安装"}</span>
@@ -1856,6 +1856,8 @@ async function renderMemoryList(){
 
 async function doSearch(){
   const q = $("search").value.trim();
+  clearTimeout(_memTimer);            // 取消挂起的筛选刷新，别让它覆盖搜索结果
+  _memSeq++;                          // 使任何在途的旧列表请求失效
   if (!q) { renderMemoryList(); return; }
   try {
     const rows = await api("/api/search?q=" + encodeURIComponent(q) + "&k=30");
@@ -1977,9 +1979,9 @@ $("mem-list").addEventListener("click", async (e) => {
     }
     if (fg) {
       if (!confirm("把这条记忆移入淡忘区？它会保留模糊的轮廓。")) return;
-      await api("/api/forget", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: fg.dataset.forget})});
-      toast("已淡忘");
-      load();
+      const r = await api("/api/forget", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: fg.dataset.forget})});
+      if (r.ok) { toast("已淡忘"); load(); }
+      else toast(r.error || "淡忘失败（可能已被删/不存在）", true);
     }
     if (ed) {
       const m = findMem(ed.dataset.edit);
@@ -2172,7 +2174,7 @@ if (btnDailyR) btnDailyR.addEventListener("click", async () => {
   const btn = btnDailyR;
   btn.disabled = true; btn.textContent = "正在例行…";
   try {
-    const r = await api("/api/daily", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({})});
+    const r = await api("/api/daily", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({confirm: true})});
     const res = r.result || {};
     if (res.skipped) { toast("今天已经例行过了"); }
     else {
@@ -2224,7 +2226,7 @@ $("btn-dream").addEventListener("click", async () => {
   const btn = $("btn-dream");
   btn.disabled = true; btn.textContent = "正在入睡…";
   try {
-    const r = await api("/api/dream", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+    const r = await api("/api/dream", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({confirm: true})});
     const rep = r.report;
     $("dream-summary").innerHTML = `重放 ${(rep.clusters || []).reduce((a, c) => a + c.texts.length, 0)} 条 / ${(rep.clusters || []).length} 组 · 巩固 ${rep.promoted.length} 条 · 淡忘 ${rep.forgotten.length} 条 · 模糊化 ${rep.faded} 条`;
     S.ov = r.overview; renderOverview(); renderMemoryList();
@@ -2442,7 +2444,8 @@ $("kg-list").addEventListener("click", async (e) => {
     }
     if (dis) {
       if (!confirm("标记为废弃？它会被移出知识库（历史仍保留在文件里）。")) return;
-      await post("/api/knowledge", {action: "discard", id: dis.dataset.kgdiscard});
+      const r = await post("/api/knowledge", {action: "discard", id: dis.dataset.kgdiscard});
+      if (!r.ok) { toast(r.error || "废弃失败（可能已被删/不存在）", true); return; }
       toast("已废弃");
       await loadWS();
       return;
@@ -2464,7 +2467,8 @@ $("kg-list").addEventListener("click", async (e) => {
     }
     if (del) {
       if (!confirm("删除这条知识？")) return;
-      await post("/api/knowledge", {action: "delete", id: del.dataset.kgdel});
+      const r = await post("/api/knowledge", {action: "delete", id: del.dataset.kgdel});
+      if (!r.ok) { toast(r.error || "删除失败（可能已被删/不存在）", true); return; }
       toast("已删除");
       await loadWS();
     }
@@ -2534,7 +2538,8 @@ $("note-list").addEventListener("click", async (e) => {
     }
     if (del) {
       if (!confirm("删除这篇笔记？")) return;
-      await post("/api/note", {action: "delete", id: del.dataset.ndel});
+      const r = await post("/api/note", {action: "delete", id: del.dataset.ndel});
+      if (!r.ok) { toast(r.error || "删除失败（可能已被删/不存在）", true); return; }
       toast("已删除");
       await loadWS();
     }

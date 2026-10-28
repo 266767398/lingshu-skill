@@ -150,32 +150,35 @@ def add_knowledge(title: str, body: str, topic: str = "", points=None, tags=None
     if not title:
         raise ValueError("知识需要一个标题或正文")
 
-    rows = load_knowledge()
-    new_title_terms = brain.terms(title)
-    for old in rows:
-        # 废弃（discarded）条目不能被合并复活：新内容写进去也永远搜不到
-        if old.get("status") == "discarded":
-            continue
-        # 只在标题几乎相同（或包含关系极强）时合并，避免把同主题的不同结论揉成一条
-        if brain.jaccard(new_title_terms, brain.terms(old.get("title", ""))) >= 0.75:
-            old_body = str(old.get("body") or "")
-            if body and body not in old_body:
-                old["body"] = (old_body + "\n\n" + body).strip()
-            old["points"] = _dedupe((old.get("points") or []) + list(points or []))
-            old["tags"] = _dedupe((old.get("tags") or []) + list(tags or []))
-            old["entities"] = _dedupe((old.get("entities") or []) + list(entities or []))
-            old["source_ids"] = _dedupe((old.get("source_ids") or []) + list(source_ids or []))
-            old["topic"] = old.get("topic") or topic
-            old["updated"] = brain.now_ts()
-            old["version"] = int(old.get("version", 1)) + 1
-            old.setdefault("history", []).append(
-                {"ts": old["updated"], "why": "写入时合并相似条目", "version": old["version"]})
-            save_knowledge(rows)
-            return old, "merged"
+    # 读-改-写整段加锁：否则两个并发 add（面板/CLI/做梦同时写）各自的快照会互相
+    # 吞掉对方的合并或新增；save_knowledge 内部用的是同一把锁（可重入），不冲突。
+    with brain._locked(KNOWLEDGE_FILE):
+        rows = load_knowledge()
+        new_title_terms = brain.terms(title)
+        for old in rows:
+            # 废弃（discarded）条目不能被合并复活：新内容写进去也永远搜不到
+            if old.get("status") == "discarded":
+                continue
+            # 只在标题几乎相同（或包含关系极强）时合并，避免把同主题的不同结论揉成一条
+            if brain.jaccard(new_title_terms, brain.terms(old.get("title", ""))) >= 0.75:
+                old_body = str(old.get("body") or "")
+                if body and body not in old_body:
+                    old["body"] = (old_body + "\n\n" + body).strip()
+                old["points"] = _dedupe((old.get("points") or []) + list(points or []))
+                old["tags"] = _dedupe((old.get("tags") or []) + list(tags or []))
+                old["entities"] = _dedupe((old.get("entities") or []) + list(entities or []))
+                old["source_ids"] = _dedupe((old.get("source_ids") or []) + list(source_ids or []))
+                old["topic"] = old.get("topic") or topic
+                old["updated"] = brain.now_ts()
+                old["version"] = int(old.get("version", 1)) + 1
+                old.setdefault("history", []).append(
+                    {"ts": old["updated"], "why": "写入时合并相似条目", "version": old["version"]})
+                save_knowledge(rows)
+                return old, "merged"
 
-    rec = _new_knowledge(title, body, topic, points, tags, entities, source_ids, confidence)
-    rows.append(rec)
-    save_knowledge(rows)
+        rec = _new_knowledge(title, body, topic, points, tags, entities, source_ids, confidence)
+        rows.append(rec)
+        save_knowledge(rows)
     return rec, "created"
 
 
@@ -514,61 +517,64 @@ def write_note(kind: str, title: str, body: str, mood: str = "", tags=None,
     kind = kind if kind in NOTE_KINDS else "journal"
     body = (body or "").strip()
     title = (title or "").strip() or _clip(body, 20) or "无题"
-    rows = load_notes()
     today = _today()
+    # 读-改-写整段加锁（save_notes 用同一把锁，可重入）：避免并发写笔记互相覆盖
+    with brain._locked(NOTES_FILE):
+        rows = load_notes()
+        if append_same_day and kind == "journal":
+            for old in rows:
+                if old.get("type") == kind and old.get("date") == today and old.get("title") == title:
+                    old["body"] = (old.get("body", "") + "\n\n" + body).strip()
+                    old["updated"] = brain.now_ts()
+                    old["mood"] = mood or old.get("mood", "")
+                    old["tags"] = _dedupe((old.get("tags") or []) + list(tags or []))
+                    old["memory_ids"] = _dedupe((old.get("memory_ids") or []) + list(memory_ids or []))
+                    save_notes(rows)
+                    return old, "appended"
 
-    if append_same_day and kind == "journal":
-        for old in rows:
-            if old.get("type") == kind and old.get("date") == today and old.get("title") == title:
-                old["body"] = (old.get("body", "") + "\n\n" + body).strip()
-                old["updated"] = brain.now_ts()
-                old["mood"] = mood or old.get("mood", "")
-                old["tags"] = _dedupe((old.get("tags") or []) + list(tags or []))
-                old["memory_ids"] = _dedupe((old.get("memory_ids") or []) + list(memory_ids or []))
-                save_notes(rows)
-                return old, "appended"
-
-    now = brain.now_ts()
-    rec = {
-        "id": _uid("n_", title),
-        "date": today,
-        "type": kind,
-        "title": title,
-        "body": body,
-        "mood": mood or "",
-        "tags": _dedupe(list(tags or [])),
-        "memory_ids": _dedupe(list(memory_ids or [])),
-        "created": now,
-        "updated": now,
-    }
-    rows.append(rec)
-    save_notes(rows)
+        now = brain.now_ts()
+        rec = {
+            "id": _uid("n_", title),
+            "date": today,
+            "type": kind,
+            "title": title,
+            "body": body,
+            "mood": mood or "",
+            "tags": _dedupe(list(tags or [])),
+            "memory_ids": _dedupe(list(memory_ids or [])),
+            "created": now,
+            "updated": now,
+        }
+        rows.append(rec)
+        save_notes(rows)
     return rec, "created"
 
 
 def update_note(nid: str, **fields) -> dict:
-    rows = load_notes()
-    rec = next((r for r in rows if r["id"] == nid), None)
-    if not rec:
-        raise KeyError(f"没有这条笔记：{nid}")
-    for key in ("title", "body", "mood"):
-        if fields.get(key) is not None:
-            rec[key] = str(fields[key]).strip()
-    for key in ("tags", "memory_ids"):
-        if fields.get(key) is not None:
-            rec[key] = _dedupe(list(fields[key]))
-    rec["updated"] = brain.now_ts()
-    save_notes(rows)
+    with brain._locked(NOTES_FILE):
+        rows = load_notes()
+        rec = next((r for r in rows if r["id"] == nid), None)
+        if not rec:
+            raise KeyError(f"没有这条笔记：{nid}")
+        for key in ("title", "body", "mood"):
+            if fields.get(key) is not None:
+                rec[key] = str(fields[key]).strip()
+        for key in ("tags", "memory_ids"):
+            if fields.get(key) is not None:
+                rec[key] = _dedupe(list(fields[key]))
+        rec["updated"] = brain.now_ts()
+        save_notes(rows)
     return rec
 
 
 def delete_note(nid: str) -> bool:
-    rows = load_notes()
-    keep = [r for r in rows if r["id"] != nid]
-    if len(keep) == len(rows):
-        return False
-    save_notes(keep)
-    return True
+    with brain._locked(NOTES_FILE):
+        rows = load_notes()
+        keep = [r for r in rows if r["id"] != nid]
+        if len(keep) == len(rows):
+            return False
+        save_notes(keep)
+        return True
 
 
 def list_notes(kind: str | None = None, days: int | None = None, limit: int = 60) -> list:
@@ -1138,6 +1144,7 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
     generated = _agents_md(name, meta.get("description", ""), meta, from_dir)
     dst_dir.mkdir(parents=True, exist_ok=True)
     # 整目录复制（跳过缓存、临时文件与源仓库的 .git 历史），保留 scripts/ assets/ 等运行时资源
+    copied = set()
     for item in src_dir.rglob("*"):
         if item.is_dir() or "__pycache__" in item.parts or ".git" in item.parts:
             continue
@@ -1147,6 +1154,32 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
         target = dst_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(item, target)
+        copied.add(rel.as_posix())
+    # --force 是"以源为准"的镜像更新：源里已经删掉的文件，目标里也要清掉，
+    # 否则旧脚本/旧资源会一直留在全局副本里（新版改了名，旧文件仍被加载/扫描）。
+    removed = []
+    if force and dst_dir.exists():
+        for old in list(dst_dir.rglob("*")):
+            if old.is_dir() or "__pycache__" in old.parts:
+                continue
+            rel = old.relative_to(dst_dir).as_posix()
+            if rel in copied or rel == "AGENTS.md":
+                continue
+            try:
+                old.unlink()
+                removed.append(rel)
+            except OSError:
+                pass
+        # 顺手清掉删空后的子目录（不动 dst_dir 本身）
+        for d in sorted((x for x in dst_dir.rglob("*") if x.is_dir()), reverse=True):
+            try:
+                if d != dst_dir and not any(d.iterdir()):
+                    d.rmdir()
+            except OSError:
+                pass
+        if removed:
+            brain.log_event("skill", f"安装 {name} 时清理了 {len(removed)} 个源中已删除的文件",
+                            files=removed[:20])
     # AGENTS.md：DSH/DeepSeek 常驻入口。
     # 区块化维护：灵枢只写 <!-- lingshu:start/end --> 之间的规则，
     # 用户手写部分（DSH 只读保护、全局目录指回等）更新永不覆盖。

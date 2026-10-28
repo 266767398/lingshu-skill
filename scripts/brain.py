@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import zipfile
 from contextlib import contextmanager, nullcontext
@@ -244,7 +245,6 @@ _NUMERIC_CONFIG_KEYS = {"budget_tokens", "review_threshold", "dream_threshold",
 
 def config_set(key: str, value: str) -> dict:
     """改一项配置（值能当 JSON 解析就当 JSON，否则按字符串存）。"""
-    cfg = load_config()
     try:
         val = json.loads(value)
     except Exception:
@@ -269,17 +269,20 @@ def config_set(key: str, value: str) -> dict:
             if not (1 <= num <= 65535):
                 raise ValueError(f"panel_port 需要在 1~65535 之间，收到：{value!r}")
             val = num
-    cfg[key] = val
     ensure_home()
-    atomic_json(HOME / "config.json", cfg)
+    with _locked(HOME / "config.json"):
+        cfg = load_config()
+        cfg[key] = val
+        atomic_json(HOME / "config.json", cfg)
     return cfg
 
 
 def config_unset(key: str) -> dict:
-    cfg = load_config()
-    cfg.pop(key, None)
     ensure_home()
-    atomic_json(HOME / "config.json", cfg)
+    with _locked(HOME / "config.json"):
+        cfg = load_config()
+        cfg.pop(key, None)
+        atomic_json(HOME / "config.json", cfg)
     return cfg
 
 
@@ -687,8 +690,14 @@ def _brace_balance(line: str) -> int:
     return depth
 
 
-# 本进程当前持有的写锁路径集合：read_jsonl 自愈时若已持锁直接修，避免重复抢锁/超时
-_HELD_LOCKS: set = set()
+# 本线程当前持有的写锁：read_jsonl 自愈时若"本线程"已持锁直接修，避免重复抢锁/超时。
+# 必须带上线程 id：面板是多线程的，同一进程里 A 线程持锁、B 线程来读时不能误以为
+# "自己也持锁"就跳过互斥直接整文件替换，否则 B 用旧快照覆盖 A 正在写的盘 → 丢数据。
+_HELD_LOCKS: set = set()   # 元素为 (锁文件路径, 线程 id)
+
+
+def _held(lock: Path) -> bool:
+    return (str(lock), threading.get_ident()) in _HELD_LOCKS
 
 
 def read_jsonl(path: Path) -> list:
@@ -754,7 +763,7 @@ def read_jsonl(path: Path) -> list:
             # 自愈=替代整文件。若别的进程正持锁写盘，抢写会把它的新数据覆盖丢。
             # 本进程已持锁→直接修；否则快速抢锁（0.5s），抢不到就这轮先跳过，
             # 坏块已经进了 .corrupt、原文件也没动，下次读取时再修。
-            if str(lock) not in _HELD_LOCKS:
+            if not _held(lock):
                 try:
                     with _locked(path, timeout=0.5):
                         os.replace(tmp, path)
@@ -809,24 +818,34 @@ def _locked(path: Path, timeout: float = 10.0):
     自己退出时把接管者的锁删掉」——那会让第三个进程立刻挤进来一起写。
     """
     lock = path.with_name(path.name + ".lock")
+    if _held(lock):
+        # 本线程已持锁：重入，避免 update_persona → save_persona 这类嵌套把自己锁死
+        yield
+        return
     deadline = time.time() + timeout
     while True:
         try:
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)
-            _HELD_LOCKS.add(str(lock))  # 记住"本进程已持锁"，read_jsonl 自愈时避免重复抢锁
+            _HELD_LOCKS.add((str(lock), threading.get_ident()))  # 记住"本线程已持锁"，read_jsonl 自愈时避免重复抢锁
             break
         except FileExistsError:
             # 陈旧锁（持锁进程已死）：久到不可能是正常写盘（正常持锁 <2s）才接管。
             # 阈值别设太小：dream 整理记忆时持锁会久一点，抢早了就是两个进程同时写。
             try:
                 if time.time() - lock.stat().st_mtime > STALE_LOCK_SECONDS:
-                    try:
-                        lock.unlink()
-                    except OSError:
-                        pass
-                    continue
+                    # 再加一道 pid 探活：持锁进程还活着就别抢（work_flush/dream 可能持锁较久）。
+                    # 同进程（含本进程其它线程）持有的锁一律视为"活着"，绝不接管。
+                    owner = _lock_owner(lock)
+                    if owner is not None and _pid_alive(owner):
+                        pass  # 活着的持锁者：继续等，不接管
+                    else:
+                        try:
+                            lock.unlink()
+                        except OSError:
+                            pass
+                        continue
             except OSError:
                 pass
             if time.time() > deadline:
@@ -836,7 +855,7 @@ def _locked(path: Path, timeout: float = 10.0):
     try:
         yield
     finally:
-        _HELD_LOCKS.discard(str(lock))
+        _HELD_LOCKS.discard((str(lock), threading.get_ident()))
         # 只删自己建的锁（锁文件里记着 pid）
         if _lock_owner(lock) in (None, os.getpid()):
             try:
@@ -848,6 +867,31 @@ def _locked(path: Path, timeout: float = 10.0):
 STALE_LOCK_SECONDS = 30.0
 
 
+def _pid_alive(pid: int) -> bool:
+    """探测 pid 是否还活着（Windows/POSIX 通用）。拿不到权限等异常时保守认为"活着"，
+    以免把别人的活锁当陈旧锁抢走。"""
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            kernel32 = ctypes.windll.kernel32
+            h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:
+                return False
+            code = ctypes.c_ulong()
+            ok = kernel32.GetExitCodeProcess(h, ctypes.byref(code))
+            kernel32.CloseHandle(h)
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+    except Exception:
+        return True
+
+
 def _lock_owner(lock: Path) -> int | None:
     """读锁文件里记录的持有者 pid；读不到/格式不对返回 None。"""
     try:
@@ -857,14 +901,35 @@ def _lock_owner(lock: Path) -> int | None:
         return None
 
 
+def _persona_txn(fn):
+    """把「读人格 → 改 → 写回」整段放进 persona.json 的写锁里。
+    否则两个并发的改动各自 load 一份旧档、后写者把先写者的字段覆盖回旧值。
+    锁对同线程可重入，所以内部再调 save_persona 不会自锁。"""
+    def wrapper(*args, **kwargs):
+        with _locked(HOME / "persona.json"):
+            return fn(*args, **kwargs)
+    wrapper.__name__ = getattr(fn, "__name__", "persona_txn")
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
+
+
 def _locked_save_all(records: list) -> None:
     """save_all 的加锁版：并发写记忆不丢更新。"""
     with _locked(HOME / "hippocampus.jsonl"):
         existing = load_all()
-        by_id = {m["id"]: m for m in existing}
+        by_id = {}
+        no_id = []   # 缺 id 的畸形记录也原样保留，不能因为无法索引就悄悄丢掉
+        for m in existing:
+            mid = m.get("id")
+            if mid:
+                by_id[mid] = m
+            else:
+                no_id.append(m)
         for r in records:
-            by_id[r["id"]] = r
-        merged = list(by_id.values())
+            mid = r.get("id")
+            if mid:
+                by_id[mid] = r
+        merged = list(by_id.values()) + no_id
         save_all(merged)
 
 
@@ -961,6 +1026,19 @@ def archive_candidates(records: list, now: int | None = None) -> list:
     return [m for m in records if _is_archivable(m, now)]
 
 
+def _append_archive(new_rows: list) -> None:
+    """把记录并入 archive.jsonl，按 id 去重。
+    先写 archive、后从热层删除（顺序上防丢）；若上一次在两步之间被打断，
+    记录会同时留在热层和 archive，重跑时这里按 id 去重，不会越堆越多。"""
+    if not new_rows:
+        return
+    existing = load_archive()
+    have = {m.get("id") for m in existing if m.get("id")}
+    add = [m for m in new_rows if m.get("id") not in have]
+    if add:
+        write_jsonl(HOME / "archive.jsonl", existing + add)
+
+
 def archive_run(dry_run: bool = False) -> dict:
     """手动触发归档：把沉眠记忆雪藏进 archive 层（原文保真，永不删）。
 
@@ -987,7 +1065,7 @@ def archive_run(dry_run: bool = False) -> dict:
                 m["archived_at"] = now
             keep_ids = {m["id"] for m in cand}
             # 归档层文件单独维护：只在本次真的新增了归档时才重写，绝不整库覆写清空
-            write_jsonl(HOME / "archive.jsonl", load_archive() + cand)
+            _append_archive(cand)
             save_all([m for m in records if m.get("id") not in keep_ids])
     return {"count": len(arch), "archived": arch, "dry_run": dry_run}
 
@@ -1074,11 +1152,25 @@ def relevance(q_terms: set, d_terms: set, idf: dict) -> float:
 
 # ---------------------------------------------------------------- 记忆记录
 
+def _num(v, default: float = 0.0) -> float:
+    """把可能是 None / 字符串 / 数字的值安全转成 float；转不了用默认值。
+    记忆库里手改、旧版本、坏字段都可能让数值变成 null 或字符串，硬 float() 会整条崩。"""
+    if v is None:
+        return float(default)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def retention(m: dict, now: int | None = None) -> float:
     """艾宾浩斯遗忘曲线：R = exp(-Δt / S)"""
     now = now or now_ts()
-    dt = max(0, now - m.get("last_access", m.get("created", now)))
-    stability = max(HOUR, float(m.get("stability", DEFAULT_STABILITY)))
+    last = m.get("last_access")
+    if last is None:
+        last = m.get("created", now)
+    dt = max(0.0, now - _num(last, now))
+    stability = max(HOUR, _num(m.get("stability"), DEFAULT_STABILITY))
     return math.exp(-dt / stability)
 
 
@@ -1209,13 +1301,13 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
                     m["gist"] = heuristic_gist(new)
                 else:
                     m["gist"] = heuristic_gist(old)
-                m["importance"] = round(max(0.0, min(1.0, max(m.get("importance", 0.5), float(imp) if imp <= 1 else imp / 10))), 3)
+                m["importance"] = round(max(0.0, min(1.0, max(_num(m.get("importance"), 0.5), float(imp) if imp <= 1 else imp / 10))), 3)
                 m["last_access"] = now_ts()
-                m["access_count"] = m.get("access_count", 0) + 1
-                m["stability"] = min(MAX_STABILITY, m.get("stability", DEFAULT_STABILITY) * 1.4 * stability_boost)
+                m["access_count"] = int(_num(m.get("access_count"), 0)) + 1
+                m["stability"] = min(MAX_STABILITY, _num(m.get("stability"), DEFAULT_STABILITY) * 1.4 * stability_boost)
                 # 习惯化（享乐适应）：同一件事反复出现，新鲜感递减、重要性不再步步抬升。
                 # 就像警报器一直响就没人再在意——但保留一个下限，别把真重要的磨掉。
-                m["repeat"] = m.get("repeat", 0) + 1
+                m["repeat"] = int(_num(m.get("repeat"), 0)) + 1
                 if m["repeat"] >= 3 and m["importance"] > 0.25:
                     m["importance"] = round(m["importance"] - 0.02, 3)
                 if emo_name and not m.get("emotion"):
@@ -1244,9 +1336,9 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
     ensure_home()
     cfg = load_config()
     w = cfg["weights"]
-    records = [m for m in load_all() if m.get("layer") in layers or (include_dust and m.get("layer") == "dust")]
+    records = [m for m in load_all() if m.get("id") and (m.get("layer") in layers or (include_dust and m.get("layer") == "dust"))]
     if include_archive:
-        records += load_archive()
+        records += [m for m in load_archive() if m.get("id")]
     if not records:
         return []
     now = now_ts()
@@ -1269,22 +1361,22 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
 
     scored = []
     # 首因效应：同一片记忆里最早留下的印象占权更高（第一次的印象比后来补的更深）
-    oldest = max((now - float(m.get("created", now)) for m in records), default=0)
+    oldest = max((now - _num(m.get("created"), now) for m in records), default=0)
     for m in records:
         rel = relevance(q_terms, all_terms[m["id"]], idf) if q_terms else 0.0
         rec = retention(m, now)
-        imp = float(m.get("importance", 0.5))
+        imp = _num(m.get("importance"), 0.5)
         score = w["relevance"] * rel + w["recency"] * rec + w["importance"] * imp
         # 首因：最早创建的那批（年龄接近最大）给一点额外权重
-        age = now - float(m.get("created", now))
+        age = now - _num(m.get("created"), now)
         if oldest > 0 and age >= oldest * 0.85:
             score += w.get("primacy", 0.03)
         # 标签/实体精确命中，显著加分
         hits = 0
         if query:
             q_low = query.lower()
-            hits += sum(1 for t in m.get("tags", []) if t.lower() in q_low)
-            hits += sum(1 for e in m.get("entities", []) if e.lower() in q_low)
+            hits += sum(1 for t in m.get("tags", []) if str(t).lower() in q_low)
+            hits += sum(1 for e in m.get("entities", []) if str(e).lower() in q_low)
         score += min(0.30, 0.12 * hits)
         scored.append([m, score, {"relevance": round(rel, 3), "recency": round(rec, 3),
                                   "importance": imp, "hits": hits}])
@@ -1361,14 +1453,15 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
     if strengthen and not READONLY:
         touched = [m for m, _, _ in result]
         for m in touched:
-            first = int(m.get("access_count", 0)) == 0
-            m["access_count"] = m.get("access_count", 0) + 1
+            ac = int(_num(m.get("access_count"), 0))
+            first = ac == 0
+            m["access_count"] = ac + 1
             # 首次提取巩固更强：头一回想起来的事，印记打得比反复想起更深
             # （首因效应 + 首次测试效应：第一次回忆本身就是一次强巩固）
             mult = 2.6 if first else 1.8
-            m["stability"] = min(MAX_STABILITY, float(m.get("stability", DEFAULT_STABILITY)) * mult + 4 * HOUR)
+            m["stability"] = min(MAX_STABILITY, _num(m.get("stability"), DEFAULT_STABILITY) * mult + 4 * HOUR)
             m["last_access"] = now
-            m["detail"] = min(1.0, float(m.get("detail", 1.0)) * 0.9 + 0.1)
+            m["detail"] = min(1.0, _num(m.get("detail"), 1.0) * 0.9 + 0.1)
         # 只写回被"想起"的这条，别把没加载进来的层（如 dust）覆盖清空；没想起就不动盘
         # 定向写回：只重写命中记忆所在层，避免整库覆写（上万条时省掉大头 I/O）
         if touched:
@@ -1706,9 +1799,10 @@ def desire_satisfy(name: str, amount: float = 15) -> dict:
     if READONLY:
         raise PermissionError("记忆库当前只读，无法更新欲望。")
     now = now_ts()
-    cur = desire_state(now)          # 先结算衰减
-    cur[name] = round(max(0.0, min(100.0, cur[name] + float(amount))), 1)
-    atomic_json(HOME / "desires.json", {"updated": now, "levels": cur})
+    with _locked(HOME / "desires.json"):
+        cur = desire_state(now)          # 先结算衰减
+        cur[name] = round(max(0.0, min(100.0, cur[name] + float(amount))), 1)
+        atomic_json(HOME / "desires.json", {"updated": now, "levels": cur})
     return {"desires": cur, "satisfied": name, "amount": amount}
 
 
@@ -2103,6 +2197,7 @@ def emotion_cfg() -> dict:
     return cfg
 
 
+@_persona_txn
 def save_emotion_cfg(updates: dict) -> dict:
     if READONLY:
         raise PermissionError("记忆库当前只读，无法修改情感设置。")
@@ -2276,38 +2371,42 @@ def link_memory(src: str, dst: str, relation: str = "相关", weight: float = 1.
         raise PermissionError("记忆库当前只读，无法修改关联。")
     if src == dst:
         raise ValueError("不能自己关联自己。")
-    ids = {m["id"] for m in load_all()}
-    for mid in (src, dst):
-        if mid not in ids:
-            raise KeyError(f"没有这条记忆：{mid}（用 list 或 recall 拿 id）")
-    a, b = _norm_edge(src, dst)
-    rows = load_assoc()
-    for r in rows:
-        if r["src"] == a and r["dst"] == b:
-            r["weight"] = round(min(3.0, float(r.get("weight", 1)) + float(weight)), 2)
-            r["relation"] = relation or r.get("relation", "相关")
-            r["ts"] = now_ts()
-            if why:
-                r["why"] = why
-            save_assoc(rows)
-            return {"src": src, "dst": dst, "relation": relation, "weight": r["weight"],
-                    "created": False, "updated": True}
-    rows.append({"src": a, "dst": b, "relation": (relation or "相关").strip(),
-                 "weight": round(max(0.1, float(weight)), 2),
-                 "why": (why or "").strip(), "ts": now_ts()})
-    save_assoc(rows)
-    return {"src": src, "dst": dst, "relation": relation, "weight": float(weight),
+    if not src or not dst:
+        raise ValueError("关联的双方 id 不能为空。")
+    a, b = _norm_edge(str(src), str(dst))
+    with _locked(ASSOC_FILE):
+        ids = {m["id"] for m in load_all()}
+        for mid in (src, dst):
+            if mid not in ids:
+                raise KeyError(f"没有这条记忆：{mid}（用 list 或 recall 拿 id）")
+        rows = load_assoc()
+        for r in rows:
+            if r.get("src") == a and r.get("dst") == b:
+                r["weight"] = round(min(3.0, _num(r.get("weight"), 1) + _num(weight, 1)), 2)
+                r["relation"] = relation or r.get("relation", "相关")
+                r["ts"] = now_ts()
+                if why:
+                    r["why"] = why
+                save_assoc(rows)
+                return {"src": src, "dst": dst, "relation": relation, "weight": r["weight"],
+                        "created": False, "updated": True}
+        rows.append({"src": a, "dst": b, "relation": (relation or "相关").strip(),
+                     "weight": round(max(0.1, _num(weight, 1)), 2),
+                     "why": (why or "").strip(), "ts": now_ts()})
+        save_assoc(rows)
+    return {"src": src, "dst": dst, "relation": relation, "weight": _num(weight, 1),
             "created": True, "updated": False}
 
 
 def unlink_memory(src: str, dst: str) -> bool:
-    a, b = _norm_edge(src, dst)
-    rows = load_assoc()
-    keep = [r for r in rows if not (r["src"] == a and r["dst"] == b)]
-    if len(keep) == len(rows):
-        return False
-    save_assoc(keep)
-    return True
+    a, b = _norm_edge(str(src or ""), str(dst or ""))
+    with _locked(ASSOC_FILE):
+        rows = load_assoc()
+        keep = [r for r in rows if not (r.get("src") == a and r.get("dst") == b)]
+        if len(keep) == len(rows):
+            return False
+        save_assoc(keep)
+        return True
 
 
 def assoc_of(mid: str) -> list:
@@ -2555,6 +2654,15 @@ def update_persona(updates: dict, why: str = "做梦整理", source: str = "",
     source：谁发起的（dream/自我总结/面板/…）；evidence：依据的记忆/事件 id 列表。
     两人格漂移要能溯源：这条改动来自哪场梦、哪段对话。
     """
+    if not isinstance(updates, dict):
+        return []
+    # load→改→save 整体加锁：否则并发的两次改动后写者会把先写者的字段覆盖回旧值
+    with _locked(HOME / "persona.json"):
+        return _update_persona_inner(updates, why, source, evidence)
+
+
+def _update_persona_inner(updates: dict, why: str, source: str,
+                          evidence: list | None) -> list:
     p = load_persona()
     rejected = []
     now = now_ts()
@@ -2654,6 +2762,11 @@ def _split_list_value(value: str) -> list:
 
 
 def set_persona_field(path: str, value: str) -> dict:
+    with _locked(HOME / "persona.json"):
+        return _set_persona_field_inner(path, value)
+
+
+def _set_persona_field_inner(path: str, value: str) -> dict:
     p = load_persona()
     root = path.split(".")[0]
     if root not in _PERSONA_ROOTS:
@@ -2703,7 +2816,12 @@ def persona_rollback(index: int | None = None) -> dict:
     恢复成旧值；是 evolved.* 的增项就把那条移除。回滚本身会记进历史，
     让"改了什么"始终有据可查。
     """
-    p = load_persona()
+    with _locked(HOME / "persona.json"):
+        p = load_persona()
+        return _persona_rollback_inner(p, index)
+
+
+def _persona_rollback_inner(p: dict, index: int | None = None) -> dict:
     hist = p.setdefault("history", [])
     if not hist:
         raise ValueError("没有可回滚的人格历史（还什么都没改过）。")
@@ -2807,6 +2925,7 @@ def persona_snapshots(limit: int = 30) -> list:
     return rows[:limit]
 
 
+@_persona_txn
 def persona_restore(name: str) -> dict:
     """从快照恢复整个人格（完整替换，注意会盖掉当前状态与历史）。"""
     if READONLY:
@@ -2886,6 +3005,7 @@ def persona_drift(days: int = 7) -> dict:
     }
 
 
+@_persona_txn
 def edit_persona(identity: dict | None = None, traits: dict | None = None,
                  drives: dict | None = None, style=None, values=None,
                  likes=None, dislikes=None, background=None,
@@ -3010,6 +3130,7 @@ def mind_weigh(topic: str, benefit: float = 5, cost: float = 5,
     }
 
 
+@_persona_txn
 def mind_set(curiosity: int | None = None, reason: int | None = None, why: str = "自我调节") -> dict:
     p = load_persona()
     dr = p.setdefault("drives", {})
@@ -3024,6 +3145,7 @@ def mind_set(curiosity: int | None = None, reason: int | None = None, why: str =
     return dr
 
 
+@_persona_txn
 def mind_tune(curiosity: int = 0, reason: int = 0, why: str = "用户态度") -> dict:
     """按用户态度做增量调整。还没成形的从 50 起算，逐步长出真实数值。"""
     p = load_persona()
@@ -3058,6 +3180,7 @@ def _parse_traits(spec: str) -> dict:
     return out
 
 
+@_persona_txn
 def persona_interview(name: str = "", traits: str = "", style: str = "", values: str = "",
                       callme: str = "", self_name: str = "", unsure: bool = False) -> dict:
     """记录用户对「你是谁」的回答。用户不知道的，留空即可，之后由 AI 自己定。"""
@@ -3097,6 +3220,7 @@ def persona_interview(name: str = "", traits: str = "", style: str = "", values:
     return p
 
 
+@_persona_txn
 def persona_self_author(name: str = "", traits: str = "", likes: str = "", dislikes: str = "",
                         habits: str = "", insights: str = "", style: str = "",
                         values: str = "", callme: str = "", self_name: str = "") -> dict:
@@ -3268,8 +3392,11 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
         archived_recs = []
 
         for m in records:
+            if not m.get("id"):          # 缺 id 的畸形记录不参与巩固/遗忘（但仍原样保留在库）
+                continue
             if m.get("layer") == "dust" or m.get("pinned"):
                 continue
+            text = m.get("text", "") or ""
             # 封存的原文不做细节淡化、不进淡忘区：它的价值就是"一个字都没丢"
             verbatim = bool(m.get("verbatim"))
             R = retention(m, now)
@@ -3279,36 +3406,36 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
                 m["layer"] = ARCHIVE_LAYER
                 m["archived_at"] = now
                 archived_recs.append(m)
-                report["archived"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(m["text"])})
+                report["archived"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(text)})
                 continue
             if (not verbatim and m.get("layer") == "hippo" and R < RETENTION_FLOOR
-                    and m.get("importance", 0.5) < 0.75 and now - float(m.get("created", now)) > 2 * DAY):
+                    and _num(m.get("importance"), 0.5) < 0.75 and now - _num(m.get("created"), now) > 2 * DAY):
                 m["layer"] = "dust"
                 m["forgotten_at"] = now
-                m["detail"] = round(max(0.12, float(m.get("detail", 1)) * 0.4), 2)
-                report["forgotten"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(m["text"])})
+                m["detail"] = round(max(0.12, _num(m.get("detail"), 1) * 0.4), 2)
+                report["forgotten"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(text)})
                 continue
             if (m.get("layer") == "hippo" and R >= 0.45
-                    and (m.get("access_count", 0) >= 2 or m.get("importance", 0) >= 0.78)):
+                    and (_num(m.get("access_count"), 0) >= 2 or _num(m.get("importance"), 0) >= 0.78)):
                 m["layer"] = "cortex"
                 m["consolidated"] = True
-                report["promoted"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(m["text"])})
+                report["promoted"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(text)})
             if verbatim:
                 m["detail"] = 1.0  # 封存件永不模糊
             else:
                 target = round(0.35 + 0.65 * R, 2)
-                if float(m.get("detail", 1)) > target:
+                if _num(m.get("detail"), 1) > target:
                     m["detail"] = target
                     report["faded"] += 1
             if not m.get("gist"):
-                m["gist"] = heuristic_gist(m["text"])
+                m["gist"] = heuristic_gist(text)
 
         # 冷热归档：长期没被想起、保留度极低的沉眠记忆雪藏进 archive 层
         # （原文保真、永不删，只是移出 recall 的热遍历集合）。顺带归档几乎零额外成本。
         if archived_recs:
             records = [m for m in records if m.get("layer") != ARCHIVE_LAYER]
             if not dry_run:
-                write_jsonl(HOME / "archive.jsonl", load_archive() + archived_recs)
+                _append_archive(archived_recs)
 
         clusters = cluster_memories(records, include_ids={x["id"] for x in report["promoted"]})
         if not dry_run:
@@ -3422,49 +3549,53 @@ def load_dream_state() -> dict:
 
 def apply_dream(result: dict) -> dict:
     ensure_home()
-    # 先对任务号：apply 必须对着当前这场的 pending.json，防止把上一场的结果
-    # 或乱写的 task_id 应用到现在的记忆上。不对就直接拒绝，不碰任何数据。
     pending_path = HOME / "dreams" / "pending.json"
-    pending_id = None
-    if pending_path.exists():
-        try:
-            pending_id = (json.loads(pending_path.read_text("utf-8")) or {}).get("task_id")
-        except Exception:
-            pending_id = None
     task_id = result.get("task_id")
-    if pending_id is None:
-        raise ValueError("没有待应用的任务：dreams/pending.json 不存在")
-    if not task_id:
-        # 以前这里 fallback 到 pending_id，等于"缺 task_id 但也放行"——
-        # 上一场漏写 task_id 的 apply.json 会静默套用到这一场。改为必须显式带上。
-        raise ValueError(
-            f"apply 里没有 task_id：为防止把上一场的整理结果套用到这一场，拒绝应用。"
-            f"请在 apply.json 里带上 \"task_id\": \"{pending_id}\"。"
-        )
-    if task_id != pending_id:
-        raise ValueError(
-            f"任务对不上：apply 里的 task_id={task_id!r}，与 pending.json 的 {pending_id!r} 不一致，拒绝应用。"
-        )
-    # 读-改-写（新增记忆 + 改 source 记忆的 consolidate/层 + forget）整体加锁，
-    # 避免整库 save_all 把锁外并发写入的新记忆覆盖丢
+    applied = {"memories": 0, "forgotten": 0, "persona": [], "rejected": []}
+
+    # 读-校验-改-写-消费 pending 整体在一把锁里：
+    # 1) 两个 apply 并发时，第二个进锁后 pending 已被删，直接拒绝，不会把同一份结果套两遍；
+    # 2) 整库 save_all 不会把锁外并发写入的新记忆覆盖丢。
     with _locked(HOME / "hippocampus.jsonl"):
+        # 先对任务号：apply 必须对着当前这场的 pending.json，防止把上一场的结果
+        # 或乱写的 task_id 应用到现在的记忆上。不对就直接拒绝，不碰任何数据。
+        pending_id = None
+        if pending_path.exists():
+            try:
+                pending_id = (json.loads(pending_path.read_text("utf-8")) or {}).get("task_id")
+            except Exception:
+                pending_id = None
+        if pending_id is None:
+            raise ValueError("没有待应用的任务：dreams/pending.json 不存在")
+        if not task_id:
+            # 以前这里 fallback 到 pending_id，等于"缺 task_id 但也放行"——
+            # 上一场漏写 task_id 的 apply.json 会静默套用到这一场。改为必须显式带上。
+            raise ValueError(
+                f"apply 里没有 task_id：为防止把上一场的整理结果套用到这一场，拒绝应用。"
+                f"请在 apply.json 里带上 \"task_id\": \"{pending_id}\"。"
+            )
+        if task_id != pending_id:
+            raise ValueError(
+                f"任务对不上：apply 里的 task_id={task_id!r}，与 pending.json 的 {pending_id!r} 不一致，拒绝应用。"
+            )
         records = load_all()
-        by_id = {m["id"]: m for m in records}
-        applied = {"memories": 0, "forgotten": 0, "persona": [], "rejected": []}
+        by_id = {m["id"]: m for m in records if m.get("id")}
 
         for item in result.get("memories") or []:
+            if not isinstance(item, dict):
+                continue
             text = (item.get("text") or "").strip()
             if not text:
                 continue
             rec = make_record(
                 text,
                 kind=item.get("kind", "fact"),
-                importance=item.get("importance", 0.7),
+                importance=_num(item.get("importance"), 0.7),
                 tags=item.get("tags"),
                 entities=item.get("entities"),
                 source="dream",
                 layer="cortex",
-                links=item.get("source_ids") or [],
+                links=[x for x in (item.get("source_ids") or []) if isinstance(x, str)],
             )
             rec["gist"] = item.get("gist") or heuristic_gist(text)
             rec["consolidated"] = True
@@ -3490,13 +3621,21 @@ def apply_dream(result: dict) -> dict:
                 applied["forgotten"] += 1
 
         save_all(records)
+        # 在锁内消费 pending：写入与"这场梦已应用"必须同时成立，
+        # 否则并发 apply / 崩溃重试会把这批记忆再套一遍（重复沉淀）。
+        try:
+            pending_path.unlink()
+        except FileNotFoundError:
+            pass
 
-    upd = result.get("persona_updates") or {}
+    upd = result.get("persona_updates")
+    upd = upd if isinstance(upd, dict) else {}
     if upd:
-        evid = [sid for it in (result.get("memories") or []) for sid in (it.get("source_ids") or [])][:10]
+        evid = [sid for it in (result.get("memories") or [])
+                if isinstance(it, dict) for sid in (it.get("source_ids") or [])
+                if isinstance(sid, str)][:10]
         applied["rejected"] = update_persona(upd, why="做梦整理", source="dream", evidence=evid)
 
-    pending_path = HOME / "dreams" / "pending.json"
     narrative = (result.get("narrative") or "").strip()
     if narrative or applied["memories"]:
         path = HOME / "dreams" / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_apply.md"
@@ -3506,9 +3645,10 @@ def apply_dream(result: dict) -> dict:
             body += ["", "## 梦里的叙述", narrative]
         if upd.get("insights"):
             body += ["", "## 洞见"] + [f"- {x}" for x in upd["insights"]]
-        path.write_text("\n".join(body) + "\n", encoding="utf-8")
-    if pending_path.exists():
-        pending_path.unlink()
+        try:
+            path.write_text("\n".join(body) + "\n", encoding="utf-8")
+        except OSError:
+            pass   # 梦境笔记写不进去不影响记忆已落盘，别把成功报成失败
     clear_dream_draft()  # 应用成功后，网页里编辑过的那份草稿也一并清掉
     return applied
 
@@ -4405,7 +4545,7 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
         note, how = growth.write_note("journal", f"今日 {today}",
                                       "\n".join(body), mood=mood_brief(),
                                       tags=["每日例行"],
-                                      memory_ids=[m["id"] for m in mems[:12]],
+                                      memory_ids=[m["id"] for m in mems[:12] if m.get("id")],
                                       append_same_day=not force)
         st["last_run"] = now_ts()
         st["last_date"] = today
@@ -4840,17 +4980,18 @@ def _main(argv=None) -> int:
             if not item:
                 print("用法：persona lock 名字", file=sys.stderr)
                 return 2
-            p = load_persona()
-            locks = p.setdefault("locked", [])
-            if args.action == "lock" and item not in locks:
-                locks.append(item)
-            if args.action == "unlock" and item in locks:
-                locks.remove(item)
-            p.setdefault("history", []).append({
-                "ts": now_ts(), "field": "locked",
-                "from": None, "to": item, "why": "用户要求" if args.action == "lock" else "解除锁定",
-            })
-            save_persona(p)
+            with _locked(HOME / "persona.json"):
+                p = load_persona()
+                locks = p.setdefault("locked", [])
+                if args.action == "lock" and item not in locks:
+                    locks.append(item)
+                if args.action == "unlock" and item in locks:
+                    locks.remove(item)
+                p.setdefault("history", []).append({
+                    "ts": now_ts(), "field": "locked",
+                    "from": None, "to": item, "why": "用户要求" if args.action == "lock" else "解除锁定",
+                })
+                save_persona(p)
             print(f"{'已锁定' if args.action == 'lock' else '已解锁'}：{item}")
             return 0
         if args.action == "history":
