@@ -2,7 +2,7 @@
 
 > 名字取自《黄帝内经》：**算力给思考，人格给灵魂，记忆给生命。**
 
-> 当前版本 **v2.11.2**（变更见 [CHANGELOG.md](CHANGELOG.md)）
+> 当前版本 **v2.11.3**（变更见 [CHANGELOG.md](CHANGELOG.md)）
 
 > ⚠️ **能力天花板（先读）**：灵枢是「提示词 + 脚本」的机制，**不能从底层强制约束模型**。当模型发生强幻觉时依然会无视全部规则；效果上限取决于底层大模型本身的推理、记忆与指令遵循能力。中强模型（7B+、云端）可完整遵守；**3B 以下本地小模型会出现大量规则漏执行**（忘走 startup、跳过写盘、纪律打折）——请据此降低预期，或改用 `SKILL-lite.md`（精简版）/ `SKILL-tiny.md`（最小试用版）。
 
@@ -296,9 +296,9 @@ SYSTEM """你运行在本地，有记忆系统「灵枢」。每轮先按需执�
 
 `SKILL.md` 的 frontmatter 是 `name: lingshu`（中文名放在 `title: 灵枢`）。原因是 **DSH 的文件系统技能发现只认 kebab-case 名字**，中文 `name` 会被静默跳过——表现就是"装了却看不到 / 像被改名"。
 
-- 安装时用中文名或英文名都行：`skill install 灵枢 --from <本目录> --yes` 与 `skill install lingshu ...` 等价，目录与 frontmatter 统一落成 `lingshu`。
-- 装完想确认有没有被认出来：`python scripts/brain.py skill list --global`，正常显示 `✓`；若是旧版中文目录会标 `✗ 目录名/name 不是 kebab-case，DSH 会跳过`，删掉该目录按上面重装即可。
-- 手动拷进 DSH 技能目录时，**目录名和 frontmatter name 都要用 kebab-case**（`lingshu` / `lingshu-lite` / `lingshu-tiny`）。
+- 安装时用中文名或英文名都行：`skill install 灵枢 --from <本目录> --yes` 与 `skill install lingshu ...` 等价，目录与 frontmatter 统一落成 `lingshu`；安装目标自动选 **DSH 的 `~/.dsh/skills`**（没有就回落 Trae 的 `~/.trae-cn/skills`）。
+- 装完想确认有没有被认出来：`python scripts/brain.py skill list --global`，正常显示 `✓`；若是旧版中文目录会标 `✗ 目录名/name 不是 kebab-case，DSH 会跳过`，跑一次 `skill uninstall lingshu`（会连旧目录一起删）再装即可。
+- 手动拷进 DSH 技能目录时，**目录名和 frontmatter name 都要用 kebab-case**（`lingshu` / `lingshu-lite` / `lingshu-tiny`），路径是 `~/.dsh/skills/lingshu/`。
 
 ## 如何更新灵枢
 
@@ -313,6 +313,12 @@ if [ -d "$DIR/.git" ]; then git -C "$DIR" pull; else git clone --depth 1 https:/
 ```
 
 - 更新只替换**技能本体文件**；记忆数据在 `~/.brain-memory/`，**不会动**。
+- **更新不会自动改名、也不会自动换目录**：更新只覆盖技能仓库里的文件，而宿主扫的是**全局副本目录**——DSH 读 `~/.dsh/skills/`，Trae 读 `~/.trae-cn/skills/`。从 v2.11.2 之前装过的，旧的中文目录 `灵枢/` 还在，会被 DSH 跳过。请重装一次：
+  ```bash
+  python scripts/brain.py skill uninstall lingshu   # 会连旧的 灵枢/ 目录一起删（两个全局目录都清）
+  python scripts/brain.py skill install lingshu --from <本目录> --yes   # 自动装到 DSH 的 ~/.dsh/skills
+  python scripts/brain.py skill list --global       # 看到 ✓ 就对了
+  ```
 - 你长期手动维护的规则（DSH 只读保护、全局目录指回等）写进 `~/.brain-memory/lingshu.user.md`（`user-rules add <规则>`），更新永不覆盖、每会话自动注入；全局 `AGENTS.md` 里 `<!-- lingshu:start/end -->` 之外的自己写内容，更新时也原样保留。
 - 更新前可对照 `CHANGELOG.md` 看这次改了什么；更新后跑一次 `python scripts/brain.py stats` 自检。
 - 没有 git 的机器：到仓库页面下载 ZIP，解压后手动覆盖同名文件即可。

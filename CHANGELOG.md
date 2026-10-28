@@ -2,6 +2,15 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.11.3 — 认出 DSH 的技能目录：装上就生效，卸载连旧中文目录一起清
+
+v2.11.2 把名字改成 kebab-case，但发现两个更隐蔽的问题，本版本一并解决：
+
+- **全局技能目录原来一直指错地方**：`skill install` 一直写到 `~/.trae-cn/skills`（Trae 的技能目录），而灵枢本体主要跑在 **DSH** 上，DSH 扫的是 `~/.dsh/skills`——这就是"装了不出现 / 更新了没生效"的又一来源。现在按优先级自动识别：有 `~/.dsh/skills` 就装到那，否则回落 `~/.trae-cn/skills`；两个目录都会扫描、都会清理。仍嫌不对可用环境变量 `LINGSHU_GLOBAL_SKILLS=<目录>` 硬指定。
+- **卸载/安装自动收拾旧中文目录**：`skill uninstall lingshu` 现在会把**新名目录 + 旧版中文目录 `灵枢/`** 一起删（多全局目录都清），此前只删新名目录，旧空壳仍在会被 DSH 扫到而跳过；`skill install` 检测到旧目录、或另一个全局目录里还有同名副本时，打印提示与清理命令。
+- **`skill list --global` 显示根目录**：列出 `~/.dsh/skills` / `~/.trae-cn/skills` 各自的扫描结果，旧中文目录仍标 `✗` 并附收拾提示。
+- 注意：**更新技能本身不会改名/换目录**——更新只覆盖仓库文件，机器上的全局副本要重装一次（`skill uninstall lingshu` → `skill install lingshu --from <仓库> --yes`）。
+
 ## v2.11.2 — 名字改 kebab-case：DSH 终于认得出、bat 也不再乱码
 
 用户反馈：装完技能在 DSH 里不出现（"改名"）、`start-panel.bat` 一跑满屏乱码命令报错。根因两个，都修：

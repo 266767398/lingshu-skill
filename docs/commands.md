@@ -44,8 +44,9 @@
 | 笔记 | `note write "标题" --type journal\|log\|growth --body ...` / `note list [--type ...]` / `note show <id>` |
 | 笔记检索 / 素材 | `note search "词"` / `note digest --days 7` |
 | 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow` |
-| 技能安装 | `skill install <名字> [--force] [--from 外部目录]`（整目录 + 自动生成 AGENTS.md；装灵枢本体需先过风险确认 `--yes`，中文名/英文名 `lingshu` 都认） |
-| 已装技能自查 | `skill list --global`（列出全局技能目录已装的技能，核对目录名是否为 kebab-case；旧版中文目录会被标 `✗`） |
+| 技能安装 | `skill install <名字> [--force] [--from 外部目录]`（整目录 + 自动生成 AGENTS.md；装灵枢本体需先过风险确认 `--yes`，中文名/英文名 `lingshu` 都认；自动装到 DSH 的 `~/.dsh/skills`，无则回落 Trae 的 `~/.trae-cn/skills`） |
+| 已装技能自查 | `skill list --global`（列出全局技能目录已装的技能，核对目录名是否为 kebab-case；DSH/Trae 两目录都会扫，旧版中文目录会被标 `✗`） |
+| 技能卸载 | `skill uninstall <名字>`（`lingshu` 会连旧版中文目录 `灵枢` 一起删掉，两个全局目录都清，避免 DSH 仍去扫空壳） |
 | 技能自动全局化 | `skill use <名字> --auto` |
 | DSH 插件（只读） | `skill plugins [--json]` |
 | 用户附加规则 | `user-rules show\|add <规则>\|clear`（数据目录 lingshu.user.md，更新永不覆盖，每会话自动注入） |

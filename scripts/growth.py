@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -37,6 +38,27 @@ SKILL_REG = HOME / "skills.json"
 EXT_DIR = HOME / "extensions"
 GLOBAL_SKILLS = Path.home() / ".trae-cn" / "skills"
 
+
+def _global_roots() -> list:
+    """全局技能目录候选，按优先级排列（第一个是安装目标）。
+
+    DSH（DeepSeek Harness）扫的是 ~/.dsh/skills，Trae 扫的是 ~/.trae-cn/skills。
+    灵枢本体主要跑在 DSH 里，所以两个都在时优先 DSH——否则 install 装到 Trae 目录，
+    DSH 永远看不到（表现为"装了不出现/像改名"）。可用 LINGSHU_GLOBAL_SKILLS 覆盖。
+    """
+    env = (os.environ.get("LINGSHU_GLOBAL_SKILLS") or "").strip()
+    if env:
+        return [Path(env).expanduser()]
+    roots = []
+    dsh = Path.home() / ".dsh" / "skills"
+    if dsh.is_dir():
+        roots.append(dsh)
+    roots.append(Path.home() / ".trae-cn" / "skills")
+    return roots
+
+
+GLOBAL_SKILLS = _global_roots()[0]  # 安装目标（主目录）
+
 NOTE_KINDS = ("journal", "log", "growth")
 # 技能名：小写字母/数字/连字符/下划线，也允许中文（中文生态里技能就叫「质检评审」这类名字）
 SLUG_RE = re.compile(r"^[a-z0-9\u4e00-\u9fff][a-z0-9-_\u4e00-\u9fff]{0,62}$")
@@ -45,7 +67,7 @@ SLUG_RE = re.compile(r"^[a-z0-9\u4e00-\u9fff][a-z0-9-_\u4e00-\u9fff]{0,62}$")
 LINGSHU_RISKS = [
     "它会在你本机 ~/.brain-memory 下长期保存：对话记忆、你告诉它的个人偏好与情绪记录（本地明文）。换机器/共享电脑时请注意隐私。",
     "上下文接近满时它会自动原文封存（capture）与做梦压缩，并每天写日记、更新知识库——这些是自动行为，内容会持续增长。",
-    "它会只读扫描全局技能目录（~/.trae-cn/skills）与 DSH（~/.dsh/profiles）插件清单，判断有没有现成能力可用。",
+    "它会只读扫描全局技能目录（~/.dsh/skills、~/.trae-cn/skills）与 DSH（~/.dsh/profiles）插件清单，判断有没有现成能力可用。",
     "它有自我编辑能力（skill new/edit/install），理论上能改写它自己的说明书与全局副本，并生成 AGENTS.md。",
     "记忆只存在本地，误删/损坏依赖手动备份：建议首次启用先跑 python scripts/brain.py backup。",
 ]
@@ -660,6 +682,8 @@ _SKILL_NAME_ALIASES = {
     "灵枢-lite": "lingshu-lite",
     "灵枢-tiny": "lingshu-tiny",
 }
+# 反查：kebab slug → 它对应的旧中文目录名（旧版安装会把中文名当目录名）
+_SLUG_TO_LEGACY_NAME = {v: k for k, v in _SKILL_NAME_ALIASES.items()}
 # 灵枢本体的所有可识别名字（旧中文名 + 新 kebab 名），用于风险确认与"这是我自己"判定
 _SELF_NAMES = ("灵枢", "lingshu")
 
@@ -816,37 +840,48 @@ def _ver(v) -> object:
         return str(v or "1").strip() or "1"
 
 
+def _find_installed(name: str) -> Path:
+    """在全局目录（多根：DSH/Trae）里找 name 技能的目录；找不到返回主目录下的默认路径。"""
+    for r in _global_roots():
+        p = r / name
+        if (p / "SKILL.md").is_file():
+            return p
+    return GLOBAL_SKILLS / name
+
+
 def list_installed() -> list:
     """列出已装进全局技能目录的技能。
 
     DSH 的文件系统技能发现只认 kebab-case 的 name，中文名会被静默跳过，
     所以这里额外核对「目录名 == frontmatter name（kebab）」：不一致就标 ✗，
-    让用户一眼看出为什么装了却不出现。
+    让用户一眼看出为什么装了却不出现。多全局目录（DSH/Trae）都会扫。
     """
     out = []
-    if not GLOBAL_SKILLS.exists():
-        return out
-    for d in sorted(GLOBAL_SKILLS.iterdir()):
-        p = d / "SKILL.md"
-        if not p.is_file():
+    for root in _global_roots():
+        if not root.exists():
             continue
-        try:
-            meta, _ = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
-        except OSError:
-            meta = {}
-        name = (meta.get("name") or d.name).strip()
-        try:
-            ok = d.name == _require_slug(name)
-        except ValueError:
-            ok = False
-        out.append({
-            "dir": d.name,
-            "name": name,
-            "version": _ver(meta.get("version", 1)),
-            "ok": ok,
-            "agents": (d / "AGENTS.md").exists(),
-            "path": str(p),
-        })
+        for d in sorted(root.iterdir()):
+            p = d / "SKILL.md"
+            if not p.is_file():
+                continue
+            try:
+                meta, _ = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
+            except OSError:
+                meta = {}
+            name = (meta.get("name") or d.name).strip()
+            try:
+                ok = d.name == _require_slug(name)
+            except ValueError:
+                ok = False
+            out.append({
+                "dir": d.name,
+                "root": str(root),
+                "name": name,
+                "version": _ver(meta.get("version", 1)),
+                "ok": ok,
+                "agents": (d / "AGENTS.md").exists(),
+                "path": str(p),
+            })
     return out
 
 
@@ -860,7 +895,10 @@ def list_skills() -> list:
                 continue
             meta, body = parse_frontmatter(p.read_text(encoding="utf-8"))
             name = meta.get("name") or d.name
-            installed_dir = GLOBAL_SKILLS / name
+            try:
+                installed_dir = _find_installed(_require_slug(name))
+            except ValueError:
+                installed_dir = _find_installed(name)
             out.append({
                 "name": name,
                 "description": meta.get("description", ""),
@@ -1035,6 +1073,10 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
         return {"name": name, "state": "risk_required", "risks": LINGSHU_RISKS,
                 "path": str(dst), "accepted": False}
 
+    # 别的全局目录里已有同名副本（比如 Trae 那边也装过）：提醒，避免"更新了却没生效"的错觉
+    stale = [str(r / name) for r in _global_roots()
+             if (r / name) != dst_dir and (r / name / "SKILL.md").is_file()]
+
     if dst.exists() and not force:
         if dst.read_text(encoding="utf-8") == src.read_text(encoding="utf-8"):
             # 内容没变：也要修复/补齐 AGENTS.md（区块化更新，用户手写部分不动）。
@@ -1045,7 +1087,8 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
                 agents.write_text(generated, encoding="utf-8")
             else:
                 _upsert_agents_block(agents, generated)
-            return {"name": name, "state": "already", "path": str(dst), "agents": str(agents)}
+            return {"name": name, "state": "already", "path": str(dst), "agents": str(agents),
+                    "legacy": _legacy_global_dir(name), "stale": stale}
         raise FileExistsError(f"全局技能目录已有同名技能 {name}；确认覆盖请加 --force")
 
     generated = _agents_md(name, meta.get("description", ""), meta, from_dir)
@@ -1074,20 +1117,42 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
     save_registry(reg)
     if _is_lingshu(name, meta, from_dir):
         _accept_risk(name)  # 记下：用户已明确接受灵枢的风险
-    return {"name": name, "state": "installed", "path": str(dst), "agents": str(agents)}
+    return {"name": name, "state": "installed", "path": str(dst), "agents": str(agents),
+            "legacy": _legacy_global_dir(name), "stale": stale}
+
+
+def _legacy_global_dir(name: str) -> str | None:
+    """该技能在全局目录（多根）里的旧中文名目录是否存在（存在则返回路径，供提示清理）。"""
+    legacy = _SLUG_TO_LEGACY_NAME.get(name)
+    if legacy:
+        for r in _global_roots():
+            d = r / legacy
+            if d.exists():
+                return str(d)
+    return None
 
 
 def uninstall_skill(name: str) -> dict:
     name = _require_slug(name)
-    dst_dir = GLOBAL_SKILLS / name
-    if not dst_dir.exists():
+    # 新 kebab 目录 + 旧版中文目录一起清：旧版安装把中文名当目录名，
+    # 只删 lingshu 会留下"灵枢"空壳，DSH 仍会去扫它。多全局目录（DSH/Trae）都清。
+    candidates = [name, _SLUG_TO_LEGACY_NAME.get(name)]
+    removed = []
+    for root in _global_roots():
+        for _n in candidates:
+            if not _n:
+                continue
+            d = root / _n
+            if d.exists():
+                shutil.rmtree(d)
+                removed.append(str(d))
+    if not removed:
         return {"name": name, "state": "absent"}
-    shutil.rmtree(dst_dir)
     reg = load_registry()
     if name in reg:
         reg[name]["installed_at"] = None
         save_registry(reg)
-    return {"name": name, "state": "uninstalled"}
+    return {"name": name, "state": "uninstalled", "removed": removed}
 
 
 def remove_skill(name: str) -> bool:
@@ -1151,12 +1216,15 @@ def self_review(force: bool = False, days: int = 3) -> dict:
     last = float(cfg.get("last_self_review", 0) or 0)
     due = force or (now - last >= days * brain.DAY)
     material = digest(max(2, days))
-    # 全局副本目录名随名字改过（灵枢 → lingshu），两个都看，先新后旧
+    # 全局副本目录名随名字改过（灵枢 → lingshu），两个都看，先新后旧；多全局目录也看
     global_path = None
-    for _n in ("lingshu", "灵枢"):
-        _p = GLOBAL_SKILLS / _n / "SKILL.md"
-        if _p.exists():
-            global_path = _p
+    for _root in _global_roots():
+        for _n in ("lingshu", "灵枢"):
+            _p = _root / _n / "SKILL.md"
+            if _p.exists():
+                global_path = _p
+                break
+        if global_path is not None:
             break
     if global_path is None:
         global_path = GLOBAL_SKILLS / "lingshu" / "SKILL.md"
@@ -1169,7 +1237,7 @@ def self_review(force: bool = False, days: int = 3) -> dict:
         except OSError:
             global_line = "全局副本已安装：{}".format(global_path)
     else:
-        global_line = "全局副本未安装（可用 skill install 灵枢 --from <本技能目录> --yes 安装）"
+        global_line = "全局副本未安装（可用 skill install lingshu --from <本技能目录> --yes 安装）"
     checks = [c for c in check_skill() if c["name"] in _SELF_NAMES]
     check_line = "✓ 技能自检通过" if (checks and checks[0]["ok"]) else \
         ("△ 技能自检提示：" + "；".join(checks[0]["issues"] if checks else ["本地技能库没有「灵枢」副本"])[:200])
@@ -1281,7 +1349,10 @@ def list_dsh_plugins() -> list:
 
 
 def _skill_roots() -> list:
-    return [("自己", SKILLS_DIR), ("全局", GLOBAL_SKILLS)]
+    roots = [("自己", SKILLS_DIR)]
+    for i, r in enumerate(_global_roots()):
+        roots.append(("全局" if i == 0 else f"全局({r.parent.name})", r))
+    return roots
 
 
 def search_skills(query: str, limit: int = 12) -> list:
@@ -2076,12 +2147,15 @@ def _run(argv=None) -> int:
                 if args.json:
                     print(json.dumps(rows, ensure_ascii=False, indent=2))
                 elif not rows:
-                    print(f"全局技能目录里还没有安装任何技能：{GLOBAL_SKILLS}")
+                    print("全局技能目录里还没有安装任何技能：" + "、".join(str(r) for r in _global_roots()))
                 else:
+                    print("全局技能目录：" + "、".join(str(r) for r in _global_roots()) + "\n")
                     for r in rows:
                         mark = "✓" if r["ok"] else "✗ 目录名/name 不是 kebab-case，DSH 会跳过"
                         print(f"{r['dir']}  name={r['name']}  v{r['version']}  {mark}")
                         print(f"  {r['path']}\n")
+                    if any(not r["ok"] for r in rows):
+                        print("带 ✗ 的目录：skill uninstall <名字> 会连旧中文目录一起清掉，再 install 即可。")
                 return 0
             rows = list_skills()
             if args.json:
@@ -2124,10 +2198,20 @@ def _run(argv=None) -> int:
             print(f"{msg}：{res['path']}")
             if res.get("agents"):
                 print(f"  AGENTS.md：{res['agents']}")
+            if res.get("legacy"):
+                print(f"  [提示] 发现旧中文名目录：{res['legacy']}")
+                print("         DSH 只认 kebab-case，该目录会被跳过。清理："
+                      f"python scripts/brain.py skill uninstall {res['name']}")
+            for _s in res.get("stale") or []:
+                print(f"  [提示] 另一个全局目录里还有同名副本：{_s}")
+                print("         它不会自动跟着更新，若那边也要用请单独 install --force。")
             return 0
         if args.act == "uninstall":
             res = uninstall_skill(args.name)
-            print("已卸载。" if res["state"] == "uninstalled" else "全局目录里没有这个技能。")
+            if res["state"] == "uninstalled":
+                print("已卸载：" + "、".join(res.get("removed") or [res["name"]]))
+            else:
+                print("全局目录里没有这个技能。")
             return 0
         if args.act == "rm":
             if remove_skill(args.name):
@@ -2212,7 +2296,7 @@ def _run(argv=None) -> int:
                     for i, line in enumerate(res["risks"], 1):
                         print(f"  {i}. {line}")
                     print("\n用户接受后，执行一次（只做一次，之后不再问）：")
-                    print('  python scripts/brain.py skill install 灵枢 --from "灵枢技能目录" --yes')
+                    print('  python scripts/brain.py skill install lingshu --from "灵枢技能目录" --yes')
                     return 0
                 state = res.get("state", "installed")
                 print(f"\n已自动全局化：{GLOBAL_SKILLS / args.name / 'SKILL.md'}（{state}）")

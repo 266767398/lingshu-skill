@@ -129,7 +129,7 @@ python scripts/brain.py skill self-review [--force] [--days 3]
 
 ## 安装灵枢本体：先读风险告知
 
-装灵枢本体到全局技能目录时（`skill install 灵枢 --from <本目录>`），安装器会先列出**潜在危险**，你确认接受（`--yes`）它才会装：
+装灵枢本体到全局技能目录时（`skill install lingshu --from <本目录>`，中文名 `灵枢` 也行），安装器会先列出**潜在危险**，你确认接受（`--yes`）它才会装：
 
 1. **本地明文存记忆**：`.brain-memory` 里的记忆、人格、情绪是明文 JSON/文本，没有加密；谁读到目录就能读到它记得的一切。
 2. **自动成长写入**：每日例行会自行写日记、沉淀知识、自动做梦；封存/整理可能压缩或改变你的记忆表述。
@@ -367,7 +367,7 @@ python scripts/brain.py skill borrow 质检评审 --as my-qa --note "改成适�
 3. **中文技能名**：`质检评审`、`灵枢` 这类名字直接可用，不需要拼音转写。
 4. **解析健壮**：frontmatter 支持引号、多行块标量（`|`/`>`），各家写的 SKILL.md 都能读对。
 
-把灵枢本体装成全局技能（一次性）：`skill install 灵枢 --from "E:\丁厚同\文档\程序\灵枢-skill" --force`。
+把灵枢本体装成全局技能（一次性）：`skill install lingshu --from "E:\丁厚同\文档\程序\灵枢-skill" --force`。
 
 **DSH（DeepSeek）插件 · 只读可见**：DSH 桌面上安装的插件（如 `whale-girl-plus`）也能看到，但它们不是灵枢技能格式，只看不改：
 
