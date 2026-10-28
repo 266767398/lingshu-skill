@@ -36,6 +36,11 @@
 - **只读时前端禁用写按钮**：横幅之外，写按钮全部置灰（tab 切换与检索/注入预览保留），不再"能点但全部失败"。
 - **情绪 top 列表补转义**（与同块 peak/end 对齐）；`/api/emotion` 未知 action 明确 400 不再假成功；`tags/entities` 非数组传参直接 400 防污染；token 比较改 `hmac.compare_digest`。
 
+**并发写锁补齐（记忆整库覆写路径）**
+
+- 此前 `forget` / `dream` / `dream --apply` / `work add|done|clear` / `review confirm|discard` 以及面板 `/api/memory` 编辑，都是「先无锁读全量 → 改 → `save_all` 整库覆写」，锁只包了最后一步写入，两个进程并发时会用各自的旧快照互相覆盖、丢更新。现在把这些路径的**读-改-写整体**放进 `_locked(hippocampus.jsonl)`（`work_*` 用 `WORKING_FILE` 锁）；`set_memory_review` 同步纳入。
+- 实测：24 个进程并发 `remember` 后记忆数精确 24（无丢失）；6 个 `forget` + 2 个 `dream --auto` 并发混合写入，无 `TimeoutError`、无残留 `.lock`，数据分层与计数一致。
+
 **文档同步**
 
 - 版本号 2.8→2.9（SKILL / lite / tiny / README）；本 CHANGELOG 新增本条。

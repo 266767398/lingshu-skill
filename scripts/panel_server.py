@@ -535,30 +535,32 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/memory":
                 mid = data.get("id")
-                records = brain.load_all()
-                target = next((m for m in records if m["id"] == mid), None)
-                if not target:
-                    self._json({"error": "没有这条记忆"}, 404)
-                    return
-                for key in ("text", "gist", "pinned"):
-                    if key in data:
-                        target[key] = data[key]
-                if "kind" in data:
-                    kind = str(data["kind"] or "").strip()
-                    if kind not in brain.KINDS:  # 白名单：防恶意/手滑写入怪异类型
-                        self._json({"error": f"kind 只能是：{'、'.join(brain.KINDS)}"}, 400)
+                # 读-改-写整体加锁：save_all 是整库快照覆写，不加锁会覆盖掉并发写入
+                with brain._locked(brain.HOME / "hippocampus.jsonl"):
+                    records = brain.load_all()
+                    target = next((m for m in records if m["id"] == mid), None)
+                    if not target:
+                        self._json({"error": "没有这条记忆"}, 404)
                         return
-                    target["kind"] = kind
-                if "importance" in data:
-                    imp = float(data["importance"])
-                    target["importance"] = round(max(0.0, min(1.0, imp / 10 if imp > 1 else imp)), 3)
-                if "tags" in data:
-                    tags = data["tags"]
-                    if not isinstance(tags, list):
-                        self._json({"error": "tags 必须是数组"}, 400)
-                        return
-                    target["tags"] = [str(t).strip() for t in tags if str(t).strip()]
-                brain.save_all(records)
+                    for key in ("text", "gist", "pinned"):
+                        if key in data:
+                            target[key] = data[key]
+                    if "kind" in data:
+                        kind = str(data["kind"] or "").strip()
+                        if kind not in brain.KINDS:  # 白名单：防恶意/手滑写入怪异类型
+                            self._json({"error": f"kind 只能是：{'、'.join(brain.KINDS)}"}, 400)
+                            return
+                        target["kind"] = kind
+                    if "importance" in data:
+                        imp = float(data["importance"])
+                        target["importance"] = round(max(0.0, min(1.0, imp / 10 if imp > 1 else imp)), 3)
+                    if "tags" in data:
+                        tags = data["tags"]
+                        if not isinstance(tags, list):
+                            self._json({"error": "tags 必须是数组"}, 400)
+                            return
+                        target["tags"] = [str(t).strip() for t in tags if str(t).strip()]
+                    brain.save_all(records)
                 self._json({"ok": True, "memory": memory_view(target)})
                 return
 

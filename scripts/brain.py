@@ -378,20 +378,23 @@ def set_memory_review(mid: str, status: str) -> dict:
     """确认 / 废弃一条 AI 整理的记忆（confirm → 转正；discard → 移入淡忘区）。"""
     if READONLY:
         raise PermissionError("记忆库当前只读，无法审核。")
-    records = load_all()
-    target = next((m for m in records if m.get("id") == mid), None)
-    if not target:
-        raise ValueError(f"没有这条记忆：{mid}")
-    if status == "confirm":
-        target["review"] = "confirmed"
-        target["review_at"] = now_ts()
-    elif status == "discard":
-        target["layer"] = "dust"
-        target["forgotten_at"] = now_ts()
-        target["review"] = "discarded"
-    else:
-        raise ValueError("状态只能是 confirm / discard")
-    save_all(records)
+    # 读-改-写整体放在写锁里：否则并发的 remember/dream 可能在我们读完之后插入新记忆，
+    # 被这里的 save_all 用旧快照整库覆盖而丢失。
+    with _locked(HOME / "hippocampus.jsonl"):
+        records = load_all()
+        target = next((m for m in records if m.get("id") == mid), None)
+        if not target:
+            raise ValueError(f"没有这条记忆：{mid}")
+        if status == "confirm":
+            target["review"] = "confirmed"
+            target["review_at"] = now_ts()
+        elif status == "discard":
+            target["layer"] = "dust"
+            target["forgotten_at"] = now_ts()
+            target["review"] = "discarded"
+        else:
+            raise ValueError("状态只能是 confirm / discard")
+        save_all(records)
     return target
 
 
@@ -933,14 +936,17 @@ def recent(k: int = 6, layers: tuple = ("hippo", "cortex")) -> list:
 
 
 def forget(memory_id: str) -> bool:
-    records = load_all()
-    for m in records:
-        if m["id"] == memory_id and m.get("layer") != "dust":
-            m["layer"] = "dust"
-            m["forgotten_at"] = now_ts()
-            m["detail"] = round(max(0.15, float(m.get("detail", 1)) * 0.5), 2)
-            save_all(records)
-            return True
+    # 读-改-写整体加锁：forget 用的是 save_all 整库快照覆写，
+    # 不加锁会把锁外并发写入的新记忆一起丢回旧状态。
+    with _locked(HOME / "hippocampus.jsonl"):
+        records = load_all()
+        for m in records:
+            if m["id"] == memory_id and m.get("layer") != "dust":
+                m["layer"] = "dust"
+                m["forgotten_at"] = now_ts()
+                m["detail"] = round(max(0.15, float(m.get("detail", 1)) * 0.5), 2)
+                save_all(records)
+                return True
     return False
 
 
@@ -984,12 +990,13 @@ def work_add(text: str, tag: str = "", why: str = "") -> list:
     if not text:
         raise ValueError("工作记忆内容为空")
     ensure_home()
-    rows = load_working()
-    rows.append({"ts": now_ts(), "text": text,
-                 "tag": (tag or "").strip(), "why": (why or "").strip(),
-                 "open": True})
-    rows = rows[-WORKING_CAPACITY:]
-    write_jsonl(WORKING_FILE, rows)
+    with _locked(WORKING_FILE):
+        rows = load_working()
+        rows.append({"ts": now_ts(), "text": text,
+                     "tag": (tag or "").strip(), "why": (why or "").strip(),
+                     "open": True})
+        rows = rows[-WORKING_CAPACITY:]
+        write_jsonl(WORKING_FILE, rows)
     return rows
 
 
@@ -999,16 +1006,18 @@ def work_done(idx: int) -> list:
     蔡格尼克效应：没做完的事会在脑子里反复冒出来；一旦做完，
     动机满足了，它就迅速退场——"完成"本身就是一种释放。
     """
-    rows = load_working()
-    if 1 <= idx <= len(rows):
-        rows[idx - 1]["open"] = False
-        write_jsonl(WORKING_FILE, rows)
+    with _locked(WORKING_FILE):
+        rows = load_working()
+        if 1 <= idx <= len(rows):
+            rows[idx - 1]["open"] = False
+            write_jsonl(WORKING_FILE, rows)
     return rows
 
 
 def work_clear() -> None:
-    if WORKING_FILE.exists():
-        write_jsonl(WORKING_FILE, [])
+    with _locked(WORKING_FILE):
+        if WORKING_FILE.exists():
+            write_jsonl(WORKING_FILE, [])
 
 
 def work_flush(why: str = "会话结束前决定留下", skip_done: bool = False) -> dict:
@@ -2720,45 +2729,51 @@ def cluster_memories(records: list, max_clusters: int = 6, include_ids: set | No
 
 def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
     ensure_home()
-    records = load_all()
     now = now_ts()
     report = {"trigger": trigger, "at": now, "forgotten": [], "promoted": [], "faded": 0, "clusters": []}
 
-    for m in records:
-        if m.get("layer") == "dust" or m.get("pinned"):
-            continue
-        # 封存的原文不做细节淡化、不进淡忘区：它的价值就是"一个字都没丢"
-        verbatim = bool(m.get("verbatim"))
-        R = retention(m, now)
-        if (not verbatim and m.get("layer") == "hippo" and R < RETENTION_FLOOR
-                and m.get("importance", 0.5) < 0.75 and now - float(m.get("created", now)) > 2 * DAY):
-            m["layer"] = "dust"
-            m["forgotten_at"] = now
-            m["detail"] = round(max(0.12, float(m.get("detail", 1)) * 0.4), 2)
-            report["forgotten"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(m["text"])})
-            continue
-        if (m.get("layer") == "hippo" and R >= 0.45
-                and (m.get("access_count", 0) >= 2 or m.get("importance", 0) >= 0.78)):
-            m["layer"] = "cortex"
-            m["consolidated"] = True
-            report["promoted"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(m["text"])})
-        if verbatim:
-            m["detail"] = 1.0  # 封存件永不模糊
-        else:
-            target = round(0.35 + 0.65 * R, 2)
-            if float(m.get("detail", 1)) > target:
-                m["detail"] = target
-                report["faded"] += 1
-        if not m.get("gist"):
-            m["gist"] = heuristic_gist(m["text"])
+    # 读-改-写整体加锁：dream 用 save_all 整库快照覆写，
+    # 不加锁会把锁外并发写入的新记忆用旧快照整库覆盖丢。dry_run 不写盘也走锁（只读场景无所谓）
+    with _locked(HOME / "hippocampus.jsonl"):
+        records = load_all()
 
-    clusters = cluster_memories(records, include_ids={x["id"] for x in report["promoted"]})
+        for m in records:
+            if m.get("layer") == "dust" or m.get("pinned"):
+                continue
+            # 封存的原文不做细节淡化、不进淡忘区：它的价值就是"一个字都没丢"
+            verbatim = bool(m.get("verbatim"))
+            R = retention(m, now)
+            if (not verbatim and m.get("layer") == "hippo" and R < RETENTION_FLOOR
+                    and m.get("importance", 0.5) < 0.75 and now - float(m.get("created", now)) > 2 * DAY):
+                m["layer"] = "dust"
+                m["forgotten_at"] = now
+                m["detail"] = round(max(0.12, float(m.get("detail", 1)) * 0.4), 2)
+                report["forgotten"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(m["text"])})
+                continue
+            if (m.get("layer") == "hippo" and R >= 0.45
+                    and (m.get("access_count", 0) >= 2 or m.get("importance", 0) >= 0.78)):
+                m["layer"] = "cortex"
+                m["consolidated"] = True
+                report["promoted"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(m["text"])})
+            if verbatim:
+                m["detail"] = 1.0  # 封存件永不模糊
+            else:
+                target = round(0.35 + 0.65 * R, 2)
+                if float(m.get("detail", 1)) > target:
+                    m["detail"] = target
+                    report["faded"] += 1
+            if not m.get("gist"):
+                m["gist"] = heuristic_gist(m["text"])
+
+        clusters = cluster_memories(records, include_ids={x["id"] for x in report["promoted"]})
+        if not dry_run:
+            save_all(records)
+
     report["clusters"] = clusters
     task_id = f"dream_{now}"
     report["task_id"] = task_id
 
     if not dry_run:
-        save_all(records)
         if clusters:
             pending = {
                 "task_id": task_id,
@@ -2845,48 +2860,51 @@ def apply_dream(result: dict) -> dict:
         raise ValueError(
             f"任务对不上：apply 里的 task_id={task_id!r}，与 pending.json 的 {pending_id!r} 不一致，拒绝应用。"
         )
-    records = load_all()
-    by_id = {m["id"]: m for m in records}
-    applied = {"memories": 0, "forgotten": 0, "persona": [], "rejected": []}
+    # 读-改-写（新增记忆 + 改 source 记忆的 consolidate/层 + forget）整体加锁，
+    # 避免整库 save_all 把锁外并发写入的新记忆覆盖丢
+    with _locked(HOME / "hippocampus.jsonl"):
+        records = load_all()
+        by_id = {m["id"]: m for m in records}
+        applied = {"memories": 0, "forgotten": 0, "persona": [], "rejected": []}
 
-    for item in result.get("memories") or []:
-        text = (item.get("text") or "").strip()
-        if not text:
-            continue
-        rec = make_record(
-            text,
-            kind=item.get("kind", "fact"),
-            importance=item.get("importance", 0.7),
-            tags=item.get("tags"),
-            entities=item.get("entities"),
-            source="dream",
-            layer="cortex",
-            links=item.get("source_ids") or [],
-        )
-        rec["gist"] = item.get("gist") or heuristic_gist(text)
-        rec["consolidated"] = True
-        rec["detail"] = 1.0
-        # AI 整理出来的记忆先标"待审核"：防止做梦合并/编造的内容直接当事实沉淀。
-        rec["review"] = "pending"
-        rec["review_source"] = "dream"
-        records.append(rec)
-        applied["memories"] += 1
-        for sid in rec["links"]:
-            src = by_id.get(sid)
-            if src:
-                src["consolidated"] = True
-                src["links"] = _dedupe(src.get("links", []) + [rec["id"]])
-                if src.get("layer") == "hippo" and src.get("importance", 0.5) >= 0.5:
-                    src["layer"] = "cortex"
+        for item in result.get("memories") or []:
+            text = (item.get("text") or "").strip()
+            if not text:
+                continue
+            rec = make_record(
+                text,
+                kind=item.get("kind", "fact"),
+                importance=item.get("importance", 0.7),
+                tags=item.get("tags"),
+                entities=item.get("entities"),
+                source="dream",
+                layer="cortex",
+                links=item.get("source_ids") or [],
+            )
+            rec["gist"] = item.get("gist") or heuristic_gist(text)
+            rec["consolidated"] = True
+            rec["detail"] = 1.0
+            # AI 整理出来的记忆先标"待审核"：防止做梦合并/编造的内容直接当事实沉淀。
+            rec["review"] = "pending"
+            rec["review_source"] = "dream"
+            records.append(rec)
+            applied["memories"] += 1
+            for sid in rec["links"]:
+                src = by_id.get(sid)
+                if src:
+                    src["consolidated"] = True
+                    src["links"] = _dedupe(src.get("links", []) + [rec["id"]])
+                    if src.get("layer") == "hippo" and src.get("importance", 0.5) >= 0.5:
+                        src["layer"] = "cortex"
 
-    for sid in result.get("forget") or []:
-        m = by_id.get(sid)
-        if m and m.get("layer") != "dust":
-            m["layer"] = "dust"
-            m["forgotten_at"] = now_ts()
-            applied["forgotten"] += 1
+        for sid in result.get("forget") or []:
+            m = by_id.get(sid)
+            if m and m.get("layer") != "dust":
+                m["layer"] = "dust"
+                m["forgotten_at"] = now_ts()
+                applied["forgotten"] += 1
 
-    save_all(records)
+        save_all(records)
 
     upd = result.get("persona_updates") or {}
     if upd:
