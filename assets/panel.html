@@ -2745,14 +2745,8 @@ async function checkUpdate(auto){
       let detail;
       if (r.changelog) {
         // 人话版更新说明：后端从源的 CHANGELOG.md 抽出 (已装版本, 最新版本] 区间正文
-        // 轻量 markdown：标题加粗、bullet 保留、**x** 加粗，其余原样（esc 先转义防 XSS）
-        const md = String(r.changelog).split("\n").map(ln => {
-          const e = esc(ln);
-          if (/^###\s/.test(ln)) return "<b>" + e.replace(/^###\s*/, "") + "</b>";
-          if (/^##\s/.test(ln)) return "<b style='font-size:1.05em'>" + e.replace(/^##\s*/, "") + "</b>";
-          if (/^[-*]\s/.test(e)) return "· " + e.replace(/^[-*]\s*/, "");  // bullet 记号渲染成圆点
-          return e.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-        }).join("\n");
+        // 只处理 **x** 加粗（星号中间的内容加粗显示），其余原样；esc 先转义防 XSS
+        const md = esc(String(r.changelog)).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
         detail = md + "\n\n<i>更新会以本地最新内容镜像同步到全局技能目录，记忆数据不受影响。</i>";
       } else {
         // 兜底：CHANGELOG 拿不到时退回文件清单
