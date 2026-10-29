@@ -1,0 +1,24 @@
+{
+  "name": "dsh-lingshu-startup",
+  "version": "0.1.0",
+  "description": "灵枢记忆插件：会话启动时自动运行 lingshu 的 brain.py startup，把人格/记忆/待办注入每个新会话，不依赖模型自觉读 SKILL.md。",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "plugin.js",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "config": {
+    "brainPy": "运行 brain.py 的绝对路径；留空则自动从 ~/.dsh/skills/lingshu 或 ~/.trae-cn/skills/lingshu 探测",
+    "python": "Python 解释器，默认 python",
+    "budget": "startup 注入的 token 预算，默认 1400",
+    "timeoutMs": "startup 子进程超时毫秒数，默认 8000；超时/失败静默放行，不阻塞会话",
+    "injectResume": "resume 来源的会话（续聊）是否也注入，默认 true"
+  }
+}

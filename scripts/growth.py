@@ -23,6 +23,13 @@ import sys
 import time
 from pathlib import Path
 
+# Windows 控制台默认 GBK，中文输出会变乱码。无条件 reconfigure 成 UTF-8。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import brain  # noqa: E402
 

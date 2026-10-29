@@ -4,6 +4,15 @@
 
 ## v2.12 — 隐藏问题清剿：锁更稳、快照不回流、坏体有去重
 
+### v2.12 第六轮：从"自觉"到"机制" — cordis 插件 + 六项体验修复
+
+- **cordis 启动注入插件（`cordis-plugin/`，4 文件）**：DSH catalog 只把 name+description 给模型，正文读不读靠模型"自觉"，没有任何机制保证。新插件监听 `agent/session-start` 事件（含 startup/resume/clear/compact），自动探测 `~/.dsh/skills/lingshu` / `~/.trae-cn/skills/lingshu` 下的 `scripts/brain.py`，跑 `startup` 并把注入文本 `agent.inject()` 进会话——恢复关系与上下文从"模型恰好了"变成"插件保证"。失败/超时/未初始化一律静默跳过，绝不阻塞会话；可配置 brainPy/python/budget/timeoutMs/injectResume。
+- **SKILL.md description 精简**：frontmatter 从约 400 字砍到两句——catalog 占预算且模型扫一眼抓不到重点，只留"是什么 + 何时用"。
+- **路径摩擦**：SKILL.md 加「路径约定」区块——命令 cwd 不一定是技能目录，明确"先 cd 或用绝对路径"两种写法。
+- **Windows 编码**：brain.py / growth.py 入口无条件 `reconfigure(encoding="utf-8")` stdout/stderr，用户不再需要手动设 `PYTHONIOENCODING`（此前 GBK 控制台中文变 鐏垫灑）。
+- **高重要性记忆强制待审**：`remember()` 中重要性 ≥0.8（10 分制 ≥8）且来源非用户的记忆自动 `review=pending`——约定/承诺/重要决定一旦记错就是长期错误，与做梦产出同级对待；CLI 写入时明示"已进待审池"。
+- **面板更新按钮**：上一轮已实现 `outdated` 检测 + ↻ 更新按钮，本轮修正 `_diff_signature` 排除 AGENTS.md（安装时重新生成，mtime 必然不同导致误报）；面板不显示按钮的用户侧原因是全局副本为旧版，更新本机副本即可。
+
 ### v2.12 面板：技能「更新」按钮 + 有更新徽标
 
 - **`list_skills` 新增 `outdated` 检测**：对比本地源目录与全局已装副本的内容签名（相对路径+大小+mtime，排除 `__pycache__`/临时文件/安装时重新生成的 AGENTS.md），不一致即"有更新"。之前只能装/不装，`scripts/` 改了但 SKILL.md 没变时用户毫无感知。

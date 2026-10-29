@@ -32,6 +32,14 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 
+# Windows 控制台默认 GBK，中文输出会变乱码（鐏垫灑）。无条件 reconfigure 成 UTF-8，
+# 用户不用再手动设 PYTHONIOENCODING。非 Windows 或不支持 reconfigure 的流静默跳过。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # ---------------------------------------------------------------- 基础环境
 
 HOME = Path(os.environ.get("BRAIN_MEMORY_HOME") or (Path.home() / ".brain-memory"))
@@ -86,14 +94,6 @@ DEFAULT_CONFIG = {
     # human = 恒为拟人模式（情绪照常注入）。用于解决"刚聊完情绪化话题立刻写代码"。
     "mode": "auto",
 }
-
-if sys.platform == "win32":
-    for _s in (sys.stdout, sys.stderr):
-        try:
-            _s.reconfigure(encoding="utf-8")
-        except Exception:
-            pass
-
 
 # ---------------------------------------------------------------- 工具函数
 
@@ -1345,6 +1345,11 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
         rec = make_record(text, kind, importance, tags, entities, source, layer)
         rec["importance"] = round(float(rec.get("importance", 0.5)) + (boost if emo_name else 0), 3)
         rec["importance"] = max(0.0, min(1.0, rec["importance"]))
+        # 高重要性待审闸：重要性 ≥0.8（10 分制 ≥8）的记忆多半是约定/承诺/重要决定，
+        # 一旦记错就是长期错误，与做梦产出一样先进待审池，用户确认后转正。
+        if rec["importance"] >= 0.8 and source != "user":
+            rec["review"] = "pending"
+            rec["review_source"] = f"high-importance:{source}"
         rec["stability"] = min(MAX_STABILITY, rec.get("stability", DEFAULT_STABILITY) * stability_boost)
         if emo_name:
             rec["emotion"] = emo_name
@@ -4929,6 +4934,8 @@ def _main(argv=None) -> int:
                             args.source, args.layer,
                             emotion=(args.emotion or None))
         print(f"{'已合并' if how == 'merged' else '已写入'}：{rec['id']} ({rec['layer']}, 重要性 {rec['importance']})")
+        if rec.get("review") == "pending":
+            print("  ⚠ 重要性高，已进待审池——用户确认前不当既定事实引用（brain.py review list 查看）")
         if rec.get("emotion"):
             print(f"  情绪标记：{rec['emotion']}（唤醒 {rec.get('emotional', '?')}，记得更牢）")
         print(f"  {rec['gist']}")
