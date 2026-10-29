@@ -16,7 +16,7 @@
   },
   "config": {
     "brainPy": "运行 brain.py 的绝对路径；留空则自动从 ~/.dsh/skills/lingshu 或 ~/.trae-cn/skills/lingshu 探测",
-    "python": "Python 解释器，默认 python",
+    "python": "python.exe 绝对路径；留空自动探测 DSH 自带运行时等位置（spawn 不解析 PATHEXT，PATH 只有 python.cmd 时必须留空走探测或写 exe 全路径）",
     "budget": "startup 注入的 token 预算，默认 1400",
     "timeoutMs": "startup 子进程超时毫秒数，默认 3000（agent/created 是串行事件，太久会拖慢新会话）；超时/失败静默放行，不阻塞会话",
     "injectResume": "resume 来源的会话（续聊）是否也注入，默认 true；clear/compact 一律不注入"

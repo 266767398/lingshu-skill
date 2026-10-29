@@ -32,7 +32,7 @@ pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 | 项 | 默认 | 说明 |
 |---|---|---|
 | brainPy | 自动探测 | brain.py 绝对路径；留空则依次找 `~/.dsh/skills/lingshu`、`~/.trae-cn/skills/lingshu` |
-| python | `python` | Python 解释器 |
+| python | 自动探测 | **python.exe 绝对路径**。spawn 不解析 PATHEXT（PATH 里只有 python.cmd 的机器上 `spawn('python')` 直接 ENOENT），留空则优先探测 DSH 自带运行时 `<DSH_HOME>/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe`，都没找到退回 `ComSpec` 让 cmd 解析 `.cmd` |
 | budget | `1400` | startup 注入 token 预算 |
 | timeoutMs | `3000` | 子进程超时；超时/失败**静默放行**，绝不阻塞会话（`agent/created` 是串行事件，默认值压到 3s 免拖慢新会话） |
 | injectResume | `true` | 续聊（resume）的会话是否也注入；`clear` / `compact` 一律不注入（同会话上下文重建，重复注入浪费 token） |
@@ -41,5 +41,8 @@ pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 
 - 只读语义：`brain.py startup` 本身只读记忆库（仅更新 last_startup 时间戳）；
   HOME 不可写时 brain.py 自动只读降级照样注入。
-- 失败宽容：灵枢没装、Python 不在、超时——全部静默跳过，会话照常开始。
+- 失败宽容：灵枢没装、Python 不在、超时——降级跳过会话照常开始；配置类失败会
+  `ctx.logger.warn` 打一次日志（不重复刷屏），不静默吞错。监听器有顶层兜底，
+  任何异常都不冒泡（serial `agent/created` 失败会回滚会话创建，绝不允许）。
+- 注入身份：消息 `source` 用 `runtime-context`，不冒充用户说的话。
 - 与技能更新解耦：本插件不复制 brain.py，永远调用全局技能目录里的最新版。
