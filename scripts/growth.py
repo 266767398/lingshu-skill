@@ -1001,6 +1001,12 @@ def update_check(name: str = "lingshu") -> dict:
     if not (src_dir / "SKILL.md").is_file() and _is_lingshu(name, {}, None):
         # 灵枢本体：源就是技能包自身目录（scripts/assets 就在这里），不走 skills/ 技能区
         src_dir = Path(__file__).resolve().parent.parent
+        # 面板跑在全局副本里时，"自身目录"==已装目录，自己比自己永远"一致"。
+        # 此时查配置里登记的开发源目录（config.lingshu_source_dir），有就用它。
+        if src_dir.resolve() == _find_installed(_require_slug(name)).resolve():
+            cfg_src = str(brain.load_config().get("lingshu_source_dir") or "")
+            if cfg_src and (Path(cfg_src) / "SKILL.md").is_file():
+                src_dir = Path(cfg_src)
     src_md = src_dir / "SKILL.md"
     if not src_md.is_file():
         return {"name": name, "installed": False, "outdated": False}
@@ -1024,14 +1030,62 @@ def update_check(name: str = "lingshu") -> dict:
     for rel, size, mtime in sorted(src_sig - dst_sig):
         (changed if rel in dst_rels else added).append(rel)
     removed = [rel for rel, *_ in sorted(dst_sig - src_sig)]
-    return {
+    # 已装版本：读全局副本 SKILL.md 的 frontmatter（对比基准，决定 changelog 截到哪）
+    try:
+        inst_meta, _ = parse_frontmatter((installed_dir / "SKILL.md").read_text(encoding="utf-8"))
+    except OSError:
+        inst_meta = {}
+    out = {
         "name": name,
         "installed": True,
         "outdated": bool(src_sig != dst_sig),
         "version": _ver(meta.get("version", 1)),
+        "installed_version": _ver(inst_meta.get("version", 1)),
         "changed": changed, "added": added, "removed": removed,
         "global_path": str(installed_dir),
     }
+    if out["outdated"]:
+        out["changelog"] = _changelog_between(src_dir, out["installed_version"], out["version"])
+    return out
+
+
+def _changelog_between(src_dir: Path, old_ver: str, new_ver: str) -> str:
+    """从源的 CHANGELOG.md 抽取 (old_ver, new_ver] 区间的更新说明（人类可读正文）。
+
+    只保留一级版本标题（## vX.Y）到下一个一级版本标题之间的内容，去掉括号里的
+    合并哈希注释行；old_ver 在源里找不到时返回 None（前端回退显示文件清单）。
+    """
+    md = src_dir / "CHANGELOG.md"
+    if not md.is_file():
+        return None
+    try:
+        lines = md.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+
+    def _vnum(s: str) -> tuple | None:
+        m = re.match(r"v?(\d+)(?:\.(\d+))?(?:\.(\d+))?", s.strip())
+        return (int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0)) if m else None
+
+    start = _vnum(old_ver)
+    end = _vnum(new_ver)
+    if not end:
+        return None
+    out, picking = [], False
+    for ln in lines:
+        m = re.match(r"##\s+(v?[\d.]+)", ln)
+        if m:
+            v = _vnum(m.group(1))
+            picking = bool(v and v > start and v <= end) if start else bool(v and v <= end)
+            if picking:
+                out.append(ln.split("—")[0].rstrip(" —-"))  # 标题行去掉破折号后的副标题哈希
+            continue
+        if picking:
+            if ln.strip().startswith("（") or ln.strip().startswith("("):
+                continue  # 合并哈希注释行
+            out.append(ln)
+    text = "\n".join(out).strip()
+    return text or None
 
 
 AGENTS_BLOCK_START = "<!-- lingshu:start -->"
