@@ -27,6 +27,36 @@ pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 # 并在 profile package.json 的 dsh.profile.bundles 里加 "dsh-lingshu-startup"）
 ```
 
+## ⚠️ 装完必须重启 DSH（Host 不会热加载 bundle）
+
+**Host 的插件树（cordis profile bundles）是主进程启动时一次性组合的**——装完/改完
+插件不重启，新开的会话跑的还是旧 Host，它压根不知道有这个插件。实测踩坑：
+12:11 启动 Host，12:22 装插件，之后所有新会话都只有 skill catalog 摘要、没有注入。
+
+对照记忆（为什么 skill 能热更新而插件不能）：
+
+| | 生效时机 | 原因 |
+|---|---|---|
+| skill catalog | **实时热更新** | skill-filesystem 用 chokidar 监视技能目录，运行时感知增删 |
+| cordis 插件 | **必须重启 Host** | bundle 组合在主进程启动时一次性完成 |
+
+（`dshmarket` 不出现在设置里也是同一个原因——它是 bundle，不是 skill。）
+
+### 装完后的验证清单
+
+1. **完全退出并重启 DSH**（主进程重启，不是只关窗口/新开会话）。
+2. 设置里能看见 `dsh-lingshu-startup`（看不见 = bundle 没挂上：检查 profile
+   `package.json` 的 `dsh.profile.bundles` 是否含 `dsh-lingshu-startup`，以及
+   node_modules 里包是否存在）。
+3. 开一个新会话，随便说句话——上下文里应出现灵枢 startup 注入的人格/记忆段。
+4. 没注入时按下面排错（插件日志会 warn 一次，不刷屏）：
+   - `未找到 brain.py` → 灵枢没全局化，先 `growth.py install lingshu`；
+   - `startup 未产出注入文本` → python 问题：本机 PATH 只有 python.cmd shim
+     （如 ServBay）时 cmd 兜底也救不了，确认 DSH 自带运行时
+     `~/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe`
+     存在（探测优先命中它），或在配置里手填 `python`（exe 全路径）；
+   - 都没有 warn 也没注入 → 插件没挂上，回到第 2 步。
+
 ## 配置项
 
 | 项 | 默认 | 说明 |

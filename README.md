@@ -204,6 +204,8 @@ python scripts/brain.py assoc unlink m_3f2a... m_9c1d...
   上下文里**。`clear` / `compact` 不重复注入，进程内按 agent 去重。
 - 失败宽容：灵枢没装、Python 不在、超时——全部静默跳过，绝不阻塞会话；
   `brain.py startup` 只读记忆库，HOME 不可写时自动只读降级照样注入。
+  **装完插件必须完全重启 DSH**——Host 的插件树（cordis bundles）是主进程启动时
+  一次性组合的，不重启新会话感知不到（skill catalog 走 chokidar 热更新，插件不是）。
 - **目录约定**：`cordis-plugin/` 下**一个插件一个子目录**，各自独立打包安装，
   互不干扰。详见 [`cordis-plugin/lingshu-startup/README.md`](cordis-plugin/lingshu-startup/README.md)。
 
