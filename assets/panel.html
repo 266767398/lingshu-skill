@@ -236,7 +236,7 @@
         <div class="sub" id="pageSub"></div>
       </div>
       <div class="sub" id="clock">2026/10/23 15:59:00</div>
-      <button class="btn" id="btn-self-update" title="检查灵枢本体有没有更新" style="margin-left:12px">检查更新<span id="upd-dot" class="hidden" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#c47f17;margin-left:6px"></span></button>
+      <button class="btn" id="btn-self-update" title="检查灵枢本体有没有更新" style="margin-left:12px">检查更新<span id="upd-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:#c47f17;margin-left:6px"></span></button>
     </header>
 
     <div class="card hidden" id="ro-banner" style="margin-bottom:14px;border-color:var(--red);background:rgba(201,107,95,.08)">
@@ -2727,6 +2727,7 @@ setInterval(() => {
 load();
 
 // ---- 灵枢本体更新：开面板自动查一次 + 右上角按钮手动查
+let updRiskAccepted = false; // 弹窗里看过风险告知后置 true，第二次点「更新」才带 yes
 async function checkUpdate(auto){
   const btn = $("btn-self-update");
   try {
@@ -2736,11 +2737,11 @@ async function checkUpdate(auto){
     const dot = $("upd-dot");
     if (!r.installed) {
       if (!auto) showUpdModal("灵枢本体尚未安装", "还没装到全局技能目录。去「技能」页点 ⇩ 安装，或用命令行 skill install。", false);
-      dot.classList.add("hidden");
+      dot.style.display = "none";
       return;
     }
     if (r.outdated) {
-      dot.classList.remove("hidden");
+      dot.style.display = "inline-block";
       const lines = [];
       if (r.changed && r.changed.length) lines.push("<b>内容有变化</b>：\n" + r.changed.map(x => "  · " + esc(x)).join("\n"));
       if (r.added && r.added.length) lines.push("<b>新增文件</b>：\n" + r.added.map(x => "  · " + esc(x)).join("\n"));
@@ -2748,7 +2749,7 @@ async function checkUpdate(auto){
       showUpdModal("灵枢本体有更新（v" + esc(r.version) + "）",
         (lines.join("\n\n") || "内容与全局副本不一致。") + "\n\n更新会以本地最新内容镜像同步到全局技能目录，记忆数据不受影响。", true);
     } else {
-      dot.classList.add("hidden");
+      dot.style.display = "none";
       if (!auto) showUpdModal("已是最新", "全局副本与本地内容一致（v" + esc(r.version) + "），没有可更新的内容。", false);
     }
   } catch (e) {
@@ -2767,10 +2768,22 @@ $("upd-apply").addEventListener("click", async () => {
   const btn = $("upd-apply");
   try {
     btn.disabled = true;
-    await post("/api/skill", {action: "install", name: "lingshu", force: true});
+    // 第一次不带 yes：风险告知未接受时后端返回 risk_required，弹窗展示风险后
+    // 第二次点击才带 yes=true 真正继续——不让风险确认被静默跳过
+    const r = await post("/api/skill", {action: "install", name: "lingshu",
+                                        force: true, yes: updRiskAccepted ? true : undefined});
+    const st = r.result && r.result.state;
+    if (st === "risk_required") {
+      updRiskAccepted = true;
+      const risks = (r.result.risks || []).map(x => "  · " + esc(x)).join("\n");
+      $("upd-detail").innerHTML = "首次更新灵枢本体前请先了解它能做什么：<br><br>" +
+        (risks || "灵枢会自动读写记忆数据目录。") + "<br><br>确认接受并继续更新吗？";
+      return;
+    }
+    if (st === "failed" || r.ok === false) throw new Error((r.result && r.result.error) || "更新失败");
     toast("灵枢本体已更新到全局技能目录");
     $("upd-modal").classList.add("hidden");
-    $("upd-dot").classList.add("hidden");
+    $("upd-dot").style.display = "none";
     await loadWS();
   } catch (e) {
     toast(e.message || "更新失败", true);

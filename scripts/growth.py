@@ -1019,12 +1019,10 @@ def update_check(name: str = "lingshu") -> dict:
 
     src_sig = _diff_signature(src_dir)
     dst_sig = _diff_signature(installed_dir)
+    dst_rels = {rel for rel, *_ in dst_sig}
     changed, added = [], []
     for rel, size, mtime in sorted(src_sig - dst_sig):
-        if any(rel == r for r, *_ in dst_sig):
-            changed.append(rel)
-        else:
-            added.append(rel)
+        (changed if rel in dst_rels else added).append(rel)
     removed = [rel for rel, *_ in sorted(dst_sig - src_sig)]
     return {
         "name": name,
