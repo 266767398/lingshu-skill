@@ -1341,6 +1341,7 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
                 m["tags"] = _dedupe(m.get("tags", []) + [t.strip().lstrip("#") for t in (tags or [])])
                 m["entities"] = _dedupe(m.get("entities", []) + (entities or []))
                 save_all(records)
+                _remember_desire_nudge(m, imp)
                 return m, "merged"
 
         rec = make_record(text, kind, importance, tags, entities, source, layer)
@@ -1357,7 +1358,26 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
             rec["emotional"] = round(emo_arousal, 2)
         records.append(rec)
         save_all(records)
+        _remember_desire_nudge(rec, rec.get("importance"))
         return rec, "created"
+
+
+def _remember_desire_nudge(rec: dict, imp) -> None:
+    """记事牵动六欲（自动微调）：记东西本身就是表达，重要的事还带着求知/掌控。
+
+    重要度高 → 表达欲/成就欲；探查类（question/insight）→ 求知欲。
+    幅度 1~2 点，冷却节流，避免频繁对话反复写盘。
+    """
+    changes = {"表达欲": 1.0}
+    kind = (rec.get("kind") or "")
+    if kind in ("question", "insight", "curiosity"):
+        changes["求知欲"] = 2.0
+    if _num(imp, 0) >= 0.7:
+        changes["成就欲"] = 1.5
+    try:
+        desire_nudge(changes)
+    except Exception:
+        pass          # 六欲牵动是锦上添花，绝不能让记事本身失败
 
 
 def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
@@ -1498,6 +1518,13 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
         if touched:
             _strengthen_write(touched)
 
+    # —— 回忆牵动六欲：真想起点什么了，求知欲得到一点满足（自动微调，冷却节流）——
+    # 只在有查询词且确实命中时触发，startup 注入（无 query）不算"回忆"。
+    if q_terms and result and not READONLY:
+        try:
+            desire_nudge({"求知欲": 1.5})
+        except Exception:
+            pass          # 锦上添花，失败不影响回忆本身
     return [(m, round(s, 4), parts) for m, s, parts in result]
 
 
@@ -1787,6 +1814,21 @@ DESIRES = {
 DESIRE_DEFAULT = 60
 DESIRE_DECAY_PER_DAY = 6      # 每天自然回落 6 点
 DESIRE_FLOOR = 8
+# —— 六欲自动变动 ——
+# 六欲不该只等用户手动"满足"：日常对话（七情、记事、回忆）会自然牵动它们。
+# 设计原则：幅度小（1~4 点）、每个欲望有冷却期（节流，避免每次对话都写盘）。
+DESIRE_AUTO_COOLDOWN = 2 * HOUR   # 同一欲望两次自动变动之间的最短间隔
+
+# 七情大类 -> 欲望微调表（正=被激发，负=被消耗）。幅度是基准值，实际按情绪强度缩放。
+# 依据：人逢喜事想做事、想靠近人；受挫时想掌控局面；害怕时想求安稳；好奇本身就是求知。
+DESIRE_EMO_MAP = {
+    "喜": {"成就欲": 3.0, "连接欲": 2.0},
+    "爱": {"连接欲": 3.0},
+    "怒": {"掌控欲": 2.0, "连接欲": -1.0},
+    "哀": {"连接欲": 2.0, "成就欲": -2.0},
+    "惧": {"安全欲": 3.0},
+    "欲": {"求知欲": 2.0},
+}
 EMOTION_HALF_LIFE = 6 * HOUR  # 情绪余波：6 小时衰减一半
 
 # 理智被情绪压制的上限（杏仁核劫持：会压低，但永远压不掉判断力的一半以上）
@@ -1841,6 +1883,47 @@ def desire_low(threshold: float = 35) -> list:
     """长期没被满足的欲望，用来解释"说不清的不得劲"。"""
     return [{"desire": k, "level": v, "hint": DESIRES[k]}
             for k, v in desire_state().items() if v < threshold]
+
+
+def desire_nudge(changes: dict, cooldown: float | None = None) -> dict:
+    """六欲自动微调：日常事件（七情/记事/回忆）牵动欲望的小幅自然波动。
+
+    为什么不直接调 desire_satisfy：那是"满足"语义（幅度大、无节流），
+    日常波动幅度小且频繁，需要按欲望做冷却节流，避免每次对话都写盘。
+    每个欲望冷却期内只生效一次；被跳过的项会原样返回（cooldown=True）。
+    手动 satisfy 不走这里，面板/CLI 行为完全不变。
+    """
+    changes = {k: float(v) for k, v in (changes or {}).items() if k in DESIRES and v}
+    if not changes or READONLY:
+        return {"applied": {}, "skipped": {}}
+    ensure_home()
+    cd = cooldown if cooldown is not None else DESIRE_AUTO_COOLDOWN
+    now = now_ts()
+    path = HOME / "desires.json"
+    with _locked(path):
+        raw = _slurp_json(path, {}) or {}
+        # 冷却记录放在 history.jsonl 里（每条含 nudge 后的欲望状态），避免往
+        # desires.json 里塞结构、让老版本读到脏数据
+        hist = [r for r in read_jsonl(HOME / "desire_history.jsonl")
+                if now - _num(r.get("ts"), 0) < cd]
+        last_seen = {}
+        for r in hist:
+            for k, v in (r.get("applied") or {}).items():
+                last_seen[k] = _num(r.get("ts"), 0)
+        applied, skipped = {}, {}
+        cur = desire_state(now)          # 先结算衰减
+        for k, amt in changes.items():
+            if now - last_seen.get(k, 0) < cd:
+                skipped[k] = amt
+                continue
+            cur[k] = round(max(DESIRE_FLOOR, min(100.0, cur[k] + amt)), 1)
+            applied[k] = amt
+        if applied:
+            atomic_json(path, {"updated": now, "levels": cur})
+            hist_rows = read_jsonl(HOME / "desire_history.jsonl")
+            hist_rows.append({"ts": now, "applied": applied, "levels": cur})
+            write_jsonl(HOME / "desire_history.jsonl", hist_rows[-200:])
+    return {"applied": applied, "skipped": skipped}
 
 
 def emotion_events(limit: int = 0) -> list:
@@ -1999,6 +2082,14 @@ def feel(name: str, intensity: float = 0.6, why: str = "",
         rows = read_jsonl(HOME / "emotions.jsonl")
         rows.append(ev)
         write_jsonl(HOME / "emotions.jsonl", rows)
+    # —— 七情牵动六欲（自动微调，冷却节流见 desire_nudge）——
+    # 情绪大类映射到欲望：开心想做事想靠近人，生气想掌控，难过想被安慰，
+    # 害怕想求稳。幅度按情绪强度缩放，强弱波动才真正影响欲望。
+    grp = emotion_group(name)
+    if grp in DESIRE_EMO_MAP:
+        scale = 0.5 + 0.5 * eff          # 强度 0~1 → 缩放 0.5~1.0
+        desire_nudge({k: round(v * scale, 2)
+                      for k, v in DESIRE_EMO_MAP[grp].items()})
     return ev
 
 
@@ -4589,6 +4680,10 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
     low = desire_low()
     if low:
         body.append("没被满足的欲望：" + "、".join(f"{x['desire']}({x['level']:.0f})" for x in low) + "。")
+        # 低谷自我调节：写日记本身是一次自我觉察，像人睡前盘点了心里的事，
+        # 低着的欲望会回升一点（不是满足，是"被看见"）。幅度小，且只对低谷项。
+        if not dry_run:
+            desire_nudge({x["desire"]: 3.0 for x in low}, cooldown=20 * HOUR)
     else:
         body.append("六欲平稳。")
     body.append(f"理智：{ra['effective']}（基数 {ra['base']}，被情绪压住 {ra['suppress']}%）。")
