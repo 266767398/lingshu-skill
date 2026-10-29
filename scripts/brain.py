@@ -787,13 +787,13 @@ def _replace_retry(tmp: Path, path: Path) -> None:
     """os.replace 覆盖，遇 Windows 文件占用重试；最终失败则清掉 tmp 并抛出。"""
     # Windows 上 os.replace 覆盖"正被别的进程打开读取"的文件会抛 PermissionError。
     # 写方之间有锁互斥，但读方（stats/recall/面板）不加锁；短暂重试几次等读句柄释放。
-    for attempt in range(6):
+    for attempt in range(12):
         try:
             os.replace(tmp, path)
             return
         except PermissionError:
-            if attempt == 5:
-                log_event("io", f"写 {path.name} 失败：文件被占用，重试 6 次仍无果",
+            if attempt == 11:
+                log_event("io", f"写 {path.name} 失败：文件被占用，重试 12 次仍无果",
                           level="error", path=path.name)
                 try:
                     os.unlink(tmp)
