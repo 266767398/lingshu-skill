@@ -2749,8 +2749,9 @@ async function checkUpdate(auto){
     if (r.outdated) {
       dot.style.display = "inline-block";
       const srcLabel = r.source === "gitee" ? "来源：Gitee 远程"
-                     : r.source === "local" ? "来源：本地开发仓库"
-                     : r.source === "none" ? "来源：本地副本（源不可用）" : "";
+                     : r.source === "github" ? "来源：GitHub 远程"
+                     : r.source === "local" ? "来源：本地目录"
+                     : r.source === "none" ? "来源：本地副本（远程源不可用）" : "";
       let detail;
       if (r.changelog) {
         // 人话版更新说明：后端从源的 CHANGELOG.md 抽出 (已装版本, 最新版本] 区间正文
@@ -2770,7 +2771,9 @@ async function checkUpdate(auto){
       dot.style.display = "none";
       if (!auto) {
         const srcTxt = r.source === "gitee" ? "（来源：Gitee 远程）"
-                     : r.source === "local" ? "（来源：本地开发仓库）" : "";
+                     : r.source === "github" ? "（来源：GitHub 远程）"
+                     : r.source === "local" ? "（来源：本地目录）"
+                     : r.source === "none" && r.error ? "（远程源不可用：" + esc(String(r.error).slice(0, 120)) + "）" : "";
         showUpdModal("已是最新", "全局副本与最新内容一致（v" + esc(r.version) + "）" + srcTxt + "，没有可更新的内容。", false);
       }
     }
