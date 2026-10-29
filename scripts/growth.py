@@ -1030,16 +1030,20 @@ def list_skills() -> list:
 
 
 # ---- 远程拉取源（Gitee 优先，GitHub 兜底） --------------------------------
-# 灵枢本体的更新源只走远程拉取：先试 Gitee，失败再试 GitHub，都失败才降级为
-# "源即副本"。纯标准库：REST 匿名接口（urllib，30s 超时），逐文件 base64 拉取。
-# 注意：Gitee 的 /repository/archive/main.zip 归档下载已被风控拦截（对脚本
-# UA 返回 HTML 验证页而非 zip），不能直接用；API v5 的 contents 接口匿名可用。
+# 灵枢本体的更新源只走远程拉取：先试 Gitee（API → zip 归档），失败再试 GitHub
+# API，都失败才降级为"源即副本"。纯标准库（urllib/zipfile，30s 超时），逐文件
+# base64 拉取。Gitee 匿名 API 会触发 IP 风控（403），GitHub 匿名限额 60 次/小时
+# 按 IP 共享易耗尽；可在 config.json 配 gitee_token / github_token 走认证
+# （python scripts/brain.py config set gitee_token <token>）。token 绝不写日志。
 GITEE_API_BASE = "https://gitee.com/api/v5/repos/htmcwy_0/lingshu-skill"
 GITEE_BRANCH = "main"
 GITHUB_REPO = "266767398/lingshu-skill"
 GITHUB_API_BASE = f"https://api.github.com/repos/{GITHUB_REPO}"
 GITHUB_BRANCH = "main"
+GITEE_ZIP_URL = f"https://gitee.com/htmcwy_0/lingshu-skill/repository/archive/{GITEE_BRANCH}.zip"
 REMOTE_TIMEOUT = 30  # 下载超时（秒）
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 import json as _json
 import urllib.request as _urlreq
@@ -1056,15 +1060,28 @@ def _remote_cache_dir() -> Path:
     return d / "lingshu-gitee-src"
 
 
-def _remote_api(url: str) -> object:
-    """调 REST 匿名接口，返回解析后的 JSON。失败抛 URLError/JSONDecodeError。"""
-    req = _urlreq.Request(url, headers={"User-Agent": "lingshu-updater",
-                                        "Accept": "application/json"})
+def _remote_token(host: str) -> str:
+    """取可选的认证 token（gitee/github），未配置返回空串。绝不打日志。"""
+    try:
+        return str(brain.load_config().get(f"{host}_token", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _remote_api(url: str, host: str = "") -> object:
+    """调 REST 接口，配置了 token 则带认证头，否则匿名。失败抛异常由调用方降级。"""
+    headers = {"User-Agent": "lingshu-updater", "Accept": "application/json"}
+    token = _remote_token(host)
+    if token and host == "gitee":
+        headers["PRIVATE-TOKEN"] = token
+    elif token and host == "github":
+        headers["Authorization"] = f"Bearer {token}"
+    req = _urlreq.Request(url, headers=headers)
     with _urlreq.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
         return _json.loads(resp.read().decode("utf-8"))
 
 
-def _fetch_tree_source(api_base: str, branch: str, label: str) -> Path:
+def _fetch_tree_source(api_base: str, branch: str, label: str, host: str) -> Path:
     """从指定 REST 接口拉取 main 分支全部文件到临时缓存目录，返回含 SKILL.md 的根。
 
     先取仓库目录树（recursive=1），再逐个取文本文件内容（base64 解码）。仓库
@@ -1077,7 +1094,7 @@ def _fetch_tree_source(api_base: str, branch: str, label: str) -> Path:
         shutil.rmtree(extract_root, ignore_errors=True)
     extract_root.mkdir(parents=True, exist_ok=True)
 
-    tree = _remote_api(f"{api_base}/git/trees/{branch}?recursive=1")
+    tree = _remote_api(f"{api_base}/git/trees/{branch}?recursive=1", host)
     if tree.get("truncated"):
         raise RuntimeError(f"{label} 目录树被截断（仓库过大），无法安全拉取")
     n = 0
@@ -1088,7 +1105,14 @@ def _fetch_tree_source(api_base: str, branch: str, label: str) -> Path:
         if (".git" in path.split("/") or "__pycache__" in path
                 or path.endswith((".pyc", ".tmp"))):
             continue
-        blob = _remote_api(f"{api_base}/contents/{_urlparse.quote(path)}?ref={branch}")
+        try:
+            blob = _remote_api(
+                f"{api_base}/contents/{_urlparse.quote(path)}?ref={branch}", host)
+        except Exception as e:
+            if host == "github" and "403" in str(e):
+                raise RuntimeError(
+                    f"{label} 匿名限额已用尽（403），约 1 小时后自动恢复") from e
+            raise
         if blob.get("encoding") != "base64":
             raise RuntimeError(f"{label} 返回内容编码异常：{path}")
         data = base64.b64decode(blob.get("content", ""))
@@ -1101,6 +1125,49 @@ def _fetch_tree_source(api_base: str, branch: str, label: str) -> Path:
     if not (extract_root / "SKILL.md").is_file():
         raise RuntimeError(f"{label} 拉取结果里找不到 SKILL.md（可能仓库结构变了）")
     return extract_root
+
+
+def _fetch_gitee_zip_source() -> Path:
+    """Gitee API 被 403 风控时的兜底：直下仓库 zip 归档（浏览器 UA）并解压。
+
+    校验 zip 签名（PK\\x03\\x04）与 SKILL.md 存在，返回解压后真实根目录。
+    失败（HTML 验证页/损坏归档/无 SKILL.md）抛异常，由调用方走下一链路。
+    """
+    import zipfile
+    import tempfile
+    cache = _remote_cache_dir()
+    extract_root = cache / "extracted"
+    if extract_root.exists():
+        shutil.rmtree(extract_root, ignore_errors=True)
+    extract_root.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(suffix=".zip", dir=str(cache))
+    try:
+        req = _urlreq.Request(GITEE_ZIP_URL, headers={
+            "User-Agent": BROWSER_UA, "Accept": "application/zip"})
+        with _urlreq.urlopen(req, timeout=REMOTE_TIMEOUT) as resp, \
+                os.fdopen(fd, "wb") as f:
+            f.write(resp.read())
+        with open(tmp, "rb") as f:
+            if f.read(4) != b"PK\x03\x04":
+                raise RuntimeError("Gitee zip 归档签名校验失败（拿到的是 HTML 风控页）")
+        with zipfile.ZipFile(tmp) as zf:
+            zf.extractall(extract_root)
+        # Gitee 归档带一层顶层目录，定位含 SKILL.md 的真实根。
+        if (extract_root / "SKILL.md").is_file():
+            return extract_root
+        for d in sorted(extract_root.iterdir()):
+            if d.is_dir() and (d / "SKILL.md").is_file():
+                return d
+        raise RuntimeError("Gitee zip 归档解压后找不到 SKILL.md")
+    except _urlreq.HTTPError as e:
+        if e.code == 403:
+            raise RuntimeError("Gitee 归档直下也被风控（403）") from e
+        raise
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def _lingshu_remote_source(force: bool = False) -> tuple[Path | None, str, str]:
@@ -1116,14 +1183,24 @@ def _lingshu_remote_source(force: bool = False) -> tuple[Path | None, str, str]:
     if (cached / "SKILL.md").is_file() and not force:
         return cached, "gitee", ""
     err = ""
-    for label, api_base, branch in (
-            ("Gitee", GITEE_API_BASE, GITEE_BRANCH),
-            ("GitHub", GITHUB_API_BASE, GITHUB_BRANCH)):
-        try:
-            return _fetch_tree_source(api_base, branch, label), label.lower(), ""
-        except Exception as e:  # 单个远端失败：换下一个，最终降级，不崩溃
-            err = f"{label} 拉取失败：{e}"
-            print(f"[lingshu] {err}", file=sys.stderr)
+    # Gitee：API → zip 归档兜底（浏览器 UA）；再 GitHub。中间某一路失败但后续
+    # 成功时静默（不打印失败日志），只有全部链路都失败才输出汇总错误。
+    try:
+        return _fetch_tree_source(
+            GITEE_API_BASE, GITEE_BRANCH, "Gitee", "gitee"), "gitee", ""
+    except Exception as e:
+        err = f"Gitee 拉取失败：{e}"
+    try:
+        return _fetch_gitee_zip_source(), "gitee", ""
+    except Exception as e:
+        err = f"Gitee 归档兜底失败：{e}"
+    try:
+        return _fetch_tree_source(
+            GITHUB_API_BASE, GITHUB_BRANCH, "GitHub", "github"), "github", ""
+    except Exception as e:
+        err += f"；GitHub 拉取失败：{e}"
+    print(f"[lingshu] 远程拉取失败（Gitee 与 GitHub 均不可达），降级为本地副本源。{err}",
+          file=sys.stderr)
     return None, "none", err
 
 
