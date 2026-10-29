@@ -19,8 +19,12 @@ DSH catalog 只把 name+description 给模型，正文读不读靠模型"自觉"
   `<DSH_HOME|~/.dsh>/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe`，
   落空退回 `ComSpec` 让 cmd 解析 `.cmd`（命令行带 python 命令本身 +
   `windowsVerbatimArguments` 防二次转义）。
-- **inject 载荷合规**：完整 UserMessage——`id`(randomUUID)、`content: TextBlock[]`、
-  `source: { kind: 'runtime-context' }`（不冒充用户说的话）。
+- **投递通道实测修正**：`agent.inject()` 固定写 `next-step` 队列，而 `next-step` 在
+  `turn/start` 时被清空——注入发生了却被"排错队丢掉"，模型永远看不到（事件日志
+  坐实：`agent/inbox/spliced removed=1`）。改用 **`agent.send(msg, 'next-turn',
+  false)`** 显式投递到 `next-turn`（step/start 构建 messages 只消费它），
+  `wakeup=false` 避免无用户输入时空跑一轮；`source.form: 'instructions'` 标明
+  语义，不被后续 runtime-context 快照的"取代"逻辑清掉。
 - **绝不拖垮会话**：serial 监听器 reject 会回滚会话创建——整个监听器套顶层 try/catch
   兜底；超时默认 3s（串行事件不宜久等）+ 手动 kill 双保险；配置类失败
   `ctx.logger.warn` 一次（不刷屏），不再静默吞错。

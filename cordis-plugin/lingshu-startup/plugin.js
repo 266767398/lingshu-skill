@@ -10,9 +10,8 @@
 //   所以本插件任何路径都不允许抛异常），payload 为
 //   { agent, source: 'startup'|'resume'|'clear'|'compact', signal? }。
 //   只对 startup/resume 注入；clear/compact 是同会话重建上下文，不重复注入。
-// - inject 载荷是 UserMessage：{ id, role:'user', content: TextBlock[], source }，
-//   不是裸字符串也不是 { role, content: string }。source 用 'runtime-context'，
-//   不冒充用户说的话。
+// - 投递用 agent.send(msg, 'next-turn', false) 而非 inject——inject 固定写
+//   next-step 队列，turn/start 时会被清空，注入活不到模型眼前（实测坐实）。
 //
 // 数据安全：本插件只读记忆库（startup 内部只读+写 last_startup），不碰
 // 技能目录；brain.py 自身保证只读降级（HOME 不可写时照样注入）。
@@ -176,14 +175,23 @@ export function apply(ctx, config) {
         return
       }
       try {
-        // UserMessage 完整形状：content 是 TextBlock[]，source 用 runtime-context
-        //（不冒充用户说的话）；MessageId 用随机 UUID。
-        await agent.inject?.({
-          id: randomUUID(),
-          role: 'user',
-          content: [{ type: 'text', text }],
-          source: { kind: 'runtime-context' },
-        })
+        // 用 send 而非 inject：inject 固定塞进 next-step 队列，而 next-step 在
+        // turn/start 时被清空（实测：事件 agent/inbox/spliced removed=1），注入
+        // 会被"排错队丢掉"。send 可显式指定 target='next-turn'——step/start
+        // 构建 messages 只消费 next-turn，注入才能活到模型眼前。
+        // wakeup=false：不要在没有用户输入时把 agent 拉起来空跑一轮。
+        // form:'instructions'：runtime-context 里只有 snapshot 才有"取代"语义，
+        // 标成 instructions 不会被后续运行时快照顺手清掉。
+        agent.send?.(
+          {
+            id: randomUUID(),
+            role: 'user',
+            content: [{ type: 'text', text }],
+            source: { kind: 'runtime-context', form: 'instructions' },
+          },
+          'next-turn',
+          false,
+        )
       } catch (e) {
         try { ctx.logger?.warn?.('lingshu-startup: 注入失败', e) } catch {}
       }

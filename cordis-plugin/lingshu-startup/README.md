@@ -2,7 +2,7 @@
 
 把"模型自觉读 SKILL.md"变成"机制自动注入"：每个 DSH 新会话（`agent/created`，
 source ∈ startup / resume）时自动运行灵枢的 `brain.py startup`，把人格、记忆、
-工作记忆、行为指引以 UserMessage 形态 `agent.inject()` 进会话上下文。
+工作记忆、行为指引以 `agent.send(msg, 'next-turn', false)` 投递进会话上下文。
 
 ## 为什么要有这个插件
 
