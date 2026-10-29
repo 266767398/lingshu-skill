@@ -30,8 +30,8 @@ _WRITE_ENDPOINTS = {
     "/api/note", "/api/skill", "/api/skill/install", "/api/skill/uninstall",
     "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/apply",
     "/api/dream/draft", "/api/memory/bulk",
-    "/api/emotion", "/api/mode", "/api/work", "/api/assoc", "/api/link",
-    "/api/forget", "/api/daily", "/api/user-rules", "/api/sync", "/api/config",
+    "/api/emotion", "/api/mode", "/api/link",
+    "/api/forget", "/api/daily",
 }
 
 # 本机随机 token：页面加载时注入，之后每个 API 请求都要带上。
@@ -186,7 +186,7 @@ def workspace() -> dict:
             out[label] = fn()
         except Exception as exc:   # noqa: BLE001 —— 单块失败不影响其它块
             out[label] = fallback
-            errors.append(f"{label}: {exc}")
+            errors.append({"label": label, "type": type(exc).__name__})
             brain.log_event("panel", f"workspace 读取 {label} 失败：{exc}", level="error")
 
     safe("status", growth.growth_status, {})
@@ -203,6 +203,7 @@ def workspace() -> dict:
     out["readonly"] = bool(brain.READONLY)
     out["model_tier"] = brain.model_tier()
     if errors:
+        # 只回标签和异常类型；完整的异常全文已在 log_event 里，别把本机路径/堆栈塞进 HTTP 响应
         out["workspace_errors"] = errors
     return out
 
@@ -858,8 +859,8 @@ class Handler(BaseHTTPRequestHandler):
         except FileExistsError as exc:
             # 已有同名技能/扩展/笔记：409 冲突比 500 内部错误更符合事实，前端也能直接提示
             self._json({"error": str(exc)}, 409)
-        except (ValueError, KeyError, PermissionError) as exc:
-            # 业务异常：消息本身就是给用户看的，直接回显
+        except (ValueError, KeyError, PermissionError, TypeError, AttributeError) as exc:
+            # 业务异常 / 参数错：消息本身就是给用户看的，直接回显
             self._json({"error": str(exc)}, 400)
         except Exception:  # 其它异常：日志里留全栈，响应只给通用文案，避免回显本机路径
             import traceback

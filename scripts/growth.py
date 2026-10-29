@@ -222,15 +222,16 @@ def knowledge_pending() -> list:
 def set_knowledge_status(kid: str, status: str) -> dict | None:
     if status not in ("confirmed", "pending", "discarded"):
         raise ValueError(f"未知状态：{status}")
-    rows = load_knowledge()
-    rec = next((r for r in rows if r["id"] == kid), None)
-    if not rec:
-        return None
-    rec["status"] = status
-    rec["updated"] = brain.now_ts()
-    rec.setdefault("history", []).append(
-        {"ts": rec["updated"], "why": f"状态改为 {status}", "version": int(rec.get("version", 1))})
-    save_knowledge(rows)
+    with brain._locked(KNOWLEDGE_FILE):
+        rows = load_knowledge()
+        rec = next((r for r in rows if r["id"] == kid), None)
+        if not rec:
+            return None
+        rec["status"] = status
+        rec["updated"] = brain.now_ts()
+        rec.setdefault("history", []).append(
+            {"ts": rec["updated"], "why": f"状态改为 {status}", "version": int(rec.get("version", 1))})
+        save_knowledge(rows)
     return rec
 
 
@@ -255,33 +256,35 @@ def search_knowledge(query: str, k: int = 8) -> list:
 
 
 def update_knowledge(kid: str, **fields) -> dict:
-    rows = load_knowledge()
-    rec = next((r for r in rows if r["id"] == kid), None)
-    if not rec:
-        raise KeyError(f"没有这条知识：{kid}")
-    for key in ("title", "topic", "body"):
-        if fields.get(key) is not None:
-            rec[key] = str(fields[key]).strip()
-    for key in ("points", "tags", "entities"):
-        if fields.get(key) is not None:
-            rec[key] = _dedupe(list(fields[key]))
-    if fields.get("confidence") is not None:
-        rec["confidence"] = max(0.0, min(1.0, float(fields["confidence"])))
-    if fields.get("pinned") is not None:
-        rec["pinned"] = bool(fields["pinned"])
-    rec["updated"] = brain.now_ts()
-    rec["version"] = int(rec.get("version", 1)) + 1
-    rec.setdefault("history", []).append({"ts": rec["updated"], "why": "编辑", "version": rec["version"]})
-    save_knowledge(rows)
+    with brain._locked(KNOWLEDGE_FILE):
+        rows = load_knowledge()
+        rec = next((r for r in rows if r["id"] == kid), None)
+        if not rec:
+            raise KeyError(f"没有这条知识：{kid}")
+        for key in ("title", "topic", "body"):
+            if fields.get(key) is not None:
+                rec[key] = str(fields[key]).strip()
+        for key in ("points", "tags", "entities"):
+            if fields.get(key) is not None:
+                rec[key] = _dedupe(list(fields[key]))
+        if fields.get("confidence") is not None:
+            rec["confidence"] = max(0.0, min(1.0, float(fields["confidence"])))
+        if fields.get("pinned") is not None:
+            rec["pinned"] = bool(fields["pinned"])
+        rec["updated"] = brain.now_ts()
+        rec["version"] = int(rec.get("version", 1)) + 1
+        rec.setdefault("history", []).append({"ts": rec["updated"], "why": "编辑", "version": rec["version"]})
+        save_knowledge(rows)
     return rec
 
 
 def delete_knowledge(kid: str) -> bool:
-    rows = load_knowledge()
-    keep = [r for r in rows if r["id"] != kid]
-    if len(keep) == len(rows):
-        return False
-    save_knowledge(keep)
+    with brain._locked(KNOWLEDGE_FILE):
+        rows = load_knowledge()
+        keep = [r for r in rows if r["id"] != kid]
+        if len(keep) == len(rows):
+            return False
+        save_knowledge(keep)
     return True
 
 
@@ -402,79 +405,80 @@ def tidy_knowledge() -> dict:
 
 
 def apply_tidy(result: dict) -> dict:
-    rows = load_knowledge()
-    by_id = {r["id"]: r for r in rows}
-    done = {"merged": 0, "updated": 0, "created": 0, "deleted": 0}
+    with brain._locked(KNOWLEDGE_FILE):
+        rows = load_knowledge()
+        by_id = {r["id"]: r for r in rows}
+        done = {"merged": 0, "updated": 0, "created": 0, "deleted": 0}
 
-    removed = set()
-    for op in result.get("merge") or []:
-        ids = _dedupe([i for i in (op.get("ids") or []) if i in by_id])
-        if not ids:
-            continue
-        base = by_id[ids[0]]
-        for other_id in ids[1:]:
-            if other_id == base["id"]:
-                continue   # 重复 id 不能把 base 自己当"被合并者"删掉
-            other = by_id[other_id]
-            other_body = str(other.get("body") or "")
-            base_body = str(base.get("body") or "")
-            if other_body and other_body not in base_body:
-                base["body"] = (base_body + "\n\n" + other_body).strip()
-            base["points"] = _dedupe((base.get("points") or []) + (other.get("points") or []))
-            base["tags"] = _dedupe((base.get("tags") or []) + (other.get("tags") or []))
-            base["entities"] = _dedupe((base.get("entities") or []) + (other.get("entities") or []))
-            base["source_ids"] = _dedupe((base.get("source_ids") or []) + (other.get("source_ids") or []))
-            base["confidence"] = max(float(base.get("confidence", 0.8)), float(other.get("confidence", 0.8)))
-            removed.add(other_id)
-        for key in ("title", "topic", "body"):
-            if op.get(key):
-                base[key] = op[key]
-        for key in ("points", "tags", "entities"):
-            if op.get(key):
-                base[key] = _dedupe(op[key])
-        base["updated"] = brain.now_ts()
-        base["version"] = int(base.get("version", 1)) + 1
-        base["status"] = "pending"   # AI 动过的东西一律先待审核，别让它直接沉淀
-        base.setdefault("history", []).append(
-            {"ts": base["updated"], "why": "知识整理：合并 " + str(len(ids)) + " 条", "version": base["version"]})
-        done["merged"] += 1
+        removed = set()
+        for op in result.get("merge") or []:
+            ids = _dedupe([i for i in (op.get("ids") or []) if i in by_id])
+            if not ids:
+                continue
+            base = by_id[ids[0]]
+            for other_id in ids[1:]:
+                if other_id == base["id"]:
+                    continue   # 重复 id 不能把 base 自己当"被合并者"删掉
+                other = by_id[other_id]
+                other_body = str(other.get("body") or "")
+                base_body = str(base.get("body") or "")
+                if other_body and other_body not in base_body:
+                    base["body"] = (base_body + "\n\n" + other_body).strip()
+                base["points"] = _dedupe((base.get("points") or []) + (other.get("points") or []))
+                base["tags"] = _dedupe((base.get("tags") or []) + (other.get("tags") or []))
+                base["entities"] = _dedupe((base.get("entities") or []) + (other.get("entities") or []))
+                base["source_ids"] = _dedupe((base.get("source_ids") or []) + (other.get("source_ids") or []))
+                base["confidence"] = max(float(base.get("confidence", 0.8)), float(other.get("confidence", 0.8)))
+                removed.add(other_id)
+            for key in ("title", "topic", "body"):
+                if op.get(key):
+                    base[key] = op[key]
+            for key in ("points", "tags", "entities"):
+                if op.get(key):
+                    base[key] = _dedupe(op[key])
+            base["updated"] = brain.now_ts()
+            base["version"] = int(base.get("version", 1)) + 1
+            base["status"] = "pending"   # AI 动过的东西一律先待审核，别让它直接沉淀
+            base.setdefault("history", []).append(
+                {"ts": base["updated"], "why": "知识整理：合并 " + str(len(ids)) + " 条", "version": base["version"]})
+            done["merged"] += 1
 
-    for op in result.get("update") or []:
-        rec = by_id.get(op.get("id"))
-        if not rec:
-            continue
-        for key in ("title", "topic", "body"):
-            if op.get(key):
-                rec[key] = op[key]
-        for key in ("points", "tags", "entities"):
-            if op.get(key):
-                rec[key] = _dedupe(op[key])
-        rec["updated"] = brain.now_ts()
-        rec["version"] = int(rec.get("version", 1)) + 1
-        rec["status"] = "pending"   # AI 更新过 → 待审核
-        rec.setdefault("history", []).append(
-            {"ts": rec["updated"], "why": "知识整理：更新", "version": rec["version"]})
-        done["updated"] += 1
+        for op in result.get("update") or []:
+            rec = by_id.get(op.get("id"))
+            if not rec:
+                continue
+            for key in ("title", "topic", "body"):
+                if op.get(key):
+                    rec[key] = op[key]
+            for key in ("points", "tags", "entities"):
+                if op.get(key):
+                    rec[key] = _dedupe(op[key])
+            rec["updated"] = brain.now_ts()
+            rec["version"] = int(rec.get("version", 1)) + 1
+            rec["status"] = "pending"   # AI 更新过 → 待审核
+            rec.setdefault("history", []).append(
+                {"ts": rec["updated"], "why": "知识整理：更新", "version": rec["version"]})
+            done["updated"] += 1
 
-    for op in result.get("create") or []:
-        if not (op.get("title") or op.get("body")):
-            continue
-        title = (op.get("title") or "").strip() or _clip(op.get("body", ""), 24)
-        rec = _new_knowledge(title, op.get("body", ""), op.get("topic", ""),
-                             op.get("points"), op.get("tags"), op.get("entities"),
-                             status="pending")   # AI 新建 → 待审核，别让幻觉直接入库
-        rows.append(rec)
-        by_id[rec["id"]] = rec
-        done["created"] += 1
+        for op in result.get("create") or []:
+            if not (op.get("title") or op.get("body")):
+                continue
+            title = (op.get("title") or "").strip() or _clip(op.get("body", ""), 24)
+            rec = _new_knowledge(title, op.get("body", ""), op.get("topic", ""),
+                                 op.get("points"), op.get("tags"), op.get("entities"),
+                                 status="pending")   # AI 新建 → 待审核，别让幻觉直接入库
+            rows.append(rec)
+            by_id[rec["id"]] = rec
+            done["created"] += 1
 
-    for kid in result.get("delete") or []:
-        if kid in by_id:
-            removed.add(kid)
+        for kid in result.get("delete") or []:
+            if kid in by_id:
+                removed.add(kid)
 
-    rows = [r for r in rows if r["id"] not in removed]
-    save_knowledge(rows)
-    # 统计真实从库里消失的条数（含合并被吃掉的那 X-1 条），别只报 delete 清单
-    done["deleted"] = len(removed)
+        rows = [r for r in rows if r["id"] not in removed]
+        save_knowledge(rows)
+        # 统计真实从库里消失的条数（含合并被吃掉的那 X-1 条），别只报 delete 清单
+        done["deleted"] = len(removed)
 
     pending = KNOWLEDGE_DIR / "pending.json"
     if pending.exists():
@@ -628,11 +632,11 @@ def digest(days: int = 7) -> str:
     """给 AI 的成长素材包：最近发生了什么、学到什么、写了什么。"""
     now = brain.now_ts()
     floor = now - days * brain.DAY
-    mems = [m for m in brain.load_all() if m.get("created", 0) >= floor]
-    kds = [k for k in load_knowledge() if k.get("updated", 0) >= floor]
-    nts = [n for n in load_notes() if n.get("created", 0) >= floor]
+    mems = [m for m in brain.load_all() if brain._num(m.get("created"), 0) >= floor]
+    kds = [k for k in load_knowledge() if brain._num(k.get("updated"), 0) >= floor]
+    nts = [n for n in load_notes() if brain._num(n.get("created"), 0) >= floor]
     sks = list_skills()
-    evo = [r for r in load_evolution() if r.get("ts", 0) >= floor]
+    evo = [r for r in load_evolution() if brain._num(r.get("ts"), 0) >= floor]
 
     lines = [f"# 成长素材 · 最近 {days} 天", "",
              f"- 新记忆 {len(mems)} 条，知识变动 {len(kds)} 条，笔记 {len(nts)} 条，技能 {len(sks)} 个，"
@@ -682,7 +686,13 @@ def load_registry() -> dict:
 
 
 def save_registry(reg: dict) -> None:
-    brain.atomic_json(SKILL_REG, reg)
+    # 内部持锁 + 合并式写法：调用方传过来的是旧快照，但 update() 里已经改了要改的键。
+    # 这里先 load 当前盘上的最新值，再用 reg 合并——这样并发的两个 save_registry 不会
+    # 互相覆盖（串行化：后一个 load 到前一个刚写的值，合并自己的，再写）。
+    with brain._locked(SKILL_REG):
+        cur = load_registry()
+        cur.update(reg)
+        brain.atomic_json(SKILL_REG, cur)
 
 
 # 中文显示名 → kebab-case 目录名。DSH 的文件系统技能发现只认 kebab-case 的 name，
@@ -1361,9 +1371,10 @@ def self_review(force: bool = False, days: int = 3) -> dict:
         return {"due": False, "last": last, "days": days, "summary": summary, "saved": False}
     saved = False
     if not _readonly():
-        cfg["last_self_review"] = now
         try:
-            brain.atomic_json(brain.HOME / "config.json", cfg)
+            with brain._locked(brain.HOME / "config.json"):
+                cfg["last_self_review"] = now
+                brain.atomic_json(brain.HOME / "config.json", cfg)
             saved = True
         except OSError:
             saved = False
@@ -1583,14 +1594,17 @@ def _ext_path(name: str) -> Path:
     raw = (name or "").strip()
     if not raw:
         raise ValueError("扩展模块名不能为空")
+    # 先校验再拼路径——防止 "../evil" 这类穿越，resolve 后能指到 EXT_DIR 之外
+    if "/" in raw or "\\" in raw or ".." in raw or ":" in raw:
+        raise ValueError(f"非法扩展模块名：{raw}（不能含路径分隔符或 ..）")
     # 1) 原始名精确匹配（保留下划线）
     exact = EXT_DIR / (raw + ".py")
-    if exact.exists():
+    if exact.is_relative_to(EXT_DIR) and exact.exists():
         return exact
     # 2) 归一化（大小写/空格/下划线→连字符）
     slug = _require_slug(raw)
     cand = EXT_DIR / (slug + ".py")
-    if cand.exists():
+    if cand.is_relative_to(EXT_DIR) and cand.exists():
         return cand
     # 3) 大小写 / 下划线不敏感扫描，兜住 flow_helper 与 flow-helper 混用
     if EXT_DIR.is_dir():

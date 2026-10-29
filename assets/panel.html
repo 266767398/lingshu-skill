@@ -1572,16 +1572,20 @@ function renderDream(ov){
 
 // ---------------- 成长子系统：知识 / 笔记 / 技能 / 初识
 
+let _wsSeq = 0, _ovSeq = 0;   // 与 _memSeq 同理：乱序丢弃旧响应
+
 async function loadWS(){
+  const seq = ++_wsSeq;
   try {
     S.ws = await api("/api/workspace");
+    if (seq !== _wsSeq) return;   // 已有更新的请求在路上，丢弃这次旧结果
     renderKnowledge();
     renderNotes();
     renderSkills();
     renderDshPlugins();
     renderGrowth();
     renderOnboarding();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { if (seq === _wsSeq) toast(e.message, true); }
 }
 
 // DSH（DeepSeek）插件：只读展示，不提供任何写操作
@@ -1806,11 +1810,13 @@ function renderAlerts(ov){
 }
 
 async function load(){
+  const seq = ++_ovSeq;
   try {
     S.ov = await api("/api/overview");
+    if (seq !== _ovSeq) return;
     renderOverview();
     renderMemoryList();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { if (seq === _ovSeq) toast(e.message, true); }
 }
 
 function indexMemories(rows){
@@ -1973,6 +1979,7 @@ $("mem-list").addEventListener("click", async (e) => {
     }
     if (pin) {
       const m = findMem(pin.dataset.pin);
+      if (!m) { toast("数据已变化，请刷新", true); return; }
       await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: pin.dataset.pin, pinned: !m.pinned})});
       toast(m.pinned ? "已取消置顶" : "已置顶，不会淡忘");
       load();
@@ -1985,6 +1992,7 @@ $("mem-list").addEventListener("click", async (e) => {
     }
     if (ed) {
       const m = findMem(ed.dataset.edit);
+      if (!m) { toast("数据已变化，请刷新", true); return; }
       const text = prompt("修改记忆内容：", m.text);
       if (text == null) return;
       await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: m.id, text})});
@@ -2183,7 +2191,10 @@ if (btnDailyR) btnDailyR.addEventListener("click", async () => {
     }
     await load(); if (S.ws) await loadWS();
   } catch (e) { toast(e.message, true); }
-  btn.disabled = false; btn.textContent = "执行今日例行";
+  finally {
+    btn.disabled = !!(S.ov && S.ov.readonly);   // 只读下保持禁用，正常模式恢复
+    btn.textContent = "执行今日例行";
+  }
 });
 
 // ---- 灵枢自我总结（每 2-3 天）
@@ -2232,7 +2243,10 @@ $("btn-dream").addEventListener("click", async () => {
     S.ov = r.overview; renderOverview(); renderMemoryList();
     toast("梦做完了，碎片等你整理");
   } catch (e) { toast(e.message, true); }
-  btn.disabled = false; btn.textContent = "现在做梦";
+  finally {
+    btn.disabled = !!(S.ov && S.ov.readonly);
+    btn.textContent = "现在做梦";
+  }
 });
 
 $("btn-apply").addEventListener("click", async () => {
@@ -2452,12 +2466,14 @@ $("kg-list").addEventListener("click", async (e) => {
     }
     if (pin) {
       const k = S.ws.knowledge.find(x => x.id === pin.dataset.kgpin);
+      if (!k) { toast("数据已变化，请刷新", true); return; }
       await post("/api/knowledge", {action: "update", id: k.id, pinned: !k.pinned});
       toast(k.pinned ? "已取消置顶" : "已置顶");
       await loadWS();
     }
     if (ed) {
       const k = S.ws.knowledge.find(x => x.id === ed.dataset.kgedit);
+      if (!k) { toast("数据已变化，请刷新", true); return; }
       S.kgEditing = k.id;
       $("kg-title").value = k.title || ""; $("kg-topic-in").value = k.topic || "";
       $("kg-body").value = k.body || ""; $("kg-points").value = (k.points || []).join(",");
@@ -2530,6 +2546,7 @@ $("note-list").addEventListener("click", async (e) => {
   try {
     if (ed) {
       const n = S.ws.notes.find(x => x.id === ed.dataset.nedit);
+      if (!n) { toast("数据已变化，请刷新", true); return; }
       const body = prompt("修改笔记正文：", n.body);
       if (body == null) return;
       await post("/api/note", {action: "update", id: n.id, body});
@@ -2603,6 +2620,11 @@ $("skill-list").addEventListener("click", async (e) => {
       try {
         r = await post("/api/skill", {action: "install", name: ins.dataset.skinstall, force: false});
       } catch (err) {
+        // 只对"已存在/冲突"弹覆盖确认，403 readonly、文件占用等直接 toast
+        if (!/已存在|exists|already/.test(err.message || "")) {
+          toast(err.message || "安装失败", true);
+          return;
+        }
         if (!confirm("全局目录已有同名技能，确认覆盖？")) return;
         r = await post("/api/skill", {action: "install", name: ins.dataset.skinstall, force: true});
       }

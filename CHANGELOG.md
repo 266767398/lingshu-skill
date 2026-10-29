@@ -17,6 +17,22 @@
 - **面板**：非法 JSON 请求体返回 400（此前静默当空操作）；`FileExistsError` 归入 409；只读模式下 daily 预览、自我总结这两个"只读按钮"放行；面板卸载加白名单（只能卸灵枢装过的技能）；安装灵枢时先弹风险告知再装；删除失败会提示而不是假成功；记忆搜索防抖 + 丢弃乱序旧响应。
 - **数据落盘**：`save_all` 三文件先全写临时文件再一次替换（把"存一半"窗口压到最小）；`.corrupt` 坏块备份去重（修不动时不再每读一次就追加一遍）；`cluster_memories` 聚类池上限 400，防止记忆库变大后每晚巩固被 O(n²) 卡住。
 
+### v2.12 第三轮：脏数据不再把整条链路拉崩 + 归档/恢复原子化
+
+从审计里挖出的都是"手改/旧版本/外部工具写了一条 null 字段"就让整条链路崩掉的问题——注入/面板/daily 一个都跑不了：
+
+- **数值防御全域覆盖**：情绪链路（`emotion_events`/`mood_now`/`emotion_arc`）、欲望（`desire_state`）、日常（`daily`/`display_text`/`forget`）、展示（`display_text`/`recent`/`list_memories`）、成长素材（`growth.digest`）里所有裸 `float(x.get(...))` / `>= floor` 比较全部换成 `_num(...)`。键存在但值为 null/字符串时不再 TypeError——"脏行跳过、好行继续"。
+- **归档层防御**：`cluster_memories` 过滤缺 id 记录（并查集映射不再 KeyError）；`_is_archivable` 首行直接拒绝缺 id 记录（归档候选/梦巩固的 dict 推导不再崩）。
+- **归档/恢复原子化**：`archive restore` 顺序反过来——先 `save_all(hot)` 成功再从 archive.jsonl 删除，中途失败 hit 始终留在 archive；`cmd_restore`（zip 恢复）解压到临时目录 → 整包 `os.replace` 原子替换；全程持 hippocampus.jsonl + persona.json 锁，与面板并发不再互相踩写；前缀比较换成 `is_relative_to()` 防 zip-slip。
+- **growth.digest 数值防御**：最近 N 天筛选里 `created`/`updated`/`ts` 用 `brain._num`，脏数据不崩。
+- **面板异常分类**：`do_POST` 的 except 分支加入 TypeError/AttributeError（此前客户端传错类型会进 500，现在统一 400 带消息）。
+- **面板死配置清理**：`_WRITE_ENDPOINTS` 里删去 `/api/config`、`/api/sync`、`/api/user-rules`、`/api/work`、`/api/assoc`——它们在 do_POST 里根本没有处理分支。
+- **面板 workspace_errors 脱敏**：异常原文带本机绝对路径，现在只回 `{label, type}`，完整栈进 log_event。
+- **面板并发请求乱序丢弃**：`loadWS` / `load` 各加一个自增序号，旧响应不会再把新快照覆盖掉。
+- **面板事件委托 find() 判 undefined**：记忆置顶/编辑、知识置顶/编辑、笔记编辑前先判 `undefined`，"数据已变化"时 toast 提醒而不是抛 TypeError。
+- **面板只读按钮恢复**：daily/dream handler 里用 `finally { btn.disabled = !!(S.ov && S.ov.readonly) }`，面板出错一次也不会把只读禁用状态冲掉。
+- **面板技能安装错误分类**：`install catch` 里先正则识别"已存在/冲突"再弹覆盖确认，403 readonly / 文件占用 / "没这个技能"不再被误导成覆盖提示。
+
 ### v2.12 第二轮：并发写不再互相吞、面板不再假成功
 
 再往下一层查并发与面板交互，补的都是"平时看不出来、真撞上就丢数据"的点：

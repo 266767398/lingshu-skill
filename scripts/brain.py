@@ -995,19 +995,18 @@ def _hay(m: dict) -> str:
 
 def _is_archivable(m: dict, now: int) -> bool:
     """单条判断：是否该被雪藏进归档层。archive_candidates / dream 共用同一套条件，避免漂移。"""
+    if not m.get("id"):
+        return False               # 畸形记录（缺 id）不能进候选集——后续的 dict 推导都会 KeyError
     if m.get("layer") not in ("hippo", "cortex"):
         return False
     if m.get("pinned") or m.get("verbatim") or m.get("kind") == "identity":
         return False
     if m.get("review") == "pending":
         return False
-    try:
-        imp = float(m.get("importance", 0.5))
-        age = now - float(m.get("created", now))
-        R = retention(m, now)
-        idle = now - float(m.get("last_access", m.get("created", now)))
-    except (TypeError, ValueError):
-        return False
+    imp = _num(m.get("importance"), 0.5)
+    age = now - _num(m.get("created"), now)
+    R = retention(m, now)
+    idle = now - _num(m.get("last_access"), _num(m.get("created"), now))
     if imp > ARCHIVE_MAX_IMPORTANCE or R >= ARCHIVE_RETENTION:
         return False
     if age < ARCHIVE_MIN_AGE_DAYS * DAY:
@@ -1472,7 +1471,7 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
 
 def recent(k: int = 6, layers: tuple = ("hippo", "cortex")) -> list:
     records = [m for m in load_all() if m.get("layer") in layers]
-    records.sort(key=lambda m: m.get("created", 0), reverse=True)
+    records.sort(key=lambda m: _num(m.get("created"), 0), reverse=True)
     return records[:k]
 
 
@@ -1482,10 +1481,10 @@ def forget(memory_id: str) -> bool:
     with _locked(HOME / "hippocampus.jsonl"):
         records = load_all()
         for m in records:
-            if m["id"] == memory_id and m.get("layer") != "dust":
+            if m.get("id") == memory_id and m.get("layer") != "dust":
                 m["layer"] = "dust"
                 m["forgotten_at"] = now_ts()
-                m["detail"] = round(max(0.15, float(m.get("detail", 1)) * 0.5), 2)
+                m["detail"] = round(max(0.15, _num(m.get("detail"), 1.0) * 0.5), 2)
                 save_all(records)
                 return True
     return False
@@ -1493,7 +1492,7 @@ def forget(memory_id: str) -> bool:
 
 def display_text(m: dict) -> str:
     """细节度低时用模糊化的要点代替原文。"""
-    detail = float(m.get("detail", 1.0))
+    detail = _num(m.get("detail"), 1.0)
     if detail < 0.5 and m.get("gist"):
         return f"{m['gist']}（细节已模糊）"
     return m.get("text", "")
@@ -1782,11 +1781,11 @@ def desire_state(at: float | None = None) -> dict:
     path = HOME / "desires.json"
     raw = _slurp_json(path, {}) or {}
     levels = dict(raw.get("levels") or {})
-    last = float(raw.get("updated") or now)
+    last = _num(raw.get("updated"), now)
     days = max(0.0, (now - last) / DAY)
     out = {}
     for name in DESIRES:
-        lvl = float(levels.get(name, DESIRE_DEFAULT)) - days * DESIRE_DECAY_PER_DAY
+        lvl = _num(levels.get(name), DESIRE_DEFAULT) - days * DESIRE_DECAY_PER_DAY
         out[name] = round(max(DESIRE_FLOOR, min(100.0, lvl)), 1)
     return out
 
@@ -1815,7 +1814,7 @@ def desire_low(threshold: float = 35) -> list:
 def emotion_events(limit: int = 0) -> list:
     """情绪事件流（append-only）。每条带初始强度与发生时间。"""
     rows = read_jsonl(HOME / "emotions.jsonl")
-    rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+    rows.sort(key=lambda r: _num(r.get("ts"), 0), reverse=True)
     return rows[:limit] if limit else rows
 
 
@@ -1988,19 +1987,20 @@ def mood_now(at: float | None = None) -> dict:
     active = []
     gweights = {}
     for ev in rows[:60]:
-        age_h = max(0.0, (now - ev.get("ts", now)) / HOUR)
-        half = max(0.5, float(ev.get("decay_hours", EMOTION_HALF_LIFE / HOUR)))
-        w = float(ev.get("intensity", 0.5)) * (0.5 ** (age_h / half))
+        ets = _num(ev.get("ts"), now)
+        age_h = max(0.0, (now - ets) / HOUR)
+        half = max(0.5, _num(ev.get("decay_hours"), EMOTION_HALF_LIFE / HOUR))
+        w = _num(ev.get("intensity"), 0.5) * (0.5 ** (age_h / half))
         if w < 0.02:
             continue
-        sv += float(ev.get("valence", 0)) * w
-        sa += float(ev.get("arousal", 0.3)) * w
+        sv += _num(ev.get("valence"), 0) * w
+        sa += _num(ev.get("arousal"), 0.3) * w
         sw += w
         g = emotion_group(ev.get("emotion", ""))
         gweights[g] = gweights.get(g, 0.0) + w
         active.append({"emotion": ev.get("emotion"), "weight": round(w, 3),
-                       "group": g, "valence": float(ev.get("valence", 0)),
-                       "arousal": float(ev.get("arousal", 0.3)),
+                       "group": g, "valence": _num(ev.get("valence"), 0),
+                       "arousal": _num(ev.get("arousal"), 0.3),
                        "why": ev.get("why", ""), "about": ev.get("about", "")})
     if sw <= 0:
         return {"valence": 0.0, "arousal": 0.1, "label": "平静", "category": "静",
@@ -2138,19 +2138,19 @@ def emotion_checks_recent(limit: int = 20) -> list:
 def emotion_arc(days: int = 7) -> dict:
     """情绪轨迹：这段时间的起伏，用来回头看"我过得怎么样"。"""
     cutoff = now_ts() - days * DAY
-    rows = [r for r in emotion_events() if r.get("ts", 0) >= cutoff]
+    rows = [r for r in emotion_events() if _num(r.get("ts"), 0) >= cutoff]
     if not rows:
         return {"days": days, "count": 0, "summary": "这段时间没有情绪记录",
                 "avg_valence": 0.0, "tone": "这段时间没有情绪记录",
                 "peak": {"emotion": "", "intensity": 0, "ts": 0, "why": ""},
                 "end": {"emotion": "", "intensity": 0, "ts": 0, "why": ""},
                 "top": [], "first": "", "last": ""}
-    rows.sort(key=lambda r: r.get("ts", 0))
+    rows.sort(key=lambda r: _num(r.get("ts"), 0))
     by = {}
     for r in rows:
         e = r.get("emotion") or "未知"
         by[e] = by.get(e, 0) + 1
-    vals = [float(r.get("valence", 0)) * float(r.get("intensity", 0.5)) for r in rows]
+    vals = [_num(r.get("valence"), 0) * _num(r.get("intensity"), 0.5) for r in rows]
     avg = sum(vals) / len(vals)
     top = sorted(by.items(), key=lambda kv: kv[1], reverse=True)[:5]
     if avg >= 0.3:
@@ -3325,12 +3325,14 @@ _MAX_CLUSTER_POOL = 400
 
 def cluster_memories(records: list, max_clusters: int = 6, include_ids: set | None = None) -> list:
     include_ids = include_ids or set()
-    pool = [m for m in records if m.get("layer") != "dust"
+    # 无 id 的畸形记录没法做并查集/parent 映射，直接跳过。
+    # 这些记录会原样保留在库，不会被 save_all 丢掉。
+    pool = [m for m in records if m.get("id") and m.get("layer") != "dust"
             and (not m.get("consolidated") or m["id"] in include_ids)]
     if not pool:
         return []
     if len(pool) > _MAX_CLUSTER_POOL:
-        pool = sorted(pool, key=lambda m: m.get("importance", 0), reverse=True)[:_MAX_CLUSTER_POOL]
+        pool = sorted(pool, key=lambda m: _num(m.get("importance"), 0), reverse=True)[:_MAX_CLUSTER_POOL]
     parent = {m["id"]: m["id"] for m in pool}
 
     def find(x):
@@ -3908,7 +3910,7 @@ def list_memories(limit: int = 30, layer: str | None = None) -> list:
     records = load_all()
     if layer:
         records = [m for m in records if m.get("layer") == layer]
-    records.sort(key=lambda m: m.get("created", 0), reverse=True)
+    records.sort(key=lambda m: _num(m.get("created"), 0), reverse=True)
     return records[:limit]
 
 
@@ -4106,27 +4108,47 @@ def cmd_restore(zip_path: str, yes: bool = False) -> int:
                 pass
     if HOME.exists():
         cmd_backup(target=str(HOME / "backups"), keep=10)  # 恢复前先留现状
+    # 解压到临时目录，然后整包用 os.replace 原子替换——避免中途失败把目标文件写成半截。
+    # 整个恢复过程持锁，防止与正在跑的面板/CLI 并发互相踩写。
+    tmp_dir = HOME / f".restore-tmp-{int(now_ts())}"
     try:
         with zipfile.ZipFile(zp) as zf:
-            HOME.mkdir(parents=True, exist_ok=True)
+            tmp_dir.mkdir(parents=True, exist_ok=False)
             for info in zf.infolist():
                 if info.is_dir():
                     continue
                 rel = Path(info.filename)
-                # 防 zip-slip：拒绝任何逃出 HOME 的相对路径
                 if rel.is_absolute() or ".." in rel.parts:
-                    print(f"[错误] 备份里有非法路径，已中止恢复：{info.filename}", file=sys.stderr)
-                    return 2
-                target = (HOME / rel).resolve()
-                if not str(target).startswith(str(HOME.resolve())):
-                    print(f"[错误] 备份条目试图写出记忆库，已中止：{info.filename}", file=sys.stderr)
-                    return 2
+                    raise ValueError(f"备份里有非法路径：{info.filename}")
+                target = (tmp_dir / rel).resolve()
+                if not target.is_relative_to(tmp_dir):
+                    raise ValueError(f"备份条目试图逃出临时目录：{info.filename}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+            # 解压完成，原子替换：每个目标文件 os.replace（已存在覆盖，不存在新建）
+            # 只覆盖 zip 里有的文件——备份之后新增的文件不会被删除
+            with _locked(HOME / "hippocampus.jsonl"), _locked(HOME / "persona.json"):
+                for extracted in tmp_dir.rglob("*"):
+                    if extracted.is_dir():
+                        continue
+                    rel = extracted.relative_to(tmp_dir)
+                    final = (HOME / rel).resolve()
+                    final.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(str(extracted), str(final))
+    except ValueError as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        return 2
     except PermissionError as exc:
         print(f"[错误] 恢复被拒绝（当前环境可能只读）：{exc}", file=sys.stderr)
         return 3
+    finally:
+        # 无论成功还是失败，都清掉临时目录
+        try:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass
     print(f"已从 {zp.name} 恢复记忆库 → {HOME}")
     return 0
 
@@ -4178,19 +4200,21 @@ def cmd_archive(action: str = "show", arg: str = "", limit: int = 20,
         if READONLY:
             print("[只读] 记忆库当前不可写，无法回捞。", file=sys.stderr)
             return 3
-        with _locked(HOME / "hippocampus.jsonl"):
+        with _locked(HOME / "hippocampus.jsonl"), _locked(HOME / "archive.jsonl"):
             rows = load_archive()
             hit = next((m for m in rows if m.get("id") == arg), None)
             if not hit:
                 print(f"归档层没有 {arg}。")
                 return 1
-            write_jsonl(HOME / "archive.jsonl", [m for m in rows if m.get("id") != arg])
             hit["layer"] = "cortex"
             hit.pop("archived_at", None)
             hit["last_access"] = now_ts()
+            # 顺序反过来：先 save_all 成功，再从 archive 里删。
+            # 中途任何一步失败 hit 都还留在 archive.jsonl，不会整条消失。
             hot = load_all()
             hot.append(hit)
             save_all(hot)
+            write_jsonl(HOME / "archive.jsonl", [m for m in rows if m.get("id") != arg])
         print(f"已回捞 {arg} → 长期记忆（重新参与回忆）。")
         return 0
 
@@ -4294,9 +4318,10 @@ def cmd_startup(query: str = "", budget: int | None = None) -> int:
     print(build_injection(query, budget))
     if not READONLY:
         try:
-            cfg = load_config()
-            cfg["last_startup"] = {"ts": now_ts(), "query": (query or "")[:60]}
-            atomic_json(HOME / "config.json", cfg)
+            with _locked(HOME / "config.json"):
+                cfg = load_config()
+                cfg["last_startup"] = {"ts": now_ts(), "query": (query or "")[:60]}
+                atomic_json(HOME / "config.json", cfg)
         except Exception:
             pass
     return 10 if READONLY else 0
@@ -4389,9 +4414,10 @@ def cmd_sync_dsh(days: int = 1, dry_run: bool = False, force: bool = False,
     with open(target, "w", encoding="utf-8") as f:
         f.write((existing.rstrip() + "\n\n" if existing.strip() else "") + block + "\n")
     try:  # 记住目录，下次免传
-        cfg = load_config()
-        cfg["dsh_memory_dir"] = str(dsh)
-        atomic_json(HOME / "config.json", cfg)
+        with _locked(HOME / "config.json"):
+            cfg = load_config()
+            cfg["dsh_memory_dir"] = str(dsh)
+            atomic_json(HOME / "config.json", cfg)
     except Exception:
         pass
     print(f"已把灵枢日志摘要追加到 DSH 记忆：{target}")
@@ -4471,7 +4497,7 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
         raise PermissionError("记忆库当前只读，无法执行每日例行。")
 
     floor = now_ts() - 1 * DAY
-    mems = [m for m in load_all() if m.get("created", 0) >= floor]
+    mems = [m for m in load_all() if _num(m.get("created"), 0) >= floor]
     arc = emotion_arc(1)
     ra = rationality()
 
@@ -4499,7 +4525,7 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
     body.append(f"理智：{ra['effective']}（基数 {ra['base']}，被情绪压住 {ra['suppress']}%）。")
     insight_mems = [m for m in mems
                     if m.get("kind") in ("insight", "preference", "habit")
-                    and float(m.get("importance", 0)) >= 0.7]
+                    and _num(m.get("importance"), 0) >= 0.7]
     if insight_mems:
         body.append("今天值得沉淀的想法：")
         body += [f"- {display_text(m)}" for m in insight_mems[:5]]
@@ -4530,7 +4556,7 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
     # ---- 3) 新鲜度：距上次做梦超过 24h 就自动做梦
     dream_state = load_dream_state()
     dreamed = False
-    if now_ts() - int(dream_state.get("last_dream", 0)) > DAY:
+    if now_ts() - int(_num(dream_state.get("last_dream"), 0)) > DAY:
         if dry_run:
             dreamed = "would_run"
         else:
