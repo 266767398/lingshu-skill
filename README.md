@@ -198,9 +198,10 @@ python scripts/brain.py assoc unlink m_3f2a... m_9c1d...
 技能 catalog 只把 name + description 给模型，正文要不要读全凭模型"自觉"——没有任何
 机制保证下一次会话模型一定会加载灵枢。`cordis-plugin/` 里的插件把"自觉"变成"机制"：
 
-- **`lingshu-startup`**：监听 DSH 的 `agent/session-start` 事件（startup / resume），
+- **`lingshu-startup`**：监听 DSH 的 `agent/created` 事件（source ∈ startup / resume），
   自动探测全局技能目录里的 `scripts/brain.py`，跑 `startup` 并把人格、记忆、待办、
-  行为指引 `agent.inject()` 进会话上下文——**会话一开始记忆就在上下文里**。
+  行为指引以 UserMessage 形态 `agent.inject()` 进会话上下文——**会话一开始记忆就在
+  上下文里**。`clear` / `compact` 不重复注入，进程内按 agent 去重。
 - 失败宽容：灵枢没装、Python 不在、超时——全部静默跳过，绝不阻塞会话；
   `brain.py startup` 只读记忆库，HOME 不可写时自动只读降级照样注入。
 - **目录约定**：`cordis-plugin/` 下**一个插件一个子目录**，各自独立打包安装，

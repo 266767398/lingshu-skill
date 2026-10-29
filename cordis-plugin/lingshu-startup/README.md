@@ -1,8 +1,8 @@
 # dsh-lingshu-startup · 灵枢启动注入插件
 
-把"模型自觉读 SKILL.md"变成"机制自动注入"：每个 DSH 会话启动（`agent/session-start`，
-startup / resume）时自动运行灵枢的 `brain.py startup`，把人格、记忆、工作记忆、
-行为指引直接 `agent.inject()` 进会话上下文。
+把"模型自觉读 SKILL.md"变成"机制自动注入"：每个 DSH 新会话（`agent/created`，
+source ∈ startup / resume）时自动运行灵枢的 `brain.py startup`，把人格、记忆、
+工作记忆、行为指引以 UserMessage 形态 `agent.inject()` 进会话上下文。
 
 ## 为什么要有这个插件
 
@@ -34,8 +34,8 @@ pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 | brainPy | 自动探测 | brain.py 绝对路径；留空则依次找 `~/.dsh/skills/lingshu`、`~/.trae-cn/skills/lingshu` |
 | python | `python` | Python 解释器 |
 | budget | `1400` | startup 注入 token 预算 |
-| timeoutMs | `8000` | 子进程超时；超时/失败**静默放行**，绝不阻塞会话 |
-| injectResume | `true` | 续聊（resume）的会话是否也注入 |
+| timeoutMs | `3000` | 子进程超时；超时/失败**静默放行**，绝不阻塞会话（`agent/created` 是串行事件，默认值压到 3s 免拖慢新会话） |
+| injectResume | `true` | 续聊（resume）的会话是否也注入；`clear` / `compact` 一律不注入（同会话上下文重建，重复注入浪费 token） |
 
 ## 数据安全
 
