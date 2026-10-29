@@ -47,6 +47,15 @@ EXT_DIR = HOME / "extensions"
 GLOBAL_SKILLS = Path.home() / ".trae-cn" / "skills"
 
 
+def _panel_root() -> Path:
+    """面板/当前进程实际运行所在的技能根目录（growth.py 所在目录的上一级）。
+
+    更新/检测灵枢本体时以它为最优先目标——面板跑在哪个目录，更新就落到哪个目录，
+    不依赖 _global_roots 的固定探测顺序（多根/环境变量覆盖场景下那套会找错）。
+    """
+    return Path(__file__).resolve().parent.parent
+
+
 def _global_roots() -> list:
     """全局技能目录候选，按优先级排列（第一个是安装目标）。
 
@@ -889,6 +898,11 @@ def _ver(v) -> object:
 
 def _find_installed(name: str) -> Path:
     """在全局目录（多根：DSH/Trae）里找 name 技能的目录；找不到返回主目录下的默认路径。"""
+    # 第一优先：当前进程自己所在的技能根（面板从哪跑就认哪）——
+    # 面板跑在某个全局副本里时，检测/更新必须针对那个副本，而不是探测顺序的第一个根
+    panel = _panel_root() / name
+    if (panel / "SKILL.md").is_file():
+        return panel
     for r in _global_roots():
         p = r / name
         if (p / "SKILL.md").is_file():
@@ -1250,7 +1264,10 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
         src = src_dir / "SKILL.md"
         if not src.exists():
             raise KeyError(f"没有这个技能：{name}")
-    dst_dir = GLOBAL_SKILLS / name
+    # 安装目标：默认主目录；但已装在别处（含面板自己所在根）时优先跟随——
+    # 更新要落到用户实际在用的那份副本，不然"更新成功"了跑的还是旧的
+    existing = _find_installed(name)
+    dst_dir = existing if (existing / "SKILL.md").is_file() else (GLOBAL_SKILLS / name)
     dst = dst_dir / "SKILL.md"
 
     # 安装源防呆：下面几种情况轻则把目录复制进自己（爆盘/死循环），重则把整个记忆库
