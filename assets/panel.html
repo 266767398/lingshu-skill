@@ -1719,9 +1719,9 @@ function renderSkills(out){
       <div class="acts">
         <button class="iconbtn" title="查看" data-skshow="${esc(s.name)}">◎</button>
         <button class="iconbtn" title="编辑" data-skedit="${esc(s.name)}">✎</button>
-        ${s.installed && s.outdated
-          ? `<button class="iconbtn pin" title="更新到全局（镜像同步本地最新内容）" data-skupdate="${esc(s.name)}">↻</button>`
-          : `<button class="iconbtn ${s.installed ? "pin" : ""}" title="${s.installed ? "重新安装" : "安装到全局"}" data-skinstall="${esc(s.name)}">⇩</button>`}
+        ${s.installed
+          ? `<button class="iconbtn pin" title="更新到全局（镜像同步本地最新内容，记忆数据不受影响）" data-skupdate="${esc(s.name)}">↻</button>`
+          : `<button class="iconbtn" title="安装到全局" data-skinstall="${esc(s.name)}">⇩</button>`}
         <button class="iconbtn" title="删除" data-skdel="${esc(s.name)}">✕</button>
       </div>
     </article>`).join("")
