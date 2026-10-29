@@ -2,32 +2,75 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.13 — 从"自觉"到"机制"：cordis 启动注入插件 + 更新按钮 + 数据完整性证明
+
+（合并 35e0473 起 第五轮/面板轮/第六轮及插件三轮实测修复）
+
+### cordis 启动注入插件（`cordis-plugin/lingshu-startup/`，一个插件一个子目录）
+
+DSH catalog 只把 name+description 给模型，正文读不读靠模型"自觉"，没有任何机制保证。
+本插件把"自觉"变成"机制"——每个新会话自动跑灵枢 `startup` 并注入上下文：
+
+- **事件对齐 DSH 真实 API**（三轮实测反馈逐项修正）：监听 serial 事件 **`agent/created`**
+  （payload `{ agent, source }`），只对 `startup` / `resume` 注入，`clear` / `compact`
+  （同会话上下文重建）跳过；`WeakSet` 按 agent 去重。
+- **python 探测容错**：spawn 不解析 PATHEXT（PATH 里只有 python.cmd 的机器
+  `spawn('python')` 直接 ENOENT），探测优先 DSH 自带运行时
+  `<DSH_HOME|~/.dsh>/dsh-runtimes/dsh-primary-runtime/dependencies/python/python.exe`，
+  落空退回 `ComSpec` 让 cmd 解析 `.cmd`（命令行带 python 命令本身 +
+  `windowsVerbatimArguments` 防二次转义）。
+- **inject 载荷合规**：完整 UserMessage——`id`(randomUUID)、`content: TextBlock[]`、
+  `source: { kind: 'runtime-context' }`（不冒充用户说的话）。
+- **绝不拖垮会话**：serial 监听器 reject 会回滚会话创建——整个监听器套顶层 try/catch
+  兜底；超时默认 3s（串行事件不宜久等）+ 手动 kill 双保险；配置类失败
+  `ctx.logger.warn` 一次（不刷屏），不再静默吞错。
+- 失败宽容：灵枢没装/Python 不在/超时全部降级跳过，会话照常开始；只读语义
+  （startup 内部仅更新 last_startup），与技能更新解耦（不复制 brain.py）。
+
+### 面板：技能「更新」按钮 + 有更新徽标
+
+- **`list_skills` 新增 `outdated` 检测**：对比本地源目录与全局已装副本的内容签名
+  （相对路径+大小+mtime，排除 `__pycache__`/临时文件/安装时重新生成的 AGENTS.md），
+  不一致即"有更新"。之前 `scripts/` 改了但 SKILL.md 没变时用户毫无感知。
+- **技能卡片**：有更新时显示橙色「有更新」徽标，⇩ 安装按钮变 ↻ **更新按钮**——
+  一键 force 镜像同步（源里删掉的文件也会清掉），确认弹窗注明"记忆数据不受影响"。
+- **隔离实测 5 项**：未安装/安装后一致/改 scripts 检出有更新/force 更新后一致/
+  更新后记忆数据完好——全部通过。
+
+### 数据完整性证明 — 技能更新永不"忘事"
+
+用户核心关切：技能更新/重装/卸载会不会把记忆/人格/笔记/知识库清空。结论（架构保证 +
+8 场景 19 项隔离实测证明）：
+
+- **数据/代码双目录物理隔离**：用户数据在 `BRAIN_MEMORY_HOME`（默认 `~/.brain-memory`），
+  技能代码在 `~/.trae-cn/skills`（多根），两路径互不相交——测试专门断言。
+- **`install --force` 重装 ×3 / `uninstall_skill(managed_only=True)` / 重新 install /
+  手动 rmtree 整个技能目录**：每次全量快照（海马/皮层/尘埃/归档/人格/笔记/知识/情感/
+  关联的条数 + id 集）逐字段对比，全部相等，零丢失。
+- **"删除"类操作全是打标不真删**：forget 只挪 dust 层（`forgotten_at` + detail 减半），
+  archive 是 append-only 且 restore 先写回热层再删归档（持双锁），panel 删知识是显式确认操作。
+- **写盘原子 + 自愈**：`atomic_json`/`write_jsonl`/`save_all` 均 tmp + `os.replace`；
+  坏行注入后 `read_jsonl` 自愈，好行全保留、坏块进 `.corrupt` 备份。
+- **加固**：`_replace_retry` 写盘重试 6 → 12 次，缓解 Windows 高频读写下 `os.replace`
+  被占用句柄误报（配合读-改-写一律持锁的既有约定，并发压测 100 次零异常）。
+
+### 六项体验修复（第六轮）
+
+- **SKILL.md description 精简**：frontmatter 从约 400 字砍到两句——catalog 占预算且
+  模型扫一眼抓不到重点，只留"是什么 + 何时用"。
+- **路径摩擦**：SKILL.md 加「路径约定」区块——命令 cwd 不一定是技能目录，
+  明确"先 cd 或用绝对路径"两种写法。
+- **Windows 编码**：brain.py / growth.py 入口无条件
+  `reconfigure(encoding="utf-8", errors="replace")` stdout/stderr（只捕获预期
+  `AttributeError`），用户不再需要手动设 `PYTHONIOENCODING`（此前 GBK 控制台中文
+  变 鐏垫灑）。
+- **高重要性记忆强制待审**：`remember()` 中重要性 ≥0.8（10 分制 ≥8）且来源非用户的
+  记忆自动 `review=pending`——约定/承诺/重要决定一旦记错就是长期错误，与做梦产出同级
+  对待；CLI 写入时明示"已进待审池"。
+
 ## v2.12 — 隐藏问题清剿：锁更稳、快照不回流、坏体有去重
 
-### v2.12 第六轮：从"自觉"到"机制" — cordis 插件 + 六项体验修复
-
-- **cordis 启动注入插件（`cordis-plugin/`，4 文件）**：DSH catalog 只把 name+description 给模型，正文读不读靠模型"自觉"，没有任何机制保证。新插件监听 `agent/session-start` 事件（含 startup/resume/clear/compact），自动探测 `~/.dsh/skills/lingshu` / `~/.trae-cn/skills/lingshu` 下的 `scripts/brain.py`，跑 `startup` 并把注入文本 `agent.inject()` 进会话——恢复关系与上下文从"模型恰好了"变成"插件保证"。失败/超时/未初始化一律静默跳过，绝不阻塞会话；可配置 brainPy/python/budget/timeoutMs/injectResume。
-- **SKILL.md description 精简**：frontmatter 从约 400 字砍到两句——catalog 占预算且模型扫一眼抓不到重点，只留"是什么 + 何时用"。
-- **路径摩擦**：SKILL.md 加「路径约定」区块——命令 cwd 不一定是技能目录，明确"先 cd 或用绝对路径"两种写法。
-- **Windows 编码**：brain.py / growth.py 入口无条件 `reconfigure(encoding="utf-8")` stdout/stderr，用户不再需要手动设 `PYTHONIOENCODING`（此前 GBK 控制台中文变 鐏垫灑）。
-- **高重要性记忆强制待审**：`remember()` 中重要性 ≥0.8（10 分制 ≥8）且来源非用户的记忆自动 `review=pending`——约定/承诺/重要决定一旦记错就是长期错误，与做梦产出同级对待；CLI 写入时明示"已进待审池"。
-- **面板更新按钮**：上一轮已实现 `outdated` 检测 + ↻ 更新按钮，本轮修正 `_diff_signature` 排除 AGENTS.md（安装时重新生成，mtime 必然不同导致误报）；面板不显示按钮的用户侧原因是全局副本为旧版，更新本机副本即可。
-
-### v2.12 面板：技能「更新」按钮 + 有更新徽标
-
-- **`list_skills` 新增 `outdated` 检测**：对比本地源目录与全局已装副本的内容签名（相对路径+大小+mtime，排除 `__pycache__`/临时文件/安装时重新生成的 AGENTS.md），不一致即"有更新"。之前只能装/不装，`scripts/` 改了但 SKILL.md 没变时用户毫无感知。
-- **面板技能卡片**：有更新时显示橙色「有更新」徽标，⇩ 安装按钮变成 ↻ **更新按钮**——一键 force 镜像同步本地最新内容到全局副本（源里删掉的文件也会清掉），确认弹窗注明"记忆数据不受影响"。
-- **隔离实测 5 项**：未安装/安装后一致/改 scripts 检出有更新/force 更新后一致/更新后记忆数据完好——全部通过。
-
-### v2.12 第五轮：数据完整性证明 — 技能更新永不"忘事"
-
-用户核心关切：技能更新/重装/卸载会不会把记忆/人格/笔记/知识库清空。结论（架构保证 + 8 场景 19 项隔离实测证明）：
-
-- **数据/代码双目录物理隔离**：用户数据在 `BRAIN_MEMORY_HOME`（默认 `~/.brain-memory`），技能代码在 `~/.trae-cn/skills`（多根），两路径互不相交——测试专门断言。
-- **`install --force` 重装 ×3 / `uninstall_skill(managed_only=True)` / 重新 install / 手动 rmtree 整个技能目录**：每次全量快照（海马/皮层/尘埃/归档/人格/笔记/知识/情感/关联的条数 + id 集）逐字段对比，全部相等，零丢失。
-- **"删除"类操作全是打标不真删**：forget 只挪 dust 层（`forgotten_at` + detail 减半），archive 是 append-only 且 restore 先写回热层再删归档（持双锁），panel 删知识是显式确认操作。
-- **写盘原子 + 自愈**：`atomic_json`/`write_jsonl`/`save_all` 均 tmp + `os.replace`；坏行注入后 `read_jsonl` 自愈，好行全保留、坏块进 `.corrupt` 备份。
-- **加固**：`_replace_retry` 写盘重试 6 → 12 次，缓解 Windows 高频读写下 `os.replace` 被占用句柄误报（配合读-改-写一律持锁的既有约定，并发压测 100 次零异常）。
+### v2.12 第四轮：入口统一过滤畸形行 + 裸字段假设根除
 
 再查一遍数据安全与面板交互的边角，修了一类"平时不炸、炸了才懂"的问题：
 
