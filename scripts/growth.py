@@ -966,6 +966,29 @@ def _diff_signature(dir_path: Path) -> set:
     return sig
 
 
+def _real_drift(src_sig: set, dst_sig: set) -> bool:
+    """签名有差时判断是不是"真差异"（该提示更新的那种）。
+
+    两类真差异，不依赖版本号就能认定：
+    - 文件级差异：源有副本没有（副本残缺，换盘符场景）、或副本有源没有的文件；
+    - 关键文件内容变了：SKILL.md / scripts / assets 下同名文件大小不同
+      （mtime 单独抖动不算，安装复制本身就会带出新 mtime）。
+    其余（同名同大小的纯 mtime 抖动）不算——交给版本号闸门兜底。
+    """
+    src_rels = {rel for rel, *_ in src_sig}
+    dst_rels = {rel for rel, *_ in dst_sig}
+    if src_rels != dst_rels:  # 有文件增删 = 残缺或多余，真差异
+        return True
+    src_by_rel = {rel: (size, mtime) for rel, size, mtime in src_sig}
+    for rel, size, _ in dst_sig:
+        if size != src_by_rel.get(rel, (size,))[0]:
+            # 大小不同：SKILL.md/scripts/assets 是要紧东西，算真差异；
+            # 其他零散文件（日志/缓存类）留给版本号闸门
+            if rel == "SKILL.md" or rel.startswith(("scripts/", "assets/")):
+                return True
+    return False
+
+
 def list_skills() -> list:
     reg = load_registry()
     out = []
@@ -981,8 +1004,9 @@ def list_skills() -> list:
             except ValueError:
                 installed_dir = _find_installed(name)
             # 有更新检测：本地源与全局已装副本内容不一致（副本存在但内容有差异）。
-            # 与 update_check 同款双保险：签名有差但版本号相同不算过期（mtime 抖动
-            # /临时文件残留不该亮"有更新"徽标）。
+            # 双保险 2.0：纯 mtime 抖动（同名同大小）必须版本号真变了才算过期；
+            # 但副本残缺/关键文件内容变化（_real_drift）不依赖版本号就能认定——
+            # 忘了升版本号时用户也不会卡死在损坏副本上。
             installed = (installed_dir / "SKILL.md").exists()
             outdated = False
             if installed and installed_dir.resolve() != d.resolve():
@@ -990,8 +1014,10 @@ def list_skills() -> list:
                     inst_meta, _ = parse_frontmatter((installed_dir / "SKILL.md").read_text(encoding="utf-8"))
                 except OSError:
                     inst_meta = {}
-                outdated = (_diff_signature(d) != _diff_signature(installed_dir)
-                            and _ver(meta.get("version", 1)) != _ver(inst_meta.get("version", 1)))
+                src_sig, dst_sig = _diff_signature(d), _diff_signature(installed_dir)
+                outdated = (src_sig != dst_sig
+                            and (_real_drift(src_sig, dst_sig)
+                                 or _ver(meta.get("version", 1)) != _ver(inst_meta.get("version", 1))))
             out.append({
                 "name": name,
                 "description": meta.get("description", ""),
@@ -1066,8 +1092,12 @@ def update_check(name: str = "lingshu") -> dict:
         inst_meta, _ = parse_frontmatter((installed_dir / "SKILL.md").read_text(encoding="utf-8"))
     except OSError:
         inst_meta = {}
-    # 第二层保险：签名有差但版本号相同不算过期——mtime 抖动/临时文件残留不该触发更新弹窗
-    outdated = bool(src_sig != dst_sig) and _ver(meta.get("version", 1)) != _ver(inst_meta.get("version", 1))
+    # 双保险 2.0：纯 mtime 抖动（同名同大小）必须版本号真变了才算过期；
+    # 但副本残缺/关键文件内容变化（_real_drift）不依赖版本号——
+    # 发布时忘了升版本号，用户也不会卡死在旧版/损坏副本上。
+    outdated = bool(src_sig != dst_sig) and (
+        _real_drift(src_sig, dst_sig)
+        or _ver(meta.get("version", 1)) != _ver(inst_meta.get("version", 1)))
     out = {
         "name": name,
         "installed": True,
