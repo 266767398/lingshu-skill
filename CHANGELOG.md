@@ -45,7 +45,11 @@
   `outdated: false`**：不再拿副本目录自己比——副本一旦有残缺文件就会误报
   "outdated: true + 全量 changed/removed"（换盘符/非常规安装场景坐实过）。
 - **第二层保险：签名有差但版本号相同不算过期**——mtime 抖动/临时文件残留
-  不该触发更新弹窗；只有版本号真变了才提示更新。
+  不该触发更新弹窗；只有版本号真变了才提示更新。技能页的「有更新」徽标
+  （`list_skills`）同步加上这层版本闸门。
+- **早退分支补齐版本字段**：源==已装且无配置的 `outdated: false` 返回里
+  补上 `version`/`installed_version`（都读副本 frontmatter）——面板"已是
+  最新（vX.Y.Z）"提示不再显示 undefined。
 - **启动注入插件 `findBrainPy()` 加 `LINGSHU_SKILL_DIR` 环境变量兜底**：
   灵枢装在非常规位置（换盘符/自定义目录）时，设该环境变量指向技能根目录
   即可被插件找到，不用改 profile 的 `brainPy` 配置。

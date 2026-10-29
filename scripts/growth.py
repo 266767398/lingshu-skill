@@ -980,14 +980,18 @@ def list_skills() -> list:
                 installed_dir = _find_installed(_require_slug(name))
             except ValueError:
                 installed_dir = _find_installed(name)
-            # 有更新检测：本地源与全局已装副本内容不一致（副本存在但内容有差异）
+            # 有更新检测：本地源与全局已装副本内容不一致（副本存在但内容有差异）。
+            # 与 update_check 同款双保险：签名有差但版本号相同不算过期（mtime 抖动
+            # /临时文件残留不该亮"有更新"徽标）。
             installed = (installed_dir / "SKILL.md").exists()
             outdated = False
-            if installed and installed_dir != d:
+            if installed and installed_dir.resolve() != d.resolve():
                 try:
-                    outdated = _diff_signature(d) != _diff_signature(installed_dir)
+                    inst_meta, _ = parse_frontmatter((installed_dir / "SKILL.md").read_text(encoding="utf-8"))
                 except OSError:
-                    outdated = False
+                    inst_meta = {}
+                outdated = (_diff_signature(d) != _diff_signature(installed_dir)
+                            and _ver(meta.get("version", 1)) != _ver(inst_meta.get("version", 1)))
             out.append({
                 "name": name,
                 "description": meta.get("description", ""),
@@ -1026,7 +1030,13 @@ def update_check(name: str = "lingshu") -> dict:
                 # 不能拿副本目录自己比自己——副本一旦有残缺文件会误报 outdated: true
                 # + 全量 changed/removed（朋友机器换盘符场景坐实过）。
                 installed_dir = _find_installed(_require_slug(name))
+                try:
+                    meta, _ = parse_frontmatter((installed_dir / "SKILL.md").read_text(encoding="utf-8"))
+                except OSError:
+                    meta = {}
                 return {"name": name, "installed": True, "outdated": False,
+                        "version": _ver(meta.get("version", 1)),
+                        "installed_version": _ver(meta.get("version", 1)),
                         "global_path": str(installed_dir)}
     src_md = src_dir / "SKILL.md"
     if not src_md.is_file():
