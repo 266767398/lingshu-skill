@@ -360,6 +360,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/overview":
             self._json(overview())
             return
+        if path == "/api/self-update":
+            self._json(growth.update_check("lingshu"))
+            return
         if path == "/api/workspace":
             self._json(workspace())
             return

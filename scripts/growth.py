@@ -988,6 +988,54 @@ def list_skills() -> list:
     return sorted(out, key=lambda x: x["updated"], reverse=True)
 
 
+def update_check(name: str = "lingshu") -> dict:
+    """检查本地源与全局已装副本的差异，返回「更新了什么」明细。
+
+    面板「检查更新」用：installed=False 表示没装过；outdated=False 表示已是最新；
+    outdated=True 时 changed/added/removed 三个列表说明源里相对全局副本动了哪些文件。
+    """
+    try:
+        src_dir = SKILLS_DIR / _require_slug(name)
+    except ValueError:
+        return {"name": name, "installed": False, "outdated": False}
+    if not (src_dir / "SKILL.md").is_file() and _is_lingshu(name, {}, None):
+        # 灵枢本体：源就是技能包自身目录（scripts/assets 就在这里），不走 skills/ 技能区
+        src_dir = Path(__file__).resolve().parent.parent
+    src_md = src_dir / "SKILL.md"
+    if not src_md.is_file():
+        return {"name": name, "installed": False, "outdated": False}
+    try:
+        meta, _ = parse_frontmatter(src_md.read_text(encoding="utf-8"))
+    except OSError:
+        meta = {}
+    try:
+        installed_dir = _find_installed(_require_slug(name))
+    except (ValueError, KeyError):
+        installed_dir = Path()
+    if not (installed_dir / "SKILL.md").exists():
+        return {"name": name, "installed": False, "outdated": False,
+                "version": _ver(meta.get("version", 1)),
+                "global_path": str(installed_dir)}
+
+    src_sig = _diff_signature(src_dir)
+    dst_sig = _diff_signature(installed_dir)
+    changed, added = [], []
+    for rel, size, mtime in sorted(src_sig - dst_sig):
+        if any(rel == r for r, *_ in dst_sig):
+            changed.append(rel)
+        else:
+            added.append(rel)
+    removed = [rel for rel, *_ in sorted(dst_sig - src_sig)]
+    return {
+        "name": name,
+        "installed": True,
+        "outdated": bool(src_sig != dst_sig),
+        "version": _ver(meta.get("version", 1)),
+        "changed": changed, "added": added, "removed": removed,
+        "global_path": str(installed_dir),
+    }
+
+
 AGENTS_BLOCK_START = "<!-- lingshu:start -->"
 AGENTS_BLOCK_END = "<!-- lingshu:end -->"
 # 旧版（无区块标记）生成文件的可识别签名：命中说明整文件都是灵枢生成的，没有用户手写内容

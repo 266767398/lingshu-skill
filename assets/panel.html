@@ -236,6 +236,7 @@
         <div class="sub" id="pageSub"></div>
       </div>
       <div class="sub" id="clock">2026/10/23 15:59:00</div>
+      <button class="btn" id="btn-self-update" title="检查灵枢本体有没有更新" style="margin-left:12px">检查更新<span id="upd-dot" class="hidden" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#c47f17;margin-left:6px"></span></button>
     </header>
 
     <div class="card hidden" id="ro-banner" style="margin-bottom:14px;border-color:var(--red);background:rgba(201,107,95,.08)">
@@ -826,6 +827,17 @@
       <button class="ghost" id="inject-close">关闭</button>
     </div>
     <div class="pre" id="inject-out" style="margin-top:12px;max-height:52vh">点「生成」看本次会注入哪些记忆。</div>
+  </div>
+</div>
+
+<div class="modal hidden" id="upd-modal">
+  <div class="box">
+    <h3 id="upd-title">检查更新</h3>
+    <div class="pre" id="upd-detail" style="margin:10px 0 4px"></div>
+    <div class="row" style="margin-top:16px">
+      <button class="ghost" id="upd-close">关闭</button>
+      <button class="btn hidden" id="upd-apply">更新</button>
+    </div>
   </div>
 </div>
 
@@ -2713,6 +2725,61 @@ setInterval(() => {
 }, 1000);
 
 load();
+
+// ---- 灵枢本体更新：开面板自动查一次 + 右上角按钮手动查
+async function checkUpdate(auto){
+  const btn = $("btn-self-update");
+  try {
+    if (!auto) btn.disabled = true;
+    const r = await api("/api/self-update");
+    if (!auto) btn.disabled = false;
+    const dot = $("upd-dot");
+    if (!r.installed) {
+      if (!auto) showUpdModal("灵枢本体尚未安装", "还没装到全局技能目录。去「技能」页点 ⇩ 安装，或用命令行 skill install。", false);
+      dot.classList.add("hidden");
+      return;
+    }
+    if (r.outdated) {
+      dot.classList.remove("hidden");
+      const lines = [];
+      if (r.changed && r.changed.length) lines.push("<b>内容有变化</b>：\n" + r.changed.map(x => "  · " + esc(x)).join("\n"));
+      if (r.added && r.added.length) lines.push("<b>新增文件</b>：\n" + r.added.map(x => "  · " + esc(x)).join("\n"));
+      if (r.removed && r.removed.length) lines.push("<b>已删除（将同步清掉）</b>：\n" + r.removed.map(x => "  · " + esc(x)).join("\n"));
+      showUpdModal("灵枢本体有更新（v" + esc(r.version) + "）",
+        (lines.join("\n\n") || "内容与全局副本不一致。") + "\n\n更新会以本地最新内容镜像同步到全局技能目录，记忆数据不受影响。", true);
+    } else {
+      dot.classList.add("hidden");
+      if (!auto) showUpdModal("已是最新", "全局副本与本地内容一致（v" + esc(r.version) + "），没有可更新的内容。", false);
+    }
+  } catch (e) {
+    if (!auto) { btn.disabled = false; toast(e.message, true); }
+  }
+}
+function showUpdModal(title, detail, canApply){
+  $("upd-title").textContent = title;
+  $("upd-detail").innerHTML = String(detail).replace(/\n/g, "<br>");
+  $("upd-apply").classList.toggle("hidden", !canApply);
+  $("upd-modal").classList.remove("hidden");
+}
+$("upd-close").addEventListener("click", () => $("upd-modal").classList.add("hidden"));
+$("btn-self-update").addEventListener("click", () => checkUpdate(false));
+$("upd-apply").addEventListener("click", async () => {
+  const btn = $("upd-apply");
+  try {
+    btn.disabled = true;
+    await post("/api/skill", {action: "install", name: "lingshu", force: true});
+    toast("灵枢本体已更新到全局技能目录");
+    $("upd-modal").classList.add("hidden");
+    $("upd-dot").classList.add("hidden");
+    await loadWS();
+  } catch (e) {
+    toast(e.message || "更新失败", true);
+  } finally {
+    btn.disabled = false;
+  }
+});
+// 开面板 1.2s 后自动查一次（避开启动时的并发请求高峰）
+setTimeout(() => checkUpdate(true), 1200);
 </script>
 
 
