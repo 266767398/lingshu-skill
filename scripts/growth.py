@@ -1029,6 +1029,92 @@ def list_skills() -> list:
     return sorted(out, key=lambda x: x["updated"], reverse=True)
 
 
+# ---- Gitee 远程拉取源 ----------------------------------------------------
+# 本地开发源（config.lingshu_source_dir）不可用时，从 Gitee 仓库拉最新代码作为
+# 更新源。纯标准库：Gitee API v5 匿名接口（urllib，30s 超时）。
+# 注意：Gitee 的 /repository/archive/main.zip 归档下载已被风控拦截（对脚本
+# UA 返回 HTML 验证页而非 zip），不能直接用；API v5 的 contents 接口匿名可用。
+GITEE_API_BASE = "https://gitee.com/api/v5/repos/htmcwy_0/lingshu-skill"
+GITEE_BRANCH = "main"
+GITEE_TIMEOUT = 30  # 下载超时（秒）
+
+import json as _json
+import urllib.request as _urlreq
+import urllib.parse as _urlparse
+
+
+def _gitee_cache_dir() -> Path:
+    """Gitee 拉取缓存的临时目录（系统 temp 下带仓库标识，进程存活期间复用）。"""
+    import tempfile
+    d = Path(os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir())
+    return d / "lingshu-gitee-src"
+
+
+def _gitee_api(path: str) -> object:
+    """调 Gitee API v5 匿名接口，返回解析后的 JSON。失败抛 URLError/JSONDecodeError。"""
+    url = f"{GITEE_API_BASE}{path}"
+    req = _urlreq.Request(url, headers={"User-Agent": "lingshu-updater",
+                                        "Accept": "application/json"})
+    with _urlreq.urlopen(req, timeout=GITEE_TIMEOUT) as resp:
+        return _json.loads(resp.read().decode("utf-8"))
+
+
+def _fetch_gitee_source() -> Path:
+    """从 Gitee 拉取 main 分支全部文件到临时缓存目录，返回含 SKILL.md 的真实根。
+
+    用 API v5 匿名接口：先取仓库目录树（recursive=1），再逐个取文本文件内容
+    （base64 解码）。仓库规模小（几十个文件），总量可控。失败抛异常由调用方降级。
+    """
+    import base64
+    cache = _gitee_cache_dir()
+    extract_root = cache / "extracted"
+    if extract_root.exists():
+        shutil.rmtree(extract_root, ignore_errors=True)
+    extract_root.mkdir(parents=True, exist_ok=True)
+
+    tree = _gitee_api(f"/git/trees/{GITEE_BRANCH}?recursive=1")
+    if tree.get("truncated"):
+        raise RuntimeError("Gitee 目录树被截断（仓库过大），无法安全拉取")
+    n = 0
+    for item in tree.get("tree", []):
+        if item.get("type") != "blob":
+            continue
+        path = item.get("path", "")
+        if (".git" in path.split("/") or "__pycache__" in path
+                or path.endswith((".pyc", ".tmp"))):
+            continue
+        blob = _gitee_api(f"/contents/{_urlparse.quote(path)}?ref={GITEE_BRANCH}")
+        if blob.get("encoding") != "base64":
+            raise RuntimeError(f"Gitee 返回内容编码异常：{path}")
+        data = base64.b64decode(blob.get("content", ""))
+        target = extract_root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        n += 1
+        if n > 500:
+            raise RuntimeError("文件数异常（>500），可能指错仓库，已停止")
+    if not (extract_root / "SKILL.md").is_file():
+        raise RuntimeError("Gitee 拉取结果里找不到 SKILL.md（可能仓库结构变了）")
+    return extract_root
+
+
+def _lingshu_remote_source(force: bool = False) -> Path | None:
+    """尝试获取 Gitee 远程源目录；成功返回路径，失败返回 None（调用方降级）。
+
+    复用缓存目录里已拉取的源（同一会话内不重复下载），force=True 强制重新拉取
+    （点「更新」时用，确保拿到最新代码）。缓存有效性以是否解压出 SKILL.md 为准。
+    """
+    cache = _gitee_cache_dir()
+    cached = cache / "extracted"
+    if (cached / "SKILL.md").is_file() and not force:
+        return cached
+    try:
+        return _fetch_gitee_source()
+    except Exception as e:  # 网络失败/接口失败：降级，不崩溃
+        print(f"[lingshu] Gitee 拉取失败，降级为本地副本源：{e}", file=sys.stderr)
+        return None
+
+
 def update_check(name: str = "lingshu") -> dict:
     """检查本地源与全局已装副本的差异，返回「更新了什么」明细。
 
@@ -1042,14 +1128,25 @@ def update_check(name: str = "lingshu") -> dict:
     if not (src_dir / "SKILL.md").is_file() and _is_lingshu(name, {}, None):
         # 灵枢本体：源就是技能包自身目录（scripts/assets 就在这里），不走 skills/ 技能区
         src_dir = Path(__file__).resolve().parent.parent
+        out_src = "local"   # 默认：面板自身目录即源（面板直接跑在开发仓库里的场景）
         # 面板跑在全局副本里时，"自身目录"==已装目录，自己比自己永远"一致"。
         # 此时查配置里登记的开发源目录（config.lingshu_source_dir），有就用它。
         if src_dir.resolve() == _find_installed(_require_slug(name)).resolve():
             cfg_src = str(brain.load_config().get("lingshu_source_dir") or "")
+            source = "local"
             if cfg_src and (Path(cfg_src) / "SKILL.md").is_file():
                 src_dir = Path(cfg_src)
             else:
-                # 没配 lingshu_source_dir：源就是已装副本本身，没有可比的"新版本"。
+                # 没配 lingshu_source_dir（或目录失效）：回退到 Gitee 远程拉 zip 作源。
+                # 拉取失败再降级为"源即副本"（显示已最新），不崩溃。
+                remote = _lingshu_remote_source()
+                if remote is not None:
+                    src_dir = remote
+                    source = "gitee"
+                else:
+                    source = "none"
+            if source == "none":
+                # 本地与远程源都拿不到：源就是已装副本本身，没有可比的"新版本"。
                 # 不能拿副本目录自己比自己——副本一旦有残缺文件会误报 outdated: true
                 # + 全量 changed/removed（朋友机器换盘符场景坐实过）。
                 installed_dir = _find_installed(_require_slug(name))
@@ -1057,10 +1154,11 @@ def update_check(name: str = "lingshu") -> dict:
                     meta, _ = parse_frontmatter((installed_dir / "SKILL.md").read_text(encoding="utf-8"))
                 except OSError:
                     meta = {}
-                return {"name": name, "installed": True, "outdated": False,
+                return {"name": name, "installed": True, "outdated": False, "source": "none",
                         "version": _ver(meta.get("version", 1)),
                         "installed_version": _ver(meta.get("version", 1)),
                         "global_path": str(installed_dir)}
+            out_src = source
     src_md = src_dir / "SKILL.md"
     if not src_md.is_file():
         return {"name": name, "installed": False, "outdated": False}
@@ -1094,6 +1192,7 @@ def update_check(name: str = "lingshu") -> dict:
         "name": name,
         "installed": True,
         "outdated": outdated,
+        "source": out_src,   # 更新来源：local=本地开发仓库 / gitee=Gitee 远程 / none=无源降级
         "version": _ver(meta.get("version", 1)),
         "installed_version": _ver(inst_meta.get("version", 1)),
         "global_path": str(installed_dir),
@@ -1317,6 +1416,12 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
                     cfg_src = str(brain.load_config().get("lingshu_source_dir") or "")
                     if cfg_src and (Path(cfg_src) / "SKILL.md").is_file():
                         src_dir = Path(cfg_src)
+                    else:
+                        # 本地开发源不可用：点「更新」时强制重新拉 Gitee 远程 zip 作源，
+                        # 确保拿到最新代码而不是复用旧缓存。拉不到则报可读错误。
+                        remote = _lingshu_remote_source(force=True)
+                        if remote is not None:
+                            src_dir = remote
                 src = src_dir / "SKILL.md"
             if not src.exists():
                 raise KeyError(f"没有这个技能：{name}")

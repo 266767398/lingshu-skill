@@ -2748,12 +2748,15 @@ async function checkUpdate(auto){
     }
     if (r.outdated) {
       dot.style.display = "inline-block";
+      const srcLabel = r.source === "gitee" ? "来源：Gitee 远程"
+                     : r.source === "local" ? "来源：本地开发仓库"
+                     : r.source === "none" ? "来源：本地副本（源不可用）" : "";
       let detail;
       if (r.changelog) {
         // 人话版更新说明：后端从源的 CHANGELOG.md 抽出 (已装版本, 最新版本] 区间正文
         // 只处理 **x** 加粗（星号中间的内容加粗显示），其余原样；esc 先转义防 XSS
         const md = esc(String(r.changelog)).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
-        detail = md + "\n\n<i>更新会以本地最新内容镜像同步到全局技能目录，记忆数据不受影响。</i>";
+        detail = (srcLabel ? "<i>" + srcLabel + "</i>\n\n" : "") + md + "\n\n<i>更新会以最新内容镜像同步到全局技能目录，记忆数据不受影响。</i>";
       } else {
         // 兜底：CHANGELOG 拿不到时退回文件清单
         const lines = [];
@@ -2765,7 +2768,11 @@ async function checkUpdate(auto){
       showUpdModal("灵枢本体有更新（v" + esc(r.installed_version || "?") + " → v" + esc(r.version) + "）", detail, true);
     } else {
       dot.style.display = "none";
-      if (!auto) showUpdModal("已是最新", "全局副本与本地内容一致（v" + esc(r.version) + "），没有可更新的内容。", false);
+      if (!auto) {
+        const srcTxt = r.source === "gitee" ? "（来源：Gitee 远程）"
+                     : r.source === "local" ? "（来源：本地开发仓库）" : "";
+        showUpdModal("已是最新", "全局副本与最新内容一致（v" + esc(r.version) + "）" + srcTxt + "，没有可更新的内容。", false);
+      }
     }
   } catch (e) {
     if (!auto) { btn.disabled = false; toast(e.message, true); }
