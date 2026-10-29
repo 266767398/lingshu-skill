@@ -2750,6 +2750,7 @@ async function checkUpdate(auto){
           const e = esc(ln);
           if (/^###\s/.test(ln)) return "<b>" + e.replace(/^###\s*/, "") + "</b>";
           if (/^##\s/.test(ln)) return "<b style='font-size:1.05em'>" + e.replace(/^##\s*/, "") + "</b>";
+          if (/^[-*]\s/.test(e)) return "· " + e.replace(/^[-*]\s*/, "");  // bullet 记号渲染成圆点
           return e.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
         }).join("\n");
         detail = md + "\n\n<i>更新会以本地最新内容镜像同步到全局技能目录，记忆数据不受影响。</i>";
@@ -2773,6 +2774,9 @@ async function checkUpdate(auto){
 function showUpdModal(title, detail, canApply){
   $("upd-title").textContent = title;
   $("upd-detail").innerHTML = String(detail).replace(/\n/g, "<br>");
+  $("upd-detail").parentElement.style.maxHeight = "60vh";   // 更新说明可能很长，限高
+  $("upd-detail").parentElement.style.overflowY = "auto";
+  $("upd-detail").parentElement.style.display = "block";
   $("upd-apply").classList.toggle("hidden", !canApply);
   $("upd-modal").classList.remove("hidden");
 }
@@ -2795,10 +2799,12 @@ $("upd-apply").addEventListener("click", async () => {
       return;
     }
     if (st === "failed" || r.ok === false) throw new Error((r.result && r.result.error) || "更新失败");
+    updRiskAccepted = false;   // 下次更新重新走一遍风险告知
     toast("灵枢本体已更新到全局技能目录");
     $("upd-modal").classList.add("hidden");
     $("upd-dot").style.display = "none";
     await loadWS();
+    checkUpdate(false);        // 更新完复查一次：确认显示"已是最新"而非靠猜
   } catch (e) {
     toast(e.message || "更新失败", true);
   } finally {
