@@ -2661,6 +2661,12 @@ def persona_brief(p: dict, mood: bool = True) -> str:
     else:
         lines.append("性格：还没有。等初识时问用户，用户不知道就由你自己定。")
     drives = p.get("drives") or {}
+    # 与 mind_state() 同一套兜底：traits 已有数值而 drives 还空时，别在自我
+    # 描述里一边「性格：好奇85」一边「内驱：还没有数值」——自相矛盾每轮被读。
+    if drives.get("curiosity") is None and drives.get("reason") is None:
+        _t = p.get("traits") or {}
+        if _t.get("好奇") is not None or _t.get("理智") is not None:
+            drives = {"curiosity": _t.get("好奇"), "reason": _t.get("理智")}
     if drives.get("curiosity") is not None or drives.get("reason") is not None:
         lines.append(f"内驱：好奇心 {drives.get('curiosity', '未成形')} / 理智 {drives.get('reason', '未成形')}"
                      "（理智先算值不值得深想，好奇心负责找新问题）。")
@@ -3109,6 +3115,13 @@ def mind_state() -> dict:
     """好奇心/理智没有出厂值。返回 None 表示还没从互动里长出来。"""
     p = load_persona()
     dr = p.get("drives") or {}
+    # traits 与 drives 语义重叠（interview --unsure 只写 traits 不写 drives）。
+    # drives 缺失时从 traits 兜底，否则注入里会同时出现「性格：好奇85」和
+    # 「内驱：还没有数值」的自相矛盾。
+    if dr.get("curiosity") is None and dr.get("reason") is None:
+        _traits = p.get("traits") or {}
+        if _traits.get("好奇") is not None or _traits.get("理智") is not None:
+            dr = {"curiosity": _traits.get("好奇"), "reason": _traits.get("理智")}
     cur, rea = dr.get("curiosity"), dr.get("reason")
     return {"curiosity": cur, "reason": rea,
             "formed": cur is not None or rea is not None}
@@ -3793,6 +3806,12 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
             out.append("如果用户答了：`persona interview --name \"...\" --traits \"...\"`，再 `persona self` 补完自己那部分。")
 
     dr = p.get("drives") or {}
+    # 与 mind_state() 同一套兜底：traits 已有数值而 drives 还空时，别在注入里
+    # 一边说「性格：好奇85」一边说「内驱：还没有数值」——自相矛盾每轮都被读。
+    if dr.get("curiosity") is None and dr.get("reason") is None:
+        _traits = p.get("traits") or {}
+        if _traits.get("好奇") is not None or _traits.get("理智") is not None:
+            dr = {"curiosity": _traits.get("好奇"), "reason": _traits.get("理智")}
     out.append("\n## 我怎么想事情")
     if dr.get("curiosity") is not None or dr.get("reason") is not None:
         out.append(f"好奇心 {dr.get('curiosity', '未成形')} / 理智 {dr.get('reason', '未成形')}。"
@@ -3808,8 +3827,15 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
     if query:
         mems = recall(query, k=10, strengthen=not READONLY)
         header = f"\n## 与「{query[:24]}」相关的记忆"
+        new_mem: list = []
     else:
-        mems = [(m, 0, {}) for m in recent(6)]
+        # 先切出「上次 startup 之后」新写入的记忆 → 专属「刚刚发生」段，
+        # 并从「最近的记忆」里剔除，两段互斥不重复。
+        # >= 而非 >：同秒写入（startup 落盘和 remember 同一秒很常见）也要算进来。
+        _last = (load_config().get("last_startup") or {}).get("ts") or 0
+        new_mem = [m for m in recent(20) if float(m.get("created", 0)) >= _last][:4]
+        _new_ids = {m.get("id") for m in new_mem}
+        mems = [(m, 0, {}) for m in recent(6 + len(new_mem)) if m.get("id") not in _new_ids][:6]
         header = "\n## 最近的记忆"
     lines = []
     for m, score, _ in mems:
@@ -3822,13 +3848,11 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
         out.extend(lines)
         used += len("\n".join(lines))
 
-    # 最近片段（补足上下文连续性）
-    if not query:
-        rec = recent(4)
-        if rec:
-            out.append("\n## 刚刚发生")
-            for m in rec:
-                out.append(f"- {display_text(m)}")
+    # 「刚刚发生」：上面已按 id 切分（new_mem），这里直接渲染即可。
+    if not query and new_mem:
+        out.append("\n## 刚刚发生（本会话新增）")
+        for m in new_mem:
+            out.append(f"- {display_text(m)}")
 
     # 上一次梦的结论
     dream_files = sorted((HOME / "dreams").glob("*.md")) if (HOME / "dreams").exists() else []
