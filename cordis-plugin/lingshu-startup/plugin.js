@@ -10,8 +10,11 @@
 //   所以本插件任何路径都不允许抛异常），payload 为
 //   { agent, source: 'startup'|'resume'|'clear'|'compact', signal? }。
 //   只对 startup/resume 注入；clear/compact 是同会话重建上下文，不重复注入。
-// - 投递用 agent.send(msg, 'next-turn', false) 而非 inject——inject 固定写
-//   next-step 队列，turn/start 时会被清空，注入活不到模型眼前（实测坐实）。
+// - 投递用 agent/pre-step 钩子：agent/created 里只跑 startup 并把文本存进
+//   pending Map；pre-step（构建 messages 之后、请求之前）await next() 后把文本
+//   追加进 enter 分支的 messages——不排队、不经过 inbox 消费逻辑，必然进模型
+//   上下文。此前试过 inject（写 next-step，turn/start 清空丢注入）与
+//   send('next-turn')（进待发送队列，模型看不到），都实测失败。
 //
 // 数据安全：本插件只读记忆库（startup 内部只读+写 last_startup），不碰
 // 技能目录；brain.py 自身保证只读降级（HOME 不可写时照样注入）。
@@ -147,8 +150,9 @@ function runStartup(pythonExe, pythonCmdFallback, brainPy, budget, timeoutMs) {
 
 export function apply(ctx, config) {
   const cfg = mergeConfig(config)
-  // 进程内缓存：同一 agent 不重复跑 startup
-  const injected = new WeakSet()
+  // pending：agent -> 注入文本。agent/created 只负责把文本存进来，
+  // 真正投递在 agent/pre-step 里做（见下）。
+  const pending = new Map()
   // 配置类失败只告警一次：静默吞掉配置错误会让插件"看似在工作、实际没注入"
   let warnedOnce = false
 
@@ -160,8 +164,7 @@ export function apply(ctx, config) {
       // clear / compact 是同会话上下文重建，重复注入只会浪费 token。
       if (source !== 'startup' && source !== 'resume') return
       if (source === 'resume' && !cfg.injectResume) return
-      if (injected.has(agent)) return
-      injected.add(agent)
+      if (pending.has(agent)) return
 
       const brainPy = findBrainPy(cfg.brainPy)
       if (!brainPy) {
@@ -174,30 +177,39 @@ export function apply(ctx, config) {
         if (!warnedOnce) { warnedOnce = true; try { ctx.logger?.warn?.('lingshu-startup: brain.py startup 未产出注入文本（python 不在/超时/未初始化），跳过注入') } catch {} }
         return
       }
-      try {
-        // 用 send 而非 inject：inject 固定塞进 next-step 队列，而 next-step 在
-        // turn/start 时被清空（实测：事件 agent/inbox/spliced removed=1），注入
-        // 会被"排错队丢掉"。send 可显式指定 target='next-turn'——step/start
-        // 构建 messages 只消费 next-turn，注入才能活到模型眼前。
-        // wakeup=false：不要在没有用户输入时把 agent 拉起来空跑一轮。
-        // form:'instructions'：runtime-context 里只有 snapshot 才有"取代"语义，
-        // 标成 instructions 不会被后续运行时快照顺手清掉。
-        agent.send?.(
-          {
-            id: randomUUID(),
-            role: 'user',
-            content: [{ type: 'text', text }],
-            source: { kind: 'runtime-context', form: 'instructions' },
-          },
-          'next-turn',
-          false,
-        )
-      } catch (e) {
-        try { ctx.logger?.warn?.('lingshu-startup: 注入失败', e) } catch {}
-      }
+      // 只存不投递：send/inject 走 inbox 都有生命周期坑（实测坐实），真正进模型
+      // 上下文要在 agent/pre-step 里追加 messages（见下）。
+      pending.set(agent, text)
     } catch (e) {
       // 任何意外都不能让监听器 reject（agent/created 失败会回滚会话创建）
       try { ctx.logger?.warn?.('lingshu-startup: 未捕获异常', e) } catch {}
+    }
+  })
+
+  // 每步构建 messages 之后、发起请求之前：把注入文本追加进这批 messages。
+  // 这条通道不排队、不经过 inbox 消费逻辑——enter 分支的 messages 就是模型看到的。
+  ctx.on('agent/pre-step', async (payload, next) => {
+    try {
+      // 先 await next()：让其他（wrapping）监听器先改完，保住它们的
+      // startsRequestSeries / batch 语义，再在结果上追加。
+      const decision = await next()
+      if (!decision || decision.kind !== 'enter') return decision
+      const { agent } = payload || {}
+      const text = agent && pending.get(agent)
+      if (!text) return decision
+      pending.delete(agent) // 只注入一次：不删的话每条 pre-step 都会重复塞
+      return {
+        ...decision,
+        messages: [...decision.messages, {
+          id: randomUUID(),
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'skill-invocation', name: 'lingshu', form: 'instructions' },
+        }],
+      }
+    } catch (e) {
+      try { ctx.logger?.warn?.('lingshu-startup: pre-step 注入失败', e) } catch {}
+      // next() 可能已经跑过，无法安全重放；异常只能吞掉，不能冒泡
     }
   })
 }

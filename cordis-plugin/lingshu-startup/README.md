@@ -2,7 +2,8 @@
 
 把"模型自觉读 SKILL.md"变成"机制自动注入"：每个 DSH 新会话（`agent/created`，
 source ∈ startup / resume）时自动运行灵枢的 `brain.py startup`，把人格、记忆、
-工作记忆、行为指引以 `agent.send(msg, 'next-turn', false)` 投递进会话上下文。
+工作记忆、行为指引在 `agent/pre-step` 钩子里追加进当步 messages，直接进入模型
+上下文（不走 inbox，实测 inbox 三条路都有坑）。
 
 ## 为什么要有这个插件
 
@@ -37,9 +38,17 @@ pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 
 | 问题 | 现象 | 修法 |
 |---|---|---|
-| `inject()` 写 `next-step` 队列 | 注入发生了，但 `turn/start` 时被清空（`agent/inbox/spliced removed=1`），模型永远看不到 | 改 **`agent.send(msg, 'next-turn', false)`**——`step/start` 构建 messages 只消费 `next-turn`；`wakeup=false` 避免无用户输入空跑一轮 |
-| runtime-context 有"取代"语义 | DSH 运行时快照声明会 supersede 之前的 runtime-context 消息，注入可能被顺手清掉 | `source` 补 **`form: 'instructions'`**——只有 `form:'snapshot'` 才参与取代 |
+| `inject()` 写 `next-step` 队列 | 注入发生了，但 `turn/start` 时被清空（`agent/inbox/spliced removed=1`），模型永远看不到 | 换投递通道（见下） |
+| `send(msg,'next-turn')` 进待发送队列 | send 语义是"发一条消息"——UI 上排队，模型仍看不到 | 换投递通道（见下） |
+| runtime-context 有"取代"语义 | DSH 运行时快照声明会 supersede 之前的 runtime-context 消息，注入可能被顺手清掉 | `source` 改 **`skill-invocation` + `form:'instructions'`** |
 | link 安装时内置包解析失败 | `Cannot find package '@deepseek-ai/schemastery'`（模块真实路径在技能目录，向上找不到 node_modules）→ cordis **静默跳过插件** | 去掉 schemastery，配置改 **`DEFAULTS + mergeConfig`** 普通对象，零外部依赖 |
+
+**最终投递通道：`agent/pre-step` 钩子**（前三种 inbox 方案全部实测失败后采用）。
+`agent/created` 里只跑 startup 并把文本存进 pending Map；`agent/pre-step`
+（每步构建 messages 之后、发起请求之前）**先 `await next()`**（保住其他 wrapping
+监听器的 `startsRequestSeries`/batch 语义），再把文本追加进 `enter` 分支的
+messages。这条通道不排队、不依赖 source 的渲染规则、不经过 inbox 消费逻辑——
+`enter` 分支的 messages 就是模型看到的。`pending.delete(agent)` 保证只注入一次。
 
 另有一条 ESM 链接期坑：`index.js` re-export 了 `plugin.js` 已删除的 `Config`，
 `SyntaxError: does not provide an export named 'Config'` 在模块链接期就炸、同样
