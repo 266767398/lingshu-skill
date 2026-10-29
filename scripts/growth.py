@@ -1263,7 +1263,18 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
         src_dir = SKILLS_DIR / name
         src = src_dir / "SKILL.md"
         if not src.exists():
-            raise KeyError(f"没有这个技能：{name}")
+            # 灵枢本体特判：源不在 skills/ 技能区，就在技能包自身目录（或配置登记的
+            # 开发源目录）。与 update_check 的同款特判保持一致——否则面板点"更新"
+            # 会报"没有这个技能：lingshu"（检查更新明明说有新版，更新却失败）。
+            if _is_lingshu(name, {}, None):
+                src_dir = Path(__file__).resolve().parent.parent
+                if src_dir.resolve() == _find_installed(name).resolve():
+                    cfg_src = str(brain.load_config().get("lingshu_source_dir") or "")
+                    if cfg_src and (Path(cfg_src) / "SKILL.md").is_file():
+                        src_dir = Path(cfg_src)
+                src = src_dir / "SKILL.md"
+            if not src.exists():
+                raise KeyError(f"没有这个技能：{name}")
     # 安装目标：默认主目录；但已装在别处（含面板自己所在根）时优先跟随——
     # 更新要落到用户实际在用的那份副本，不然"更新成功"了跑的还是旧的
     existing = _find_installed(name)
