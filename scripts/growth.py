@@ -924,6 +924,26 @@ def list_installed() -> list:
     return out
 
 
+def _diff_signature(dir_path: Path) -> set:
+    """目录内容的差异签名：相对路径 + 大小 + mtime 取整秒。
+    用于对比"本地源目录"和"全局已装副本"是否一致，判断有没有可更新的内容。"""
+    sig = set()
+    if not dir_path.is_dir():
+        return sig
+    for f in dir_path.rglob("*"):
+        if not f.is_file() or "__pycache__" in f.parts or ".git" in f.parts:
+            continue
+        # AGENTS.md 是安装时重新生成的（区块化更新，含时间性内容），不参与差异判定
+        if f.name.endswith((".tmp", ".pyc", ".lock", ".corrupt")) or f.name == "AGENTS.md":
+            continue
+        try:
+            st = f.stat()
+            sig.add((f.relative_to(dir_path).as_posix(), st.st_size, int(st.st_mtime)))
+        except OSError:
+            continue
+    return sig
+
+
 def list_skills() -> list:
     reg = load_registry()
     out = []
@@ -938,13 +958,22 @@ def list_skills() -> list:
                 installed_dir = _find_installed(_require_slug(name))
             except ValueError:
                 installed_dir = _find_installed(name)
+            # 有更新检测：本地源与全局已装副本内容不一致（副本存在但内容有差异）
+            installed = (installed_dir / "SKILL.md").exists()
+            outdated = False
+            if installed and installed_dir != d:
+                try:
+                    outdated = _diff_signature(d) != _diff_signature(installed_dir)
+                except OSError:
+                    outdated = False
             out.append({
                 "name": name,
                 "description": meta.get("description", ""),
                 "version": _ver(meta.get("version", reg.get(name, {}).get("version", 1) or 1)),
                 "lines": len(body.splitlines()),
                 "updated": p.stat().st_mtime,
-                "installed": (installed_dir / "SKILL.md").exists(),
+                "installed": installed,
+                "outdated": outdated,
                 "agents": (installed_dir / "AGENTS.md").exists(),
                 "path": str(p),
             })

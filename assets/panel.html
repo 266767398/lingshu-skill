@@ -1711,14 +1711,17 @@ function renderSkills(out){
           <span class="badge">v${esc(s.version)}</span>
           <span class="badge">${s.lines} 行</span>
           ${s.agents ? '<span class="badge">AGENTS.md</span>' : ""}
-          <span class="date">${s.installed ? "已安装到全局" : "未安装"}</span>
+          ${s.installed && s.outdated ? '<span class="badge" style="background:#c47f17;color:#fff">有更新</span>' : ""}
+          <span class="date">${s.installed ? (s.outdated ? "已安装（有更新）" : "已安装到全局") : "未安装"}</span>
         </div>
         <p>${esc(s.description)}</p>
       </div>
       <div class="acts">
         <button class="iconbtn" title="查看" data-skshow="${esc(s.name)}">◎</button>
         <button class="iconbtn" title="编辑" data-skedit="${esc(s.name)}">✎</button>
-        <button class="iconbtn ${s.installed ? "pin" : ""}" title="${s.installed ? "重新安装" : "安装到全局"}" data-skinstall="${esc(s.name)}">⇩</button>
+        ${s.installed && s.outdated
+          ? `<button class="iconbtn pin" title="更新到全局（镜像同步本地最新内容）" data-skupdate="${esc(s.name)}">↻</button>`
+          : `<button class="iconbtn ${s.installed ? "pin" : ""}" title="${s.installed ? "重新安装" : "安装到全局"}" data-skinstall="${esc(s.name)}">⇩</button>`}
         <button class="iconbtn" title="删除" data-skdel="${esc(s.name)}">✕</button>
       </div>
     </article>`).join("")
@@ -2601,6 +2604,7 @@ $("skill-btn-check").addEventListener("click", async () => {
 $("skill-list").addEventListener("click", async (e) => {
   const show = e.target.closest("[data-skshow]"), ed = e.target.closest("[data-skedit]");
   const ins = e.target.closest("[data-skinstall]"), del = e.target.closest("[data-skdel]");
+  const upd = e.target.closest("[data-skupdate]");
   try {
     if (show) {
       const r = await post("/api/skill", {action: "show", name: show.dataset.skshow});
@@ -2614,6 +2618,15 @@ $("skill-list").addEventListener("click", async (e) => {
       $("skill-body").value = r.skill.body;
       $("skill-modal").querySelector("h3").textContent = "编辑技能";
       $("skill-modal").classList.remove("hidden");
+    }
+    if (upd) {
+      // 更新 = force 镜像同步本地最新内容到全局副本（源里删掉的文件也会清掉）
+      if (!confirm("把「" + upd.dataset.skupdate + "」更新到全局技能目录？\n\n以本地内容为准镜像同步（记忆数据不受影响）。")) return;
+      try {
+        await post("/api/skill", {action: "install", name: upd.dataset.skupdate, force: true});
+        toast("已更新到全局技能目录");
+      } catch (err) { toast(err.message || "更新失败", true); return; }
+      await loadWS();
     }
     if (ins) {
       let r;
@@ -2635,7 +2648,7 @@ $("skill-list").addEventListener("click", async (e) => {
         r = await post("/api/skill", {action: "install", name: ins.dataset.skinstall, force: false, yes: true});
       }
       if (r.result && r.result.state === "risk_required") { toast("未接受风险告知，已取消安装", true); return; }
-      toast(r.result.state === "already" ? "已是最新" : "已安装到全局技能目录");
+      toast(r.result && r.result.state === "already" ? "已是最新" : "已安装到全局技能目录");
       await loadWS();
     }
     if (del) {
