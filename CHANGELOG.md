@@ -49,6 +49,10 @@
 - **启动注入插件 `findBrainPy()` 加 `LINGSHU_SKILL_DIR` 环境变量兜底**：
   灵枢装在非常规位置（换盘符/自定义目录）时，设该环境变量指向技能根目录
   即可被插件找到，不用改 profile 的 `brainPy` 配置。
+- **插件优先问 APP 要路径（skills registry）**：探测顺序升级为
+  profile `brainPy` → `ctx.skills` registry 的 `list()`（条目自带绝对
+  SKILL.md 路径，同步/异步返回都支持）→ `LINGSHU_SKILL_DIR` 环境变量 →
+  默认目录。APP 能发现技能，插件就能拿到，不再依赖目录名猜测。
 
 ### 六欲自动变动（不再只等手动"满足"）
 - **修"六欲一直停在默认 60"**：此前六欲唯一写入口是面板/CLI 的手动"满足"，

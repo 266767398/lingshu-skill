@@ -22,7 +22,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 // 刻意零外部依赖：不 import @deepseek-ai/schemastery。原因——link: 安装时模块
@@ -55,8 +55,21 @@ function mergeConfig(user) {
 }
 
 /** 依次探测常见安装位置的 brain.py */
-function findBrainPy(configured) {
+async function findBrainPy(configured, ctx) {
   if (configured) return existsSync(configured) ? configured : null
+  // 方案3：直接问 APP 技能 catalog 要路径——registry 每个条目带绝对 path（SKILL.md），
+  // 换盘符/自定义目录/目录改名都能命中，不靠猜。任何一步失败静默落回兜底探测。
+  // list() 同步/异步返回都支持（agent/created 是 async 监听器，await 无成本）。
+  try {
+    const registry = ctx?.get?.('skills') ?? ctx?.skills
+    let items = registry?.list?.()
+    if (items?.then) items = await items
+    const hit = Array.isArray(items) ? items.find((s) => s?.name === 'lingshu') : null
+    if (hit?.path) {
+      const p = join(dirname(hit.path), 'scripts', 'brain.py')
+      if (existsSync(p)) return p
+    }
+  } catch {}
   // 环境变量兜底：装在非常规位置（换盘符/自定义目录）时，
   // 设 LINGSHU_SKILL_DIR 指向技能根目录即可，不用改 profile。
   const envDir = (process.env.LINGSHU_SKILL_DIR || '').trim()
@@ -173,7 +186,7 @@ export function apply(ctx, config) {
       if (source === 'resume' && !cfg.injectResume) return
       if (pending.has(agent)) return
 
-      const brainPy = findBrainPy(cfg.brainPy)
+      const brainPy = await findBrainPy(cfg.brainPy, ctx)
       if (!brainPy) {
         if (!warnedOnce) { warnedOnce = true; try { ctx.logger?.warn?.('lingshu-startup: 未找到 brain.py（未安装灵枢？），跳过注入') } catch {} }
         return
