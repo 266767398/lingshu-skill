@@ -85,7 +85,7 @@ function findPythonExe(configured) {
  * 跑 brain.py startup，返回注入文本；失败返回 null（绝不抛异常、绝不阻塞会话）。
  * 找不到 python.exe 时退回 ComSpec 让 cmd 解析 PATHEXT（python.cmd 也能跑）。
  */
-function runStartup(pythonExe, brainPy, budget, timeoutMs) {
+function runStartup(pythonExe, pythonCmdFallback, brainPy, budget, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false
     const done = (v) => { if (!settled) { settled = true; resolve(v) } }
@@ -100,12 +100,16 @@ function runStartup(pythonExe, brainPy, budget, timeoutMs) {
           timeout: timeoutMs, // Node>=15 自带超时，超时触发 error/kill
         })
       } else {
-        // 兜底：让 cmd 去解析 .cmd（/d 关 autorun，/s 规范引号解析，/c 执行后退出）
+        // 兜底：让 cmd 去解析 .cmd（/d 关 autorun，/s 规范引号解析，/c 执行后退出）。
+        // 注意命令行必须带上 python 命令本身（pythonExe 没找到时用裸 'python'，
+        // 由 cmd 按 PATHEXT 解析成 python.cmd）——只拼 brain.py 会依赖 .py 文件关联。
         const comspec = process.env.ComSpec ?? 'cmd.exe'
-        const cmdline = args.map((a) => `"${a}"`).join(' ')
+        const pythonCmd = pythonCmdFallback || 'python'
+        const cmdline = [`"${pythonCmd}"`, ...args.map((a) => `"${a}"`)].join(' ')
         child = spawn(comspec, ['/d', '/s', '/c', cmdline], {
           encoding: 'utf8',
           windowsHide: true,
+          windowsVerbatimArguments: true, // 命令行已手工加引号，阻止 Node 再转义一层
           env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
           timeout: timeoutMs,
         })
@@ -148,7 +152,8 @@ export function apply(ctx, config) {
         if (!warnedOnce) { warnedOnce = true; try { ctx.logger?.warn?.('lingshu-startup: 未找到 brain.py（未安装灵枢？），跳过注入') } catch {} }
         return
       }
-      const text = await runStartup(findPythonExe(config.python), brainPy, config.budget, config.timeoutMs)
+      const pythonExe = findPythonExe(config.python)
+      const text = await runStartup(pythonExe, config.python, brainPy, config.budget, config.timeoutMs)
       if (!text) {
         if (!warnedOnce) { warnedOnce = true; try { ctx.logger?.warn?.('lingshu-startup: brain.py startup 未产出注入文本（python 不在/超时/未初始化），跳过注入') } catch {} }
         return
