@@ -57,7 +57,9 @@ function mergeConfig(user) {
 /** 依次探测常见安装位置的 brain.py */
 async function findBrainPy(configured, ctx) {
   if (configured) return existsSync(configured) ? configured : null
-  // 方案3：直接问 APP 技能 catalog 要路径——registry 每个条目带绝对 path（SKILL.md），
+  // 方案3：直接问 APP 技能 catalog 要路径——registry 条目带 SKILL.md 的位置
+  // （官方文档措辞 "location for its SKILL.md ... may be an absolute filesystem
+  // path"，字段名不同版本可能是 path/location/baseDir/dir，逐个试，命中即用）。
   // 换盘符/自定义目录/目录改名都能命中，不靠猜。任何一步失败静默落回兜底探测。
   // list() 同步/异步返回都支持（agent/created 是 async 监听器，await 无成本）。
   try {
@@ -65,9 +67,18 @@ async function findBrainPy(configured, ctx) {
     let items = registry?.list?.()
     if (items?.then) items = await items
     const hit = Array.isArray(items) ? items.find((s) => s?.name === 'lingshu') : null
-    if (hit?.path) {
-      const p = join(dirname(hit.path), 'scripts', 'brain.py')
-      if (existsSync(p)) return p
+    if (hit) {
+      // path 指向 SKILL.md 时取其目录；location/baseDir 指向技能根目录时不取目录。
+      for (const [field, isFile] of [
+        ['path', true], ['location', true], ['dir', false],
+        ['baseDir', false], ['directory', false],
+      ]) {
+        const raw = hit[field]
+        if (typeof raw !== 'string' || !raw) continue
+        const root = isFile ? dirname(raw) : raw
+        const p = join(root, 'scripts', 'brain.py')
+        if (existsSync(p)) return p
+      }
     }
   } catch {}
   // 环境变量兜底：装在非常规位置（换盘符/自定义目录）时，

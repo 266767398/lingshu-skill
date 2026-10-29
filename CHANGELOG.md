@@ -54,8 +54,9 @@
   灵枢装在非常规位置（换盘符/自定义目录）时，设该环境变量指向技能根目录
   即可被插件找到，不用改 profile 的 `brainPy` 配置。
 - **插件优先问 APP 要路径（skills registry）**：探测顺序升级为
-  profile `brainPy` → `ctx.skills` registry 的 `list()`（条目自带绝对
-  SKILL.md 路径，同步/异步返回都支持）→ `LINGSHU_SKILL_DIR` 环境变量 →
+  profile `brainPy` → `ctx.skills` registry 的 `list()`（官方文档证实条目带
+  SKILL.md 的 location 且可为绝对路径；字段名各版本可能不同，path/location/
+  dir/baseDir/directory 逐个试，同步/异步返回都支持）→ `LINGSHU_SKILL_DIR` 环境变量 →
   默认目录。APP 能发现技能，插件就能拿到，不再依赖目录名猜测。
 
 ### 六欲自动变动（不再只等手动"满足"）
