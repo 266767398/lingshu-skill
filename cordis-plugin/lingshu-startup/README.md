@@ -27,6 +27,25 @@ pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 # 并在 profile package.json 的 dsh.profile.bundles 里加 "dsh-lingshu-startup"）
 ```
 
+发布形态推荐 tgz（实体安装，解析基准在 profile 下，最稳）。
+**开发迭代**：本插件已零外部依赖（见下节），`dsh plugin add <目录>` / link 安装
+也能工作——改 `plugin.js` 后重启 DSH 即生效，不必每次 `pnpm pack`。
+
+## 实测修复记录（为什么现在的写法长这样）
+
+三个真实踩坑，每条都有事件日志/报错坐实，别"优化"回去：
+
+| 问题 | 现象 | 修法 |
+|---|---|---|
+| `inject()` 写 `next-step` 队列 | 注入发生了，但 `turn/start` 时被清空（`agent/inbox/spliced removed=1`），模型永远看不到 | 改 **`agent.send(msg, 'next-turn', false)`**——`step/start` 构建 messages 只消费 `next-turn`；`wakeup=false` 避免无用户输入空跑一轮 |
+| runtime-context 有"取代"语义 | DSH 运行时快照声明会 supersede 之前的 runtime-context 消息，注入可能被顺手清掉 | `source` 补 **`form: 'instructions'`**——只有 `form:'snapshot'` 才参与取代 |
+| link 安装时内置包解析失败 | `Cannot find package '@deepseek-ai/schemastery'`（模块真实路径在技能目录，向上找不到 node_modules）→ cordis **静默跳过插件** | 去掉 schemastery，配置改 **`DEFAULTS + mergeConfig`** 普通对象，零外部依赖 |
+
+另有一条 ESM 链接期坑：`index.js` re-export 了 `plugin.js` 已删除的 `Config`，
+`SyntaxError: does not provide an export named 'Config'` 在模块链接期就炸、同样
+被静默吞掉——**re-export 的名字必须与导出方严格对齐**，且 `node --check` 查不出
+这类错误，验证要用动态 `import()`。
+
 ## ⚠️ 开发调试别用 `link:` 安装（踩过的坑）
 
 `link:` 安装会把模块的真实路径留在技能目录，Node 从那里向上找 `node_modules`
@@ -34,10 +53,11 @@ pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 （UI 里装了、bundles 里有、配置树里也有，就是不动）。实体 tgz 安装（如上）的
 解析基准在 profile 下，没这个问题。
 
-本插件因此**刻意零外部依赖**：不 import `@deepseek-ai/schemastery`，配置用普通
-对象 `DEFAULTS` + `mergeConfig` 合并（默认值 budget 1400 / timeoutMs 3000 /
-injectResume true）。这样 link 安装也能工作、改 `plugin.js` 即时生效，不必每次
-重打包——只是别忘了 Host 仍不会热加载 bundle（见下节），改完还是要重启 DSH。
+本插件因此**刻意零外部依赖**：不 import `@deepseek-ai/schemastery`（详见上节
+实测记录），配置用普通对象 `DEFAULTS` + `mergeConfig` 合并（默认值 budget 1400 /
+timeoutMs 3000 / injectResume true）。这样 link 安装也能工作、改 `plugin.js`
+即时生效，不必每次重打包——只是别忘了 Host 仍不会热加载 bundle（见下节），
+改完还是要重启 DSH。
 
 排错技巧：desktop profile 被 Electron 独占，无法直连时，可用
 `dsh --profile probe` 开临时 profile 把静默失败变成 stderr 显式错误；
