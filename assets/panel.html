@@ -2805,8 +2805,7 @@ $("upd-apply").addEventListener("click", async () => {
     btn.disabled = false;
   }
 });
-// 开面板 1.2s 后自动查一次（避开启动时的并发请求高峰）
-setTimeout(() => checkUpdate(true), 1200);
+// 更新检查只走右上角「检查更新」按钮（手动、可控）
 </script>
 
 
