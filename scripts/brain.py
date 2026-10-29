@@ -541,9 +541,13 @@ def set_memory_review(mid: str, status: str) -> dict:
 
 def review_report() -> dict:
     """待审核清单：AI 记忆 / AI 知识 / AI 人格变更。"""
-    mems = [{"id": m["id"], "text": m.get("text", ""), "created": m.get("created"),
-             "source": m.get("review_source", "dream")}
-            for m in pending_memory_reviews()]
+    mems = []
+    for m in pending_memory_reviews():
+        mid = m.get("id")
+        if not mid:
+            continue   # 畸形记录（缺 id）没法在报告里给定位，直接跳过
+        mems.append({"id": mid, "text": m.get("text", ""), "created": m.get("created"),
+                     "source": m.get("review_source", "dream")})
     try:
         import growth
         kn = [{"id": k.get("id"), "title": k.get("title", ""), "topic": k.get("topic", "")}
@@ -951,6 +955,8 @@ def _strengthen_write(touched: list) -> None:
         for m in touched:
             if m.get("layer") == ARCHIVE_LAYER:
                 continue  # 归档记忆只读展示，不给强化（需要时 archive restore 回热）
+            if not m.get("id"):
+                continue   # 畸形记录（缺 id）没法强化
             by_layer.setdefault(m.get("layer", "hippo"), {})[m["id"]] = m
         if not by_layer:
             return
@@ -968,7 +974,18 @@ def _strengthen_write(touched: list) -> None:
 
 
 def load_all() -> list:
-    return read_jsonl(HOME / "hippocampus.jsonl") + read_jsonl(HOME / "cortex.jsonl") + read_jsonl(HOME / "dust.jsonl")
+    """三层热层合并；缺 id 或不是 dict 的畸形记录一律跳过——
+    项目里没有任何调用方想处理畸形记录，在这里统一过滤最省事。"""
+    raw = read_jsonl(HOME / "hippocampus.jsonl") + read_jsonl(HOME / "cortex.jsonl") + read_jsonl(HOME / "dust.jsonl")
+    good, bad = [], 0
+    for r in raw:
+        if isinstance(r, dict) and r.get("id"):
+            good.append(r)
+        else:
+            bad += 1
+    if bad:
+        log_event("load", f"load_all 跳过 {bad} 条畸形记录（缺 id 或类型错）", level="warning")
+    return good
 
 
 def load_archive() -> list:
@@ -977,7 +994,16 @@ def load_archive() -> list:
     所有现有路径（recall/forget/dream/remember…）行为不变；需要全量计数或展示时
     （stats / 面板 / audit / archive 命令）再显式合并 load_archive()。
     """
-    return read_jsonl(HOME / "archive.jsonl")
+    raw = read_jsonl(HOME / "archive.jsonl")
+    good, bad = [], 0
+    for r in raw:
+        if isinstance(r, dict) and r.get("id"):
+            good.append(r)
+        else:
+            bad += 1
+    if bad:
+        log_event("load", f"load_archive 跳过 {bad} 条畸形记录", level="warning")
+    return good
 
 
 def _hay(m: dict) -> str:
@@ -2352,7 +2378,16 @@ def emotion_mirror(user_emotion: str, intensity: float = 0.5, what: str = "") ->
 # recall 时，命中的记忆会沿关联边把邻居也带起来（联想扩散的显式版）。
 
 def load_assoc() -> list:
-    return read_jsonl(ASSOC_FILE)
+    raw = read_jsonl(ASSOC_FILE)
+    good, bad = [], 0
+    for r in raw:
+        if isinstance(r, dict) and r.get("src") and r.get("dst"):
+            good.append(r)
+        else:
+            bad += 1
+    if bad:
+        log_event("load", f"load_assoc 跳过 {bad} 条畸形边（缺 src/dst 或类型错）", level="warning")
+    return good
 
 
 def save_assoc(rows: list) -> None:
@@ -2375,7 +2410,7 @@ def link_memory(src: str, dst: str, relation: str = "相关", weight: float = 1.
         raise ValueError("关联的双方 id 不能为空。")
     a, b = _norm_edge(str(src), str(dst))
     with _locked(ASSOC_FILE):
-        ids = {m["id"] for m in load_all()}
+        ids = {m["id"] for m in load_all() if m.get("id")}
         for mid in (src, dst):
             if mid not in ids:
                 raise KeyError(f"没有这条记忆：{mid}（用 list 或 recall 拿 id）")
@@ -2415,23 +2450,27 @@ def assoc_of(mid: str) -> list:
         return []
     out = []
     for r in load_assoc():
-        if r["src"] == mid:
-            out.append({"id": r["dst"], "relation": r["relation"], "weight": r["weight"],
+        # assoc.jsonl 任一行缺 src/dst 就跳过——否则崩
+        src, dst = r.get("src"), r.get("dst")
+        if src == mid:
+            out.append({"id": dst, "relation": r.get("relation", "相关"),
+                        "weight": _num(r.get("weight"), 1),
                         "direction": "dst", "why": r.get("why", "")})
-        elif r["dst"] == mid:
-            out.append({"id": r["src"], "relation": r["relation"], "weight": r["weight"],
+        elif dst == mid:
+            out.append({"id": src, "relation": r.get("relation", "相关"),
+                        "weight": _num(r.get("weight"), 1),
                         "direction": "src", "why": r.get("why", "")})
-    by_id = {m["id"]: m for m in load_all()}
+    by_id = {m["id"]: m for m in load_all() if m.get("id")}
     for n in out:
-        n["gist"] = by_id.get(n["id"], {}).get("gist", "")
-        n["kind"] = by_id.get(n["id"], {}).get("kind", "")
-    out.sort(key=lambda x: -x["weight"])
+        n["gist"] = by_id.get(n["id"], {}).get("gist", "") if n["id"] else ""
+        n["kind"] = by_id.get(n["id"], {}).get("kind", "") if n["id"] else ""
+    out.sort(key=lambda x: -_num(x.get("weight"), 0))
     return out
 
 
 def assoc_auto(weight: float = 0.8, dry_run: bool = False) -> dict:
     """自动联想：共享实体或标签的记忆之间补边（这是"触类旁通"的机器版）。"""
-    records = [m for m in load_all() if m.get("layer") != "dust"]
+    records = [m for m in load_all() if m.get("id") and m.get("layer") != "dust"]
     by_ent = {}
     by_tag = {}
     for m in records:

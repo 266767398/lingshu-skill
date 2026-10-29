@@ -120,7 +120,13 @@ def _read_json(path: Path) -> dict:
 # ---------------------------------------------------------------- 知识库
 
 def load_knowledge() -> list:
-    return brain.read_jsonl(KNOWLEDGE_FILE)
+    raw = brain.read_jsonl(KNOWLEDGE_FILE)
+    good = [r for r in raw if isinstance(r, dict) and r.get("id")]
+    if len(good) != len(raw):
+        brain.log_event("growth",
+                        f"load_knowledge 跳过 {len(raw) - len(good)} 条畸形条目（缺 id 或类型错）",
+                        level="warning")
+    return good
 
 
 def save_knowledge(rows: list) -> None:
@@ -339,68 +345,75 @@ def knowledge_stats() -> dict:
 
 def tidy_knowledge() -> dict:
     """机械整理：找相似簇、无主题、无标签、过短条目，产出 pending.json 交给 LLM 压缩。"""
-    rows = [r for r in load_knowledge() if r.get("status") != "discarded"]  # 废弃条目不进整理清单
-    if not rows:
-        return {"task_id": None, "clusters": [], "untagged": [], "no_topic": [], "short": [],
-                "message": "知识库还是空的"}
+    with brain._locked(KNOWLEDGE_FILE):
+        rows = [r for r in load_knowledge()
+                if r.get("status") != "discarded" and r.get("id")]   # 缺 id 的畸形条目直接跳过
+        if not rows:
+            return {"task_id": None, "clusters": [], "untagged": [], "no_topic": [], "short": [],
+                    "message": "知识库还是空的"}
 
-    docs = {r["id"]: _kdoc(r) for r in rows}
-    parent = {r["id"]: r["id"] for r in rows}
+        docs = {r["id"]: _kdoc(r) for r in rows}
+        parent = {r["id"]: r["id"] for r in rows}
 
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
 
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
 
-    ids = list(docs)
-    for i, a in enumerate(ids):
-        for b in ids[i + 1:]:
-            if brain.jaccard(docs[a], docs[b]) >= 0.45:
-                union(a, b)
+        ids = list(docs)
+        for i, a in enumerate(ids):
+            for b in ids[i + 1:]:
+                if brain.jaccard(docs[a], docs[b]) >= 0.45:
+                    union(a, b)
 
-    groups = {}
-    for r in rows:
-        groups.setdefault(find(r["id"]), []).append(r)
+        groups = {}
+        for r in rows:
+            groups.setdefault(find(r["id"]), []).append(r)
 
-    clusters = []
-    for members in groups.values():
-        if len(members) > 1:
-            clusters.append({
-                "ids": [m["id"] for m in members],
-                "titles": [m["title"] for m in members],
-                "hint": "这些条目在讲同一件事，建议合并成一条更准确的知识。",
-                "texts": [{"id": m["id"], "title": m["title"], "body": _clip(m.get("body", ""), 160),
-                           "points": m.get("points", []), "tags": m.get("tags", [])} for m in members],
-            })
+        clusters = []
+        for members in groups.values():
+            if len(members) > 1:
+                clusters.append({
+                    "ids": [m["id"] for m in members],
+                    "titles": [m.get("title", "") for m in members],
+                    "hint": "这些条目在讲同一件事，建议合并成一条更准确的知识。",
+                    "texts": [{"id": m["id"], "title": m.get("title", ""),
+                               "body": _clip(m.get("body", ""), 160),
+                               "points": m.get("points", []), "tags": m.get("tags", [])}
+                              for m in members],
+                })
 
-    report = {
-        "task_id": _uid("tidy_", "knowledge"),
-        "at": brain.now_ts(),
-        "stats": knowledge_stats(),
-        "clusters": clusters,
-        "untagged": [{"id": r["id"], "title": r["title"]} for r in rows if not r.get("tags")],
-        "no_topic": [{"id": r["id"], "title": r["title"]} for r in rows
-                     if r.get("topic") in ("", "未分类", None)],
-        "short": [{"id": r["id"], "title": r["title"], "len": len(r.get("body", ""))}
-                  for r in rows if len(r.get("body", "")) < 40],
-        "apply_schema": {
-            "task_id": "tidy_...",
-            "merge": [{"ids": ["k_..."], "title": "", "topic": "", "body": "",
-                       "points": [], "tags": [], "entities": []}],
-            "update": [{"id": "k_...", "topic": "", "tags": [], "body": ""}],
-            "create": [{"title": "", "topic": "", "body": "", "points": [], "tags": [], "entities": []}],
-            "delete": ["k_..."],
-            "note": "为什么这样整理，一句话",
-        },
-    }
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    brain.atomic_json(KNOWLEDGE_DIR / "pending.json", report)
+        report = {
+            "task_id": _uid("tidy_", "knowledge"),
+            "at": brain.now_ts(),
+            "stats": knowledge_stats(),
+            "clusters": clusters,
+            "untagged": [{"id": r["id"], "title": r.get("title", "")} for r in rows
+                         if not r.get("tags")],
+            "no_topic": [{"id": r["id"], "title": r.get("title", "")} for r in rows
+                         if r.get("topic") in ("", "未分类", None)],
+            "short": [{"id": r["id"], "title": r.get("title", ""),
+                       "len": len(r.get("body", ""))}
+                      for r in rows if len(r.get("body", "")) < 40],
+            "apply_schema": {
+                "task_id": "tidy_...",
+                "merge": [{"ids": ["k_..."], "title": "", "topic": "", "body": "",
+                           "points": [], "tags": [], "entities": []}],
+                "update": [{"id": "k_...", "topic": "", "tags": [], "body": ""}],
+                "create": [{"title": "", "topic": "", "body": "",
+                            "points": [], "tags": [], "entities": []}],
+                "delete": ["k_..."],
+                "note": "为什么这样整理，一句话",
+            },
+        }
+        KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+        brain.atomic_json(KNOWLEDGE_DIR / "pending.json", report)
     return report
 
 
@@ -508,7 +521,13 @@ def tidy_state() -> dict | None:
 # ---------------------------------------------------------------- 笔记 / 日志
 
 def load_notes() -> list:
-    return brain.read_jsonl(NOTES_FILE)
+    raw = brain.read_jsonl(NOTES_FILE)
+    good = [r for r in raw if isinstance(r, dict) and r.get("id")]
+    if len(good) != len(raw):
+        brain.log_event("growth",
+                        f"load_notes 跳过 {len(raw) - len(good)} 条畸形条目",
+                        level="warning")
+    return good
 
 
 def save_notes(rows: list) -> None:

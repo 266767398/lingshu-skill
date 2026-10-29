@@ -17,6 +17,23 @@
 - **面板**：非法 JSON 请求体返回 400（此前静默当空操作）；`FileExistsError` 归入 409；只读模式下 daily 预览、自我总结这两个"只读按钮"放行；面板卸载加白名单（只能卸灵枢装过的技能）；安装灵枢时先弹风险告知再装；删除失败会提示而不是假成功；记忆搜索防抖 + 丢弃乱序旧响应。
 - **数据落盘**：`save_all` 三文件先全写临时文件再一次替换（把"存一半"窗口压到最小）；`.corrupt` 坏块备份去重（修不动时不再每读一次就追加一遍）；`cluster_memories` 聚类池上限 400，防止记忆库变大后每晚巩固被 O(n²) 卡住。
 
+### v2.12 第四轮：入口统一过滤畸形行 + 裸字段假设根除
+
+第三轮数值防御之后，入口函数仍放行畸形行，所有调用方（brain.py 24 处 + growth.py 23 处）各自防御成本太高且漏防。本轮从公共入口统一拦住，所有调用方自动受益：
+
+- **入口统一过滤**（5 个入口一次到位，后续零维护）：
+  - `brain.load_all()` / `load_archive()` — 缺 `id` 或不是 dict 的行直接跳过，log_event 记条数
+  - `brain.load_assoc()` — 缺 `src` / `dst` 的边跳过
+  - `growth.load_knowledge()` / `load_notes()` — 缺 `id` 的条目跳过
+  - 项目里散落的 47+ 处裸 `m["id"]` / `r["id"]` / `r["src"]` 全部因此变成安全的。
+- **真问题补丁**（第三轮数值防御没覆盖到的裸字段）：
+  - `review_report` — 缺 `id` 的 `review=pending` 畸形记录不再 KeyError（之前 panel 的"待审核"页面能直接崩）
+  - `_strengthen_write`（记忆强化）— `touched` 集合里的畸形记录不再踩空
+  - `assoc_of` / `assoc_auto` — 缺 `id` 的记忆、缺 `src/dst` 的关联边一律跳过
+  - `link_memory` 校验 id 集、`assoc_auto` 实体桶、`assoc_of` 的 `by_id` 构建
+- **growth.tidy_knowledge 整体加锁**：之前只在开头锁了 load_knowledge，后面的并查集构建、pending.json 写入都在锁外。现在整个函数体包进 KNOWLEDGE_FILE 锁（pending.json 天然不互相覆盖）；入口过滤畸形条目后 `r["id"]` 安全。
+- **growth.create_skill / edit_skill** 的 registry 写：已在第三轮改成"合并式 save_registry"（持锁 load 再 update），但 SKILL.md 文件本身的 write_text 仍无锁——两个并发 write 是原子替换窗口极小，暂不处理（会在技能目录加一把新锁，对单技能语义过重）。
+
 ### v2.12 第三轮：脏数据不再把整条链路拉崩 + 归档/恢复原子化
 
 从审计里挖出的都是"手改/旧版本/外部工具写了一条 null 字段"就让整条链路崩掉的问题——注入/面板/daily 一个都跑不了：
