@@ -29,6 +29,7 @@
   - [技能自编辑与全局化](#技能自编辑与全局化)
   - [进化日志](#进化日志)
 - [DeepSeek 生态兼容](#deepseek-生态兼容)
+- [cordis 插件：启动自动注入](#cordis-插件启动自动注入)
 - [可视化面板](#可视化面板)
 - [可靠性设计](#可靠性设计)
 - [脚本 vs 模型：谁在真正干活](#脚本-vs-模型谁在真正干活)
@@ -191,6 +192,19 @@ python scripts/brain.py assoc unlink m_3f2a... m_9c1d...
 - **自动生成 `AGENTS.md`**：DSH/DeepSeek 以 AGENTS.md 为常驻入口（每次会话必进上下文），安装时自动生成「何时用 / 怎么用 / 入口命令」。
 - **DSH 插件只读可见**：`skill plugins` 列出 `~/.dsh/profiles` 下所有 DSH 插件（名字、版本、描述、AGENTS.md 标记），面板也有专属区块——只看不改。
 - **frontmatter 解析健壮**：支持引号、多行块标量，各家写的 SKILL.md 都能读对。
+
+## cordis 插件：启动自动注入
+
+技能 catalog 只把 name + description 给模型，正文要不要读全凭模型"自觉"——没有任何
+机制保证下一次会话模型一定会加载灵枢。`cordis-plugin/` 里的插件把"自觉"变成"机制"：
+
+- **`lingshu-startup`**：监听 DSH 的 `agent/session-start` 事件（startup / resume），
+  自动探测全局技能目录里的 `scripts/brain.py`，跑 `startup` 并把人格、记忆、待办、
+  行为指引 `agent.inject()` 进会话上下文——**会话一开始记忆就在上下文里**。
+- 失败宽容：灵枢没装、Python 不在、超时——全部静默跳过，绝不阻塞会话；
+  `brain.py startup` 只读记忆库，HOME 不可写时自动只读降级照样注入。
+- **目录约定**：`cordis-plugin/` 下**一个插件一个子目录**，各自独立打包安装，
+  互不干扰。详见 [`cordis-plugin/lingshu-startup/README.md`](cordis-plugin/lingshu-startup/README.md)。
 
 ## 可视化面板
 
@@ -401,6 +415,8 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 │   └── models.md           # 模型分级降档 + 幻觉防护三道闸 + 如何更新灵枢
 ├── CHANGELOG.md            # 变更历史
 ├── start-panel.bat         # 一键启动可视化面板
+├── cordis-plugin/          # DSH/Cordis 插件（一个插件一个子目录）
+│   └── lingshu-startup/    # 会话启动自动跑 startup 并注入上下文
 ├── assets/
 │   └── panel.html          # 可视化面板前端（单文件，无依赖）
 └── scripts/

@@ -33,11 +33,12 @@ from datetime import datetime
 from pathlib import Path
 
 # Windows 控制台默认 GBK，中文输出会变乱码（鐏垫灑）。无条件 reconfigure 成 UTF-8，
-# 用户不用再手动设 PYTHONIOENCODING。非 Windows 或不支持 reconfigure 的流静默跳过。
+# 用户不用再手动设 PYTHONIOENCODING。errors="replace" 让无法编码的字符降级成 ?，
+# 不再抛 UnicodeEncodeError；流不支持 reconfigure（重定向/被替换/老版本）时静默跳过。
 for _s in (sys.stdout, sys.stderr):
     try:
-        _s.reconfigure(encoding="utf-8")
-    except Exception:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
         pass
 
 # ---------------------------------------------------------------- 基础环境

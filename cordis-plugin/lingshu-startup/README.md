@@ -10,12 +10,18 @@ DSH 的技能 catalog 只把 name + description 给模型，正文要不要读�
 没有任何机制保证下一次会话的模型一定会加载灵枢。这个插件补上最后一环：
 **不依赖模型自觉，会话一开始记忆就在上下文里。**
 
+## 目录约定
+
+`cordis-plugin/` 下**一个插件一个子目录**——`lingshu-startup/` 就是本插件，
+后续新增插件（如定时做梦、每日摘要）各自建子目录，互不干扰，方便单独
+`pnpm pack` 与单独装进 profile。
+
 ## 安装（本机）
 
 ```
 # 1) 确认灵枢已全局化（~/.dsh/skills/lingshu/scripts/brain.py 存在）
-# 2) 把 cordis-plugin 目录安装进 DSH profile：
-cd cordis-plugin
+# 2) 把本插件子目录打包安装进 DSH profile：
+cd cordis-plugin/lingshu-startup
 pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 # 在 DSH 插件市场/配置里安装该 tgz（或按 DSH 文档把包放进 profile 的 node_modules
 # 并在 profile package.json 的 dsh.profile.bundles 里加 "dsh-lingshu-startup"）

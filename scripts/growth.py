@@ -23,11 +23,12 @@ import sys
 import time
 from pathlib import Path
 
-# Windows 控制台默认 GBK，中文输出会变乱码。无条件 reconfigure 成 UTF-8。
+# Windows 控制台默认 GBK，中文输出会变乱码。无条件 reconfigure 成 UTF-8；
+# errors="replace" 让无法编码的字符降级成 ?，流不支持 reconfigure 时静默跳过。
 for _s in (sys.stdout, sys.stderr):
     try:
-        _s.reconfigure(encoding="utf-8")
-    except Exception:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
