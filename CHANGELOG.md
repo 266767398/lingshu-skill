@@ -2,6 +2,25 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.14 — 注入包实测修正（刚刚发生/内驱兜底）+ 面板按钮常显
+
+（f661b96 + 701065f 合入）
+
+### 注入包两处修正
+
+- **「刚刚发生」与「最近的记忆」互斥分段**：两段原来都调 `recent()`，前者是后者的
+  子集，记忆少时原样重复一遍。改为按 `last_startup.ts`（`>=`，容忍同秒写入）先切出
+  本会话新增记忆进「刚刚发生」，再按 id 从「最近的记忆」剔除——两段互斥不重复。
+- **内驱自相矛盾消除**：traits 已有 好奇85/理智78 而 drives 还空时，注入一边写
+  「性格：好奇85」一边写「内驱：还没有数值」。`mind_state()` / `persona_brief()` /
+  `build_injection()` 三处统一加 traits→drives 兜底。
+- **面板更新按钮常显**：原来是 `installed && outdated` 条件渲染，刚重装后源副本一致
+  → outdated=False → 按钮永不出现。改为 installed 即显示 ↻，「有更新」徽标仍由
+  outdated 驱动。
+- 隔离实测：startup→remember→startup 场景（新记忆进「刚刚发生」且不重复）、
+  traits/drives 矛盾场景、`install --force` ×2 + `uninstall` 后记忆数据逐文件快照
+  对比（config.json 仅新增预期内的 `risk_accepted`）——全部通过。
+
 ## v2.13 — 从"自觉"到"机制"：cordis 启动注入插件 + 更新按钮 + 数据完整性证明
 
 （合并 35e0473 起 第五轮/面板轮/第六轮及插件三轮实测修复）
@@ -57,21 +76,6 @@ DSH catalog 只把 name+description 给模型，正文读不读靠模型"自觉"
   坏行注入后 `read_jsonl` 自愈，好行全保留、坏块进 `.corrupt` 备份。
 - **加固**：`_replace_retry` 写盘重试 6 → 12 次，缓解 Windows 高频读写下 `os.replace`
   被占用句柄误报（配合读-改-写一律持锁的既有约定，并发压测 100 次零异常）。
-
-### 注入包两处修正（v2.13 实测追加）
-
-- **「刚刚发生」与「最近的记忆」互斥分段**：两段原来都调 `recent()`，前者是后者的
-  子集，记忆少时原样重复一遍。改为按 `last_startup.ts`（`>=`，容忍同秒写入）先切出
-  本会话新增记忆进「刚刚发生」，再按 id 从「最近的记忆」剔除——两段互斥不重复。
-- **内驱自相矛盾消除**：traits 已有 好奇85/理智78 而 drives 还空时，注入一边写
-  「性格：好奇85」一边写「内驱：还没有数值」。`mind_state()` / `persona_brief()` /
-  `build_injection()` 三处统一加 traits→drives 兜底。
-- **面板更新按钮常显**：原来是 `installed && outdated` 条件渲染，刚重装后源副本一致
-  → outdated=False → 按钮永不出现。改为 installed 即显示 ↻，「有更新」徽标仍由
-  outdated 驱动。
-- 隔离实测：startup→remember→startup 场景（新记忆进「刚刚发生」且不重复）、
-  traits/drives 矛盾场景、`install --force` ×2 + `uninstall` 后记忆数据逐文件快照
-  对比（config.json 仅新增预期内的 `risk_accepted`）——全部通过。
 
 ### 六项体验修复（第六轮）
 
