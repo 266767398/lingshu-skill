@@ -57,6 +57,13 @@ function mergeConfig(user) {
 /** 依次探测常见安装位置的 brain.py */
 function findBrainPy(configured) {
   if (configured) return existsSync(configured) ? configured : null
+  // 环境变量兜底：装在非常规位置（换盘符/自定义目录）时，
+  // 设 LINGSHU_SKILL_DIR 指向技能根目录即可，不用改 profile。
+  const envDir = (process.env.LINGSHU_SKILL_DIR || '').trim()
+  if (envDir) {
+    const p = join(envDir, 'scripts', 'brain.py')
+    if (existsSync(p)) return p
+  }
   const home = homedir()
   for (const dir of [
     join(home, '.dsh', 'skills', 'lingshu'),

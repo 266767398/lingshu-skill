@@ -1021,6 +1021,13 @@ def update_check(name: str = "lingshu") -> dict:
             cfg_src = str(brain.load_config().get("lingshu_source_dir") or "")
             if cfg_src and (Path(cfg_src) / "SKILL.md").is_file():
                 src_dir = Path(cfg_src)
+            else:
+                # 没配 lingshu_source_dir：源就是已装副本本身，没有可比的"新版本"。
+                # 不能拿副本目录自己比自己——副本一旦有残缺文件会误报 outdated: true
+                # + 全量 changed/removed（朋友机器换盘符场景坐实过）。
+                installed_dir = _find_installed(_require_slug(name))
+                return {"name": name, "installed": True, "outdated": False,
+                        "global_path": str(installed_dir)}
     src_md = src_dir / "SKILL.md"
     if not src_md.is_file():
         return {"name": name, "installed": False, "outdated": False}
@@ -1049,10 +1056,12 @@ def update_check(name: str = "lingshu") -> dict:
         inst_meta, _ = parse_frontmatter((installed_dir / "SKILL.md").read_text(encoding="utf-8"))
     except OSError:
         inst_meta = {}
+    # 第二层保险：签名有差但版本号相同不算过期——mtime 抖动/临时文件残留不该触发更新弹窗
+    outdated = bool(src_sig != dst_sig) and _ver(meta.get("version", 1)) != _ver(inst_meta.get("version", 1))
     out = {
         "name": name,
         "installed": True,
-        "outdated": bool(src_sig != dst_sig),
+        "outdated": outdated,
         "version": _ver(meta.get("version", 1)),
         "installed_version": _ver(inst_meta.get("version", 1)),
         "changed": changed, "added": added, "removed": removed,
