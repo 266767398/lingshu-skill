@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import secrets
@@ -27,7 +28,7 @@ _WRITE_ENDPOINTS = {
     "/api/persona/edit", "/api/persona/mind", "/api/persona/interview",
     "/api/persona/self", "/api/persona/rollback",
     "/api/memory", "/api/memory/review", "/api/knowledge", "/api/knowledge/review",
-    "/api/note", "/api/skill", "/api/skill/install", "/api/skill/uninstall",
+    "/api/note", "/api/skill",
     "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/apply",
     "/api/dream/draft", "/api/memory/bulk",
     "/api/emotion", "/api/mode", "/api/link",
@@ -35,8 +36,8 @@ _WRITE_ENDPOINTS = {
 }
 
 # 本机随机 token：页面加载时注入，之后每个 API 请求都要带上。
-# 目的是挡住「本机其他进程 / 恶意网页借 DNS rebinding 读走全部记忆」——
-# 只靠 Origin/Host 校验挡不住不带 Origin 的直连请求。
+# 注意：token 会随首页响应下发，本机进程 GET / 即可提取，所以它防的不是本机进程，
+# 而是浏览器上下文里的误用（恶意网页跨站调用本机端口）；跨站防护主要靠 Host/Origin 校验。
 TOKEN = os.environ.get("LINGSHU_PANEL_TOKEN") or secrets.token_urlsafe(24)
 
 
@@ -238,8 +239,12 @@ def _readonly_allowed(path: str, data: dict) -> bool:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "LingShuPanel/1.0"
-    # 慢/坏客户端最多等 30 秒：没有这个，不读完请求体的连接能让线程永久挂住
-    timeout = 30
+
+    def setup(self):
+        super().setup()
+        # 慢/坏客户端最多等 30 秒：没有这个，不读完请求体的连接能让线程永久挂住
+        # （类属性 timeout 在 Python 3.13 的 BaseHTTPRequestHandler 上不生效，必须在 socket 上设置）
+        self.connection.settimeout(30)
 
     def log_message(self, fmt, *args):
         pass
@@ -321,7 +326,6 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
             got = auth[7:].strip()
-        import hmac
         return hmac.compare_digest(got, TOKEN)
 
     # -------------------------------------------------- routes
@@ -330,8 +334,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._route_get()
         except FileExistsError as exc:
-            self._json({"error": str(exc)}, 409)
-        except (ValueError, KeyError, PermissionError) as exc:
+            print(f"[面板] 文件已存在: {exc}", file=sys.stderr)
+            self._json({"error": "同名文件已存在"}, 409)
+        except PermissionError as exc:
+            print(f"[面板] 文件被占用: {exc}", file=sys.stderr)
+            self._json({"error": "文件被占用或没有写入权限"}, 400)
+        except (ValueError, KeyError) as exc:
             self._json({"error": str(exc)}, 400)
         except Exception:
             import traceback
@@ -861,11 +869,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
         except FileExistsError as exc:
             # 已有同名技能/扩展/笔记：409 冲突比 500 内部错误更符合事实，前端也能直接提示
-            self._json({"error": str(exc)}, 409)
-        except (ValueError, KeyError, PermissionError, TypeError, AttributeError) as exc:
+            # 系统异常的 str() 含本机路径，只回通用文案，细节进控制台日志
+            print(f"[面板] 文件已存在: {exc}", file=sys.stderr)
+            self._json({"error": "同名文件已存在"}, 409)
+        except PermissionError as exc:
+            print(f"[面板] 文件被占用: {exc}", file=sys.stderr)
+            self._json({"error": "文件被占用或没有写入权限"}, 400)
+        except (ValueError, KeyError) as exc:
             # 业务异常 / 参数错：消息本身就是给用户看的，直接回显
             self._json({"error": str(exc)}, 400)
-        except Exception:  # 其它异常：日志里留全栈，响应只给通用文案，避免回显本机路径
+        except Exception:  # 含 TypeError/AttributeError 等服务端编程错误：日志留全栈，响应只给通用文案，避免回显本机路径
             import traceback
             traceback.print_exc()
             brain.log_event("panel", "POST 接口内部错误", level="error",

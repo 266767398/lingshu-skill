@@ -2,6 +2,41 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.17 — 全量代码审查修复：28 项（6 严重 + 11 中等 + 11 建议）
+
+### brain.py
+- **人格字段写入校验**：traits/drives/state.energy/closeness 强制 float 转换并
+  clamp 到 0-100，非数值直接拒绝——七情六欲上限不再可被脏数据突破。
+- **atomic_json 原子写补强**：rename 失败重试（Windows 文件占用场景）。
+- **欲望满足下限**改用 DESIRE_FLOOR 常量；**情绪冷却 factor** clamp [0.01,1]。
+- **同步到 APP**（sync_app）改临时文件 + 原子替换，不再半途留下损坏副本。
+- **日志级别过滤语义修正**：改为"指定级别及以上"。
+
+### growth.py
+- **update_check 兜底**：更新说明拿不到 CHANGELOG 时给通用文案，不再把
+  changed/added/removed 文件清单下发（更新说明只此一份，不显示文件清单）。
+- **create_skill** 名字归一化统一走 `_require_slug()` 校验。
+- **install_skill** 补目标在源祖先目录内的双向防呆，防自覆盖。
+- **note_stats / tidy_knowledge** 对 body 为 null 的记录不再崩。
+- **skill use --auto** 改用解析结果里的真实 path；删除死代码 GLOBAL_SKILLS；
+  ext_injections 的 BaseException 收窄为 Exception。
+
+### panel_server.py
+- **修复 Handler.timeout 类属性在 Python 3.13 完全无效的问题**：改 setup() 中
+  socket settimeout(30)，超时真正生效。
+- **异常分类修正**：do_POST 中 TypeError/AttributeError 从 400 分支移到 500——
+  修掉 /api/skill 莫名 400 的堆栈遮蔽。
+- **路径泄露防护**：FileExistsError/PermissionError 回显改通用文案，细节进 stderr。
+- 清理：无效死配置（_WRITE_ENDPOINTS 永不命中项）、hmac import 归位顶部。
+
+### panel.html
+- 搜索结果字段兜底（parts/score）；dream/apply 结果兜底；评分/语气过 esc 转义。
+- 风险确认标志用完重置；api() 加 15 秒超时，不再无限等待。
+
+### plugin.js（Koishi 启动插件）
+- stderr 管道 resume 防堵死；超时改 taskkill /T /F 杀整棵进程树；兜底 timer
+  正确清理；删除死参数。
+
 ## v2.16 — 自更新体验打磨：changelog 人话说明 + 弹窗渲染修复
 
 （a2bd6eb + 30f35f4 合入）

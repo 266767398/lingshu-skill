@@ -143,10 +143,9 @@ function runStartup(pythonExe, pythonCmdFallback, brainPy, budget, timeoutMs) {
     try {
       if (pythonExe) {
         child = spawn(pythonExe, args, {
-          encoding: 'utf8',
           windowsHide: true,
           env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-          timeout: timeoutMs, // Node>=15 自带超时，超时触发 error/kill
+          // 不用 spawn 的 timeout 选项：它只杀直接子进程，见下方手动兜底说明
         })
       } else {
         // 兜底：让 cmd 去解析 .cmd（/d 关 autorun，/s 规范引号解析，/c 执行后退出）。
@@ -156,11 +155,9 @@ function runStartup(pythonExe, pythonCmdFallback, brainPy, budget, timeoutMs) {
         const pythonCmd = pythonCmdFallback || 'python'
         const cmdline = [`"${pythonCmd}"`, ...args.map((a) => `"${a}"`)].join(' ')
         child = spawn(comspec, ['/d', '/s', '/c', cmdline], {
-          encoding: 'utf8',
           windowsHide: true,
           windowsVerbatimArguments: true, // 命令行已手工加引号，阻止 Node 再转义一层
           env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-          timeout: timeoutMs,
         })
       }
     } catch {
@@ -168,14 +165,27 @@ function runStartup(pythonExe, pythonCmdFallback, brainPy, budget, timeoutMs) {
     }
     let out = ''
     child.stdout?.on('data', (d) => { out += d.toString('utf8') })
+    child.stderr?.resume() // 必须 drain：traceback 超 64KB 会塞满管道缓冲，子进程写阻塞永不退出
     child.on('error', () => done(null))
+    // 手动超时兜底（不靠 spawn 的 timeout 选项，它只杀直接子进程）：
+    // taskkill /T /F 杀整棵进程树——cmd 兜底分支里直接子进程是 cmd.exe，
+    // 只杀它会留下 python.exe 孙进程残留。
+    const killer = setTimeout(() => {
+      try {
+        if (child.pid) {
+          const tk = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+          tk.on('error', () => {}) // 无 taskkill（非 Windows）时静默，下面还有 child.kill() 托底
+        }
+      } catch {}
+      try { child.kill() } catch {}
+      done(null)
+    }, timeoutMs + 500)
+    killer.unref?.()
     child.on('close', (code) => {
+      clearTimeout(killer) // 正常退出清掉兜底定时器，别留着空转
       // 返回码 0=正常注入；10=只读降级注入（照样有效）；2=未初始化（跳过）
       done(code === 0 || code === 10 ? out.trim() : null)
     })
-    // 双保险：timeout 选项个别版本不生效时手动兜底
-    setTimeout(() => { try { child.kill() } catch {} ; done(null) }, timeoutMs + 500)
-      .unref?.()
   })
 }
 

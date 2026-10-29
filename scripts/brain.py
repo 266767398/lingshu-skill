@@ -174,12 +174,15 @@ def read_logs(limit: int = 200, level: str | None = None, kind: str | None = Non
     except OSError:
         return []
     rows = []
+    # 级别语义：指定级别及以上都显示（--level info ⇒ info/warn/error 全含）
+    _lv_rank = {"debug": 0, "info": 1, "warn": 2, "warning": 2, "error": 3}
+    want = _lv_rank.get(str(level).lower(), 1) if level else None
     for ln in lines[-limit * 2:]:
         try:
             r = json.loads(ln)
         except Exception:
             continue
-        if level and r.get("level") not in (level, "error"):
+        if want is not None and _lv_rank.get(str(r.get("level", "info")).lower(), 1) < want:
             continue
         if kind and r.get("kind") != kind:
             continue
@@ -672,7 +675,7 @@ def atomic_json(path: Path, obj) -> None:
     tmp = _tmp_path(path)
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    _replace_retry(tmp, path)
 
 
 def _brace_balance(line: str) -> int:
@@ -1874,7 +1877,7 @@ def desire_satisfy(name: str, amount: float = 15) -> dict:
     now = now_ts()
     with _locked(HOME / "desires.json"):
         cur = desire_state(now)          # 先结算衰减
-        cur[name] = round(max(0.0, min(100.0, cur[name] + float(amount))), 1)
+        cur[name] = round(max(DESIRE_FLOOR, min(100.0, cur[name] + float(amount))), 1)
         atomic_json(HOME / "desires.json", {"updated": now, "levels": cur})
     return {"desires": cur, "satisfied": name, "amount": amount}
 
@@ -1994,6 +1997,7 @@ def emotion_cool(factor: float = 0.15) -> dict:
     """情绪冷却：把还在活跃期的高强度情绪整体降温（刚聊完情绪化话题要写代码时用）。"""
     if READONLY:
         raise PermissionError("记忆库当前只读，无法冷却情绪。")
+    factor = max(0.01, min(1.0, float(factor)))  # clamp 到 (0,1]：>1 会变成放大情绪
     path = HOME / "emotions.jsonl"
     with _locked(path):
         rows = read_jsonl(path)
@@ -2937,7 +2941,18 @@ def _set_persona_field_inner(path: str, value: str) -> dict:
             val = json.loads(value)
         except Exception:
             val = value
-        if isinstance(old, int) and isinstance(val, (int, float)):
+        if (root in ("traits", "drives")
+                or (root == "state" and leaf in ("energy", "closeness"))):
+            # 数值字段：强制数值化并 clamp 到 0-100（与 update_persona 同口径）；
+            # 非法值（如 abc）直接拒绝，不静默存库
+            try:
+                num = float(val)
+            except (TypeError, ValueError):
+                raise ValueError(f"{path} 需要 0-100 的数值，收到：{value!r}")
+            if num != num:  # NaN
+                raise ValueError(f"{path} 需要 0-100 的数值，收到：{value!r}")
+            val = max(0, min(100, int(num)))
+        elif isinstance(old, int) and isinstance(val, (int, float)):
             val = int(val)
     node[leaf] = val
     p.setdefault("history", []).append({"ts": now_ts(), "field": path, "from": old, "to": val, "why": "手动编辑"})
@@ -4571,8 +4586,10 @@ def cmd_sync_dsh(days: int = 1, dry_run: bool = False, force: bool = False,
             while e < len(existing) and existing[e] in "\r\n":
                 e += 1
             existing = existing[:s] + existing[e:]
-    with open(target, "w", encoding="utf-8") as f:
+    tmp = _tmp_path(target)
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write((existing.rstrip() + "\n\n" if existing.strip() else "") + block + "\n")
+    _replace_retry(tmp, target)
     try:  # 记住目录，下次免传
         with _locked(HOME / "config.json"):
             cfg = load_config()

@@ -880,6 +880,7 @@ const PANEL_TOKEN = "/*__PANEL_TOKEN__*/";
 async function api(path, opts){
   opts = opts || {};
   opts.headers = Object.assign({}, opts.headers || {}, {Authorization: "Bearer " + PANEL_TOKEN});
+  if (!opts.signal) opts.signal = AbortSignal.timeout(15000); // 网络挂起不能死等，15s 兜底
   const r = await fetch(path, opts);
   const data = await r.json().catch(() => ({}));
   if (!r.ok || data.error) throw new Error(data.error || ("HTTP " + r.status));
@@ -962,8 +963,9 @@ function renderOverview(){
   const rEl = $("p-reason");
   if (rEl) {
     const storm = ra.storm;
-    rEl.innerHTML = `理智 <b style="color:${storm ? "var(--red)" : "var(--amber)"}">${ra.effective ?? "—"}</b> / 基数 ${ra.base ?? "—"}`
-      + (ra.suppress ? ` · 被情绪压住 ${ra.suppress}%` : " · 情绪没影响判断")
+    const eff = Number(ra.effective), bas = Number(ra.base), sup = Number(ra.suppress);
+    rEl.innerHTML = `理智 <b style="color:${storm ? "var(--red)" : "var(--amber)"}">${Number.isFinite(eff) ? eff : "—"}</b> / 基数 ${Number.isFinite(bas) ? bas : "—"}`
+      + (sup ? ` · 被情绪压住 ${sup}%` : " · 情绪没影响判断")
       + (storm ? ` · <b style="color:var(--red)">情绪激动</b>，大事交给用户定` : "");
   }
   $("m-total").textContent = st.total ?? 0;
@@ -1100,7 +1102,7 @@ function renderMood(){
   const arcEl = $("emo-arc");
   if (arcEl) {
     let arcHtml = arc && arc.count
-      ? `最近 ${arc.days} 天 · ${arc.count} 次波动 · ${arc.tone}：${(arc.top || []).map(x => `${esc(x.emotion)}×${x.times}`).join("、")}`
+      ? `最近 ${Number(arc.days) || 0} 天 · ${Number(arc.count) || 0} 次波动 · ${esc(arc.tone || "")}：${(arc.top || []).map(x => `${esc(x.emotion)}×${Number(x.times) || 0}`).join("、")}`
       : "还没有情绪记录。";
     // 峰终定律：回顾只看"最强烈的一刻（峰）"和"最近一次（终）"，不看平均
     if (arc && arc.count) {
@@ -1183,9 +1185,10 @@ function ratLine(ra, prefix){
   ra = ra || {};
   const storm = !!ra.storm;
   const head = prefix ? prefix + " " : "";
-  return head + `理智 <b style="color:${storm ? "var(--red)" : "var(--amber)"}">${ra.effective ?? "—"}</b>`
-    + ` / 基数 ${ra.base ?? "—"}`
-    + (ra.suppress ? ` · 被情绪压住 ${ra.suppress}%` : " · 情绪没影响判断")
+  const eff = Number(ra.effective), bas = Number(ra.base), sup = Number(ra.suppress);
+  return head + `理智 <b style="color:${storm ? "var(--red)" : "var(--amber)"}">${Number.isFinite(eff) ? eff : "—"}</b>`
+    + ` / 基数 ${Number.isFinite(bas) ? bas : "—"}`
+    + (sup ? ` · 被情绪压住 ${sup}%` : " · 情绪没影响判断")
     + (storm ? ` · <b style="color:var(--red)">情绪激动</b>` : "");
 }
 
@@ -1884,7 +1887,10 @@ async function doSearch(){
     const rows = await api("/api/search?q=" + encodeURIComponent(q) + "&k=30");
     indexMemories(rows.map(r => r.memory));
     $("mem-list").innerHTML = rows.length
-      ? rows.map(r => `<div style="margin-bottom:8px">${memCard(r.memory)}<div class="sub" style="margin:-4px 0 0 54px">回忆度 ${r.score.toFixed(2)} · 相关 ${r.parts.relevance} / 新鲜 ${r.parts.recency} / 重要 ${r.parts.importance}</div></div>`).join("")
+      ? rows.map(r => {
+          const pt = r.parts || {};
+          return `<div style="margin-bottom:8px">${memCard(r.memory)}<div class="sub" style="margin:-4px 0 0 54px">回忆度 ${(Number(r.score) || 0).toFixed(2)} · 相关 ${Number(pt.relevance) || 0} / 新鲜 ${Number(pt.recency) || 0} / 重要 ${Number(pt.importance) || 0}</div></div>`;
+        }).join("")
       : `<div class="empty">想不起来了。也许当时没记，也许已经淡忘。</div>`;
   } catch (e) { toast(e.message, true); }
 }
@@ -2253,8 +2259,8 @@ $("btn-dream").addEventListener("click", async () => {
   btn.disabled = true; btn.textContent = "正在入睡…";
   try {
     const r = await api("/api/dream", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({confirm: true})});
-    const rep = r.report;
-    $("dream-summary").innerHTML = `重放 ${(rep.clusters || []).reduce((a, c) => a + c.texts.length, 0)} 条 / ${(rep.clusters || []).length} 组 · 巩固 ${rep.promoted.length} 条 · 淡忘 ${rep.forgotten.length} 条 · 模糊化 ${rep.faded} 条`;
+    const rep = r.report || {};
+    $("dream-summary").innerHTML = `重放 ${(rep.clusters || []).reduce((a, c) => a + (c.texts || []).length, 0)} 条 / ${(rep.clusters || []).length} 组 · 巩固 ${(rep.promoted || []).length} 条 · 淡忘 ${(rep.forgotten || []).length} 条 · 模糊化 ${rep.faded || 0} 条`;
     S.ov = r.overview; renderOverview(); renderMemoryList();
     toast("梦做完了，碎片等你整理");
   } catch (e) { toast(e.message, true); }
@@ -2270,8 +2276,8 @@ $("btn-apply").addEventListener("click", async () => {
   catch (e) { toast("JSON 格式不对：" + e.message, true); return; }
   try {
     const r = await api("/api/dream/apply", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({result: parsed})});
-    const a = r.applied;
-    toast(`沉淀完成：新增 ${a.memories} 条，遗忘 ${a.forgotten} 条` + (a.rejected.length ? `，拒绝 ${a.rejected.length} 项人格修改` : ""));
+    const a = r.applied || {};
+    toast(`沉淀完成：新增 ${a.memories || 0} 条，遗忘 ${a.forgotten || 0} 条` + ((a.rejected || []).length ? `，拒绝 ${a.rejected.length} 项人格修改` : ""));
     S.ov = r.overview; renderOverview(); renderMemoryList();
   } catch (e) { toast(e.message, true); }
 });
@@ -2774,7 +2780,10 @@ function showUpdModal(title, detail, canApply){
   $("upd-apply").classList.toggle("hidden", !canApply);
   $("upd-modal").classList.remove("hidden");
 }
-$("upd-close").addEventListener("click", () => $("upd-modal").classList.add("hidden"));
+$("upd-close").addEventListener("click", () => {
+  updRiskAccepted = false;   // 关窗即重置：下次更新必须重新过一遍风险告知，不能静默带 yes
+  $("upd-modal").classList.add("hidden");
+});
 $("btn-self-update").addEventListener("click", () => checkUpdate(false));
 $("upd-apply").addEventListener("click", async () => {
   const btn = $("upd-apply");

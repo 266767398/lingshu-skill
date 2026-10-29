@@ -44,7 +44,6 @@ SKILLS_DIR = HOME / "skills"
 SKILL_REG = HOME / "skills.json"
 # 扩展模块：AI 自己写的可执行钩子（inject / run），放在数据目录，更新技能永不覆盖
 EXT_DIR = HOME / "extensions"
-GLOBAL_SKILLS = Path.home() / ".trae-cn" / "skills"
 
 
 def _panel_root() -> Path:
@@ -416,8 +415,8 @@ def tidy_knowledge() -> dict:
             "no_topic": [{"id": r["id"], "title": r.get("title", "")} for r in rows
                          if r.get("topic") in ("", "未分类", None)],
             "short": [{"id": r["id"], "title": r.get("title", ""),
-                       "len": len(r.get("body", ""))}
-                      for r in rows if len(r.get("body", "")) < 40],
+                       "len": len(str(r.get("body") or ""))}
+                      for r in rows if len(str(r.get("body") or "")) < 40],
             "apply_schema": {
                 "task_id": "tidy_...",
                 "merge": [{"ids": ["k_..."], "title": "", "topic": "", "body": "",
@@ -660,7 +659,7 @@ def note_stats() -> dict:
         "by_type": by_type,
         "days": len(days),
         "last": max((r.get("created", 0) for r in rows), default=0),
-        "words": sum(len(r.get("body", "")) for r in rows),
+        "words": sum(len(str(r.get("body") or "")) for r in rows),
     }
 
 
@@ -834,9 +833,7 @@ def _compose(name: str, description: str, body: str, version: int, created: str,
 
 def create_skill(name: str, description: str, body: str, overwrite: bool = False,
                  origin: str = "灵枢") -> dict:
-    name = (name or "").strip().lower().replace(" ", "-").replace("_", "-")
-    if not SLUG_RE.match(name):
-        raise ValueError("技能名只能用字母/数字/连字符/下划线/中文，2-63 个字符，例如 note-helper")
+    name = _require_slug(name)   # 含中文名折算成 slug，保证 frontmatter name 与目录名一致
     description = (description or "").strip()
     body = (body or "").strip()
     if len(description) < 12:
@@ -1082,11 +1079,6 @@ def update_check(name: str = "lingshu") -> dict:
 
     src_sig = _diff_signature(src_dir)
     dst_sig = _diff_signature(installed_dir)
-    dst_rels = {rel for rel, *_ in dst_sig}
-    changed, added = [], []
-    for rel, size, mtime in sorted(src_sig - dst_sig):
-        (changed if rel in dst_rels else added).append(rel)
-    removed = [rel for rel, *_ in sorted(dst_sig - src_sig)]
     # 已装版本：读全局副本 SKILL.md 的 frontmatter（对比基准，决定 changelog 截到哪）
     try:
         inst_meta, _ = parse_frontmatter((installed_dir / "SKILL.md").read_text(encoding="utf-8"))
@@ -1104,11 +1096,15 @@ def update_check(name: str = "lingshu") -> dict:
         "outdated": outdated,
         "version": _ver(meta.get("version", 1)),
         "installed_version": _ver(inst_meta.get("version", 1)),
-        "changed": changed, "added": added, "removed": removed,
         "global_path": str(installed_dir),
     }
     if out["outdated"]:
-        out["changelog"] = _changelog_between(src_dir, out["installed_version"], out["version"])
+        # 硬约束：面板更新说明只给人类可读正文，绝不把文件清单兜底显示给用户。
+        # 所以 changed/added/removed 不进响应（前端兜底分支随之失效），
+        # CHANGELOG 抽不到区间正文时只给一句通用文案。
+        out["changelog"] = (
+            _changelog_between(src_dir, out["installed_version"], out["version"])
+            or "本次更新内容较多，详见 CHANGELOG.md。")
     return out
 
 
@@ -1116,7 +1112,7 @@ def _changelog_between(src_dir: Path, old_ver: str, new_ver: str) -> str:
     """从源的 CHANGELOG.md 抽取 (old_ver, new_ver] 区间的更新说明（人类可读正文）。
 
     只保留一级版本标题（## vX.Y）到下一个一级版本标题之间的内容，去掉括号里的
-    合并哈希注释行；old_ver 在源里找不到时返回 None（前端回退显示文件清单）。
+    合并哈希注释行；old_ver 在源里找不到时返回 None（调用方给通用文案，不给文件清单）。
     """
     md = src_dir / "CHANGELOG.md"
     if not md.is_file():
@@ -1338,7 +1334,8 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
         _home_r = Path(HOME).resolve()
     except OSError:
         _src_r, _dst_r, _home_r = src_dir.absolute(), dst_dir.absolute(), Path(HOME).absolute()
-    if _src_r == _dst_r or _dst_r in _src_r.parents:
+    if (_src_r == _dst_r or _dst_r in _src_r.parents
+            or _src_r in _dst_r.parents):
         raise KeyError("安装源就是目标目录（或在其内部）——会把自己反复复制进去，已停止。"
                        "若想更新全局副本，请直接 install --force，别把 --from 指向它。")
     if _src_r == _home_r or _src_r in _home_r.parents:
@@ -1898,7 +1895,7 @@ def ext_injections(ctx: dict | None = None) -> list:
                 txt = fn(ctx or {})
                 if txt and str(txt).strip():
                     out.append((info["name"], str(txt).strip()[:800]))   # 截断，防撑爆注入预算
-        except BaseException:
+        except Exception:
             continue
     return out
 
@@ -2672,11 +2669,11 @@ def _run(argv=None) -> int:
                     print('  python scripts/brain.py skill install lingshu --from "灵枢技能目录" --yes')
                     return 0
                 state = res.get("state", "installed")
-                print(f"\n已自动全局化：{GLOBAL_SKILLS / args.name / 'SKILL.md'}（{state}）")
+                print(f"\n已自动全局化：{res['path']}（{state}）")
                 try:
                     log_evolution("skill", f"使用即全局化：{args.name}",
                                   f"skill use --auto：{state}，保证新会话可调",
-                                  [str(GLOBAL_SKILLS / args.name / "SKILL.md")])
+                                  [res["path"]])
                 except Exception:
                     pass
             return 0
