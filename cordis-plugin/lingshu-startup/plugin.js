@@ -22,19 +22,35 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import Schema from '@deepseek-ai/schemastery'
+
+// 刻意零外部依赖：不 import @deepseek-ai/schemastery。原因——link: 安装时模块
+// 真实路径留在技能目录，Node 从那里向上找 node_modules 一路到盘符根都找不到
+// DSH 内置包，import 失败 → cordis 静默跳过整个插件（UI 里装了却不动）。
+// 去掉依赖后 link 安装也能工作，改 plugin.js 即时生效，不必每次重打包。
 
 export const name = 'dsh-lingshu-startup'
 
-export const Config = Schema.object({
-  brainPy: Schema.string().default('')
-    .description('brain.py 绝对路径；留空自动探测 ~/.dsh/skills/lingshu、~/.trae-cn/skills/lingshu'),
-  python: Schema.string().default('')
-    .description('python.exe 绝对路径；留空自动探测 DSH 自带运行时等位置。注意：spawn 不解析 PATHEXT，PATH 里只有 python.cmd 时必须写 exe 全路径或留空走自动探测'),
-  budget: Schema.number().default(1400).description('startup 注入 token 预算'),
-  timeoutMs: Schema.number().default(3000).description('startup 子进程超时（毫秒）；agent/created 是串行事件，超时太久会拖慢新会话可用时间'),
-  injectResume: Schema.boolean().default(true).description('resume 来源（续聊）是否也注入'),
-})
+// 默认配置（纯普通对象，零依赖）。DSH 对导出 Config 的插件会喂用户配置，
+// 不导出 Config 时喂默认空对象——两种情况本插件都能工作。
+const DEFAULTS = {
+  brainPy: '',     // brain.py 绝对路径；留空自动探测 ~/.dsh/skills/lingshu、~/.trae-cn/skills/lingshu
+  python: '',      // python.exe 绝对路径；留空自动探测 DSH 自带运行时等位置（spawn 不解析 PATHEXT）
+  budget: 1400,    // startup 注入 token 预算
+  timeoutMs: 3000, // startup 子进程超时；agent/created 是串行事件，超时太久拖慢新会话
+  injectResume: true, // resume 来源（续聊）是否也注入
+}
+
+/** 合并用户配置与默认值（用户值非空/存在才覆盖） */
+function mergeConfig(user) {
+  const merged = { ...DEFAULTS }
+  if (user && typeof user === 'object') {
+    for (const k of Object.keys(DEFAULTS)) {
+      const v = user[k]
+      if (v !== undefined && v !== null && v !== '') merged[k] = v
+    }
+  }
+  return merged
+}
 
 /** 依次探测常见安装位置的 brain.py */
 function findBrainPy(configured) {
@@ -131,6 +147,7 @@ function runStartup(pythonExe, pythonCmdFallback, brainPy, budget, timeoutMs) {
 }
 
 export function apply(ctx, config) {
+  const cfg = mergeConfig(config)
   // 进程内缓存：同一 agent 不重复跑 startup
   const injected = new WeakSet()
   // 配置类失败只告警一次：静默吞掉配置错误会让插件"看似在工作、实际没注入"
@@ -143,17 +160,17 @@ export function apply(ctx, config) {
       // 白名单：只有新开会话（startup）与续聊（resume）注入；
       // clear / compact 是同会话上下文重建，重复注入只会浪费 token。
       if (source !== 'startup' && source !== 'resume') return
-      if (source === 'resume' && !config.injectResume) return
+      if (source === 'resume' && !cfg.injectResume) return
       if (injected.has(agent)) return
       injected.add(agent)
 
-      const brainPy = findBrainPy(config.brainPy)
+      const brainPy = findBrainPy(cfg.brainPy)
       if (!brainPy) {
         if (!warnedOnce) { warnedOnce = true; try { ctx.logger?.warn?.('lingshu-startup: 未找到 brain.py（未安装灵枢？），跳过注入') } catch {} }
         return
       }
-      const pythonExe = findPythonExe(config.python)
-      const text = await runStartup(pythonExe, config.python, brainPy, config.budget, config.timeoutMs)
+      const pythonExe = findPythonExe(cfg.python)
+      const text = await runStartup(pythonExe, cfg.python, brainPy, cfg.budget, cfg.timeoutMs)
       if (!text) {
         if (!warnedOnce) { warnedOnce = true; try { ctx.logger?.warn?.('lingshu-startup: brain.py startup 未产出注入文本（python 不在/超时/未初始化），跳过注入') } catch {} }
         return

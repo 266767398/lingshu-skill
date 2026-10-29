@@ -20,5 +20,6 @@
     "budget": "startup 注入的 token 预算，默认 1400",
     "timeoutMs": "startup 子进程超时毫秒数，默认 3000（agent/created 是串行事件，太久会拖慢新会话）；超时/失败静默放行，不阻塞会话",
     "injectResume": "resume 来源的会话（续聊）是否也注入，默认 true；clear/compact 一律不注入"
-  }
+  },
+  "zeroDeps": "刻意零外部依赖：不 import @deepseek-ai/schemastery（link: 安装时该内置包从插件真实路径解析不到，import 失败会被 cordis 静默跳过）。配置以普通对象 DEFAULTS 提供，用户配置经 mergeConfig 合并。"
 }

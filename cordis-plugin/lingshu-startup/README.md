@@ -27,6 +27,22 @@ pnpm pack          # 得到 dsh-lingshu-startup-0.1.0.tgz
 # 并在 profile package.json 的 dsh.profile.bundles 里加 "dsh-lingshu-startup"）
 ```
 
+## ⚠️ 开发调试别用 `link:` 安装（踩过的坑）
+
+`link:` 安装会把模块的真实路径留在技能目录，Node 从那里向上找 `node_modules`
+一路到盘符根——找不到 DSH 内置包，`import` 失败 → cordis **静默跳过整个插件**
+（UI 里装了、bundles 里有、配置树里也有，就是不动）。实体 tgz 安装（如上）的
+解析基准在 profile 下，没这个问题。
+
+本插件因此**刻意零外部依赖**：不 import `@deepseek-ai/schemastery`，配置用普通
+对象 `DEFAULTS` + `mergeConfig` 合并（默认值 budget 1400 / timeoutMs 3000 /
+injectResume true）。这样 link 安装也能工作、改 `plugin.js` 即时生效，不必每次
+重打包——只是别忘了 Host 仍不会热加载 bundle（见下节），改完还是要重启 DSH。
+
+排错技巧：desktop profile 被 Electron 独占，无法直连时，可用
+`dsh --profile probe` 开临时 profile 把静默失败变成 stderr 显式错误；
+`--dump-config` 能看到插件在配置树里 → 配置没问题 → 问题必然在 import。
+
 ## ⚠️ 装完必须重启 DSH（Host 不会热加载 bundle）
 
 **Host 的插件树（cordis profile bundles）是主进程启动时一次性组合的**——装完/改完
