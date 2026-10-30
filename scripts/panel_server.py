@@ -278,6 +278,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def handle_one_request(self):
+        # 客户端刷新/关页面会把连接掐断（WinError 10053/10054），响应写不出去是正常现象，
+        # 静默收尾即可——不让 ConnectionAbortedError 刷满控制台
+        try:
+            super().handle_one_request()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, TimeoutError):
+            self.close_connection = True
+
     # -------------------------------------------------- helpers
     def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8"):
         self.send_response(code)
