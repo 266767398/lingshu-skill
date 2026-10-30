@@ -3330,6 +3330,9 @@ def persona_drift(days: int = 7) -> dict:
                 # state 段（mood/energy/closeness）是瞬态：聊句心情、睡一觉精力回升
                 # 都会变，算进漂移就是"动不动就偏大"。稳定特征（性格/驱动/身份）
                 # 才是漂移该盯的；state 变更另有 history 溯源，不在这里报。
+                # drives（好奇心/理智等内驱）也带动态性：做梦/对话会自然回调数值、
+                # 且没有 traits 那样的漂移门限——把它算进告警，两次对话就能凑够
+                # 3 处 diff 触发"人格漂移偏大"误报。diff 里保留但不算进 alert。
                 b = bp.get(section) or {}
                 c = cur.get(section) or {}
                 for k in set(b) | set(c):
@@ -3347,7 +3350,10 @@ def persona_drift(days: int = 7) -> dict:
                         "from": h.get("from"), "to": h.get("to"), "why": h.get("why"),
                         "source": h.get("source", "")} for h in ai],
         "counts": {"diff": len(diff), "ai_changes": len(ai)},
-        "alert": len(diff) >= 3 or len(ai) >= 3,
+        # 告警只盯稳定特征（traits/identity 的变动）+ AI 主动改动；
+        # drives 的自然波动不算（否则两次对话就误报"漂移偏大"）
+        "alert": (len([d for d in diff if d.get("section") != "drives"]) >= 3
+                  or len(ai) >= 3),
     }
 
 

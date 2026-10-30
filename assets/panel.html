@@ -333,6 +333,10 @@
           <option value="dust">淡忘区</option>
           <option value="archive">归档层</option>
         </select>
+        <select id="pendingFilter">
+          <option value="">全部状态</option>
+          <option value="1">只看待审核</option>
+        </select>
         <select id="impFilter">
           <option value="">重要性</option>
           <option value="high">高 ≥7</option>
@@ -1343,11 +1347,20 @@ async function loadGraph(limit){
       if (a != null && b != null){ GRAPH.nbrs.get(a).add(b); GRAPH.nbrs.get(b).add(a); } });
     GRAPH.loaded = true;
     renderGraph();
-    $("graph-hint").textContent = `${nodes.length} 条记忆 · ${edges.length} 条关联（${GRAPH.data.connected} 个互联）· 点节点：以它为中心 + 激活相邻记忆`;
-    $("graph-stat").textContent = `${nodes.length} 节点 · ${edges.length} 关联边 · 约 ${Math.round(edges.length / Math.max(1, nodes.length) * 100) / 100} 条/点`;
+    // 库里没有可画的记忆时给明确的空态引导，别让一片空白被当成"加载失败"
+    if (!nodes.length){
+      $("graph-hint").textContent = "还没有可展示的记忆（或都在淡忘区/归档层）。先聊几句让它记点东西，或到「梦」页做一次做梦沉淀。";
+      $("graph-stat").textContent = "";
+      $("graph-neighbors").innerHTML = "";
+    } else {
+      $("graph-hint").textContent = `${nodes.length} 条记忆 · ${edges.length} 条关联（${GRAPH.data.connected} 个互联）· 点节点：以它为中心 + 激活相邻记忆`;
+      $("graph-stat").textContent = `${nodes.length} 节点 · ${edges.length} 关联边 · 约 ${Math.round(edges.length / Math.max(1, nodes.length) * 100) / 100} 条/点`;
+      if (!edges.length && nodes.length > 1)
+        toast("这些记忆之间还没有关联。点「自动联想」可以按共享实体/标签批量补边。");
+    }
   } catch (e) {
     toast("加载联想图谱失败：" + e.message, true);
-    $("graph-hint").textContent = "加载失败，先写几条记忆或做一次自动联想。";
+    $("graph-hint").textContent = "加载失败：" + e.message + "。若是刚更新过代码，重启面板服务再试。";
   }
 }
 
@@ -1943,6 +1956,8 @@ async function renderMemoryList(){
   if (q) p.set("q", q);
   const layer = $("layerFilter").value;
   if (layer) p.set("layer", layer);
+  const pend = $("pendingFilter") && $("pendingFilter").value;
+  if (pend) p.set("pending", pend);
   const tag = ($("tagFilter").value || "").trim();
   if (tag) p.set("tag", tag);
   const emo = ($("emoFilter").value || "").trim();
@@ -2064,7 +2079,7 @@ if (dshFilter) dshFilter.addEventListener("input", () => renderDshPlugins());
 // 结果被静默换回普通列表，以为搜索丢了。清空搜索词即恢复。
 $("search").addEventListener("input", () => { if (!$("search").value.trim()) scheduleMemList(); });
 $("search").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
-["layerFilter", "impFilter", "timeFilter", "sortFilter"].forEach(id =>
+["layerFilter", "impFilter", "timeFilter", "sortFilter", "pendingFilter"].forEach(id =>
   $(id).addEventListener("change", () => { if (!$("search").value.trim()) scheduleMemList(); }));
 ["tagFilter", "emoFilter"].forEach(id =>
   $(id).addEventListener("input", () => { if (!$("search").value.trim()) scheduleMemList(); }));

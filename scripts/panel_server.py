@@ -189,6 +189,8 @@ def filtered_memories(url) -> list:
     emotion = one("emotion").strip().lower()
     text = one("q").strip().lower()
     sort = one("sort", "created")
+    # pending=1：只看待审核的记忆（概览页「待审核」区块跳转过来就是带这个参数）
+    only_pending = one("pending", "") == "1"
     limit = _int_param(url, "limit", 200, 1, 500)
 
     def num(key: str, default: float) -> float:
@@ -210,6 +212,8 @@ def filtered_memories(url) -> list:
     rows = []
     for m in brain.load_all() + brain.load_archive():
         if layer and m.get("layer") != layer:
+            continue
+        if only_pending and m.get("review") != "pending":
             continue
         if tag and tag not in [str(t).lower() for t in (m.get("tags") or [])]:
             continue
