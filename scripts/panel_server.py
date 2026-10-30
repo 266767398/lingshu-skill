@@ -393,6 +393,13 @@ class Handler(BaseHTTPRequestHandler):
             content = content.replace("/*__PANEL_TOKEN__*/", TOKEN)
             self._send(200, content.encode("utf-8"), "text/html; charset=utf-8")
             return
+        if path == "/favicon.ico":
+            # 浏览器自动请求，返回透明 1x1 PNG，避免控制台刷 404
+            self._send(200, bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                "0000000d4944415478da63fcffff3f030005fe02fea72d1e480000000049454e44ae426082"),
+                "image/png")
+            return
         # 读取接口同样要校验来源 + token：记忆是隐私数据，不能被任意页面/进程读走
         if path.startswith("/api/") and (not self._origin_ok() or not self._token_ok()):
             self._json({"error": "forbidden"}, 403)
