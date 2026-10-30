@@ -2,6 +2,36 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.19 — 全面审计修复 + 更新链路防倒退
+
+### 稳健性（brain.py）
+- **float(None) 崩溃修复**：8 处 `float(x.get(key, default))` 改 `_num()` 安全
+  转换（valence/intensity/pressure/importance/ts/created/confidence 等）——
+  记忆字段被手改成 null 时 recall/dream/归档不再抛 TypeError 崩掉。
+- **归档锁缺口**：`_append_archive` 内部自加文件锁，并发做梦/归档不再丢行。
+
+### 数据安全（growth.py）
+- **registry 条目级合并**：并发写技能注册表不再整条互相覆盖。
+- **SKILL.md 原子写 + 锁**：create_skill/edit_skill 走临时文件 + os.replace，
+  崩溃不留半截文件；edit 锁内重读最新内容再改。
+- **config 锁内重读**：`_accept_risk` / `self_review` 写回前重读，不覆盖并发改动。
+- **Windows 保留名黑名单**：技能名禁用 con/com1/lpt1 等保留设备名。
+- **list_skills 容错**：utf-8-sig 读 + 单个坏技能跳过并记日志。
+
+### 安全加固（panel_server.py）
+- **token 比较 bytes 化**：非 ASCII header（恶意请求）不再抛 TypeError 断连。
+- **CSP frame-ancestors 'none'**：防恶意网页 iframe 嵌面板（点击劫持）。
+- **overview 逐条降级**：单个坏记忆/坏梦文件不再让整个面板 500。
+- **空 token 拒启**：`LINGSHU_PANEL_TOKEN` 空串/空白时拒绝启动。
+- **favicon 路由**：不再刷 404。
+- **断连静默**：浏览器中途掐断连接（WinError 10053）不再刷 traceback 栈。
+
+### 更新链路防倒退
+- **版本守门**：远程拉取全链路失败复用旧缓存时，若缓存源版本 ≤ 已装版本，
+  不报 outdated、拒绝镜像安装（install 二道防线），面板明确提示
+  「远程源暂时不可用，已忽略这次检查，不会倒退更新」。
+- **更新按钮动效**：检查中/下载中转圈动画 + 顶部下载进度条，不再以为卡住了。
+
 ## v2.18 — 检查更新只走远程拉取（Gitee 优先、GitHub 兜底）
 
 - **删除本地开发仓库同步路径**：更新链路不再读取 `lingshu_source_dir`，灵枢
