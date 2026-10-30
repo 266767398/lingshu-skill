@@ -1106,6 +1106,11 @@ def _remote_cache_dir() -> Path:
     return d / "lingshu-gitee-src"
 
 
+# 缓存时效：面板进程长期挂着时，旧缓存会让"检查更新"永远显示已最新。
+# 超过 10 分钟自动重拉一次（点「更新」仍无条件 force）。
+REMOTE_CACHE_TTL = 600.0
+
+
 def _remote_token(host: str) -> str:
     """取可选的认证 token（gitee/github），未配置返回空串。绝不打日志。"""
     try:
@@ -1143,7 +1148,9 @@ def _fetch_tree_source(api_base: str, branch: str, label: str, host: str) -> Pat
     tree = _remote_api(f"{api_base}/git/trees/{branch}?recursive=1", host)
     if tree.get("truncated"):
         raise RuntimeError(f"{label} 目录树被截断（仓库过大），无法安全拉取")
-    n = 0
+    # 小文件并发下载（4 线程）：逐文件 REST 请求是更新慢的主因（几十次串行往返），
+    # 并发把总耗时压到接近单请求耗时。文件少（<6）不值得开线程池，保持串行简单。
+    paths = []
     for item in tree.get("tree", []):
         if item.get("type") != "blob":
             continue
@@ -1151,29 +1158,45 @@ def _fetch_tree_source(api_base: str, branch: str, label: str, host: str) -> Pat
         if (".git" in path.split("/") or "__pycache__" in path
                 or path.endswith((".pyc", ".tmp"))):
             continue
+        paths.append(path)
+        if len(paths) > 500:
+            raise RuntimeError("文件数异常（>500），可能指错仓库，已停止")
+
+    def _dl(rel: str) -> None:
         try:
             blob = _remote_api(
-                f"{api_base}/contents/{_urlparse.quote(path)}?ref={branch}", host)
+                f"{api_base}/contents/{_urlparse.quote(rel)}?ref={branch}", host)
         except Exception as e:
             if isinstance(e, _urlreq.HTTPError) and e.code == 403:
                 raise RuntimeError(
                     f"{label} 匿名限额已用尽（403），约 1 小时后自动恢复") from e
             raise
         if blob.get("encoding") != "base64":
-            raise RuntimeError(f"{label} 返回内容编码异常：{path}")
+            raise RuntimeError(f"{label} 返回内容编码异常：{rel}")
         data = base64.b64decode(blob.get("content", ""))
-        target = staging / path
+        target = staging / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        n += 1
-        if n > 500:
-            raise RuntimeError("文件数异常（>500），可能指错仓库，已停止")
+
+    if len(paths) >= 6:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            # 任一线程抛异常就整体失败：list() 会把第一个异常重新抛出
+            list(pool.map(_dl, paths))
+    else:
+        for rel in paths:
+            _dl(rel)
     if not (staging / "SKILL.md").is_file():
         raise RuntimeError(f"{label} 拉取结果里找不到 SKILL.md（可能仓库结构变了）")
     # 全部文件拉完并校验通过后才替换正式缓存：中途失败只会留下 staging 残渣，
     # 下次拉取会先清掉它，绝不会把半截源当有效缓存复用。
     _atomic_replace_dir(staging, cache / "extracted")
     _mark_source(cache, host)
+    if expected_sha:
+        try:
+            (cache / "extracted" / ".lingshu-sha").write_text(expected_sha, encoding="utf-8")
+        except OSError:
+            pass
     return cache / "extracted"
 
 
@@ -1290,9 +1313,41 @@ def _cached_source(cache: Path) -> str:
         return "gitee"
 
 
-# 缓存时效：面板进程长期挂着时，旧缓存会让"检查更新"永远显示已最新。
-# 超过 10 分钟自动重拉一次（点「更新」仍无条件 force）。
-REMOTE_CACHE_TTL = 600.0
+def _cached_sha(cache: Path) -> str:
+    try:
+        return (cache / "extracted" / ".lingshu-sha").read_text(
+            encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _remote_head_sha(api_base: str, branch: str, host: str) -> str:
+    """拿远端 main 分支最新 commit SHA（1 次轻量请求）。
+
+    用途：检查更新时先比 SHA——远端没新提交就直接用缓存（秒回，不用几十次
+    逐文件请求）。失败返回空串（调用方退回原慢路径）。
+    """
+    try:
+        info = _remote_api(f"{api_base}/branches/{branch}", host)
+        return str((info.get("commit") or {}).get("sha") or "")
+    except Exception:
+        return ""
+
+
+def _fetch_tree_source(api_base: str, branch: str, label: str, host: str,
+                       expected_sha: str = "") -> Path:
+    """从指定 REST 接口拉取分支全部文件到临时缓存目录，返回含 SKILL.md 的根。
+
+    先取仓库目录树（recursive=1），再逐个取文本文件内容（base64 解码）。仓库
+    规模小（几十个文件），总量可控。失败抛异常由调用方降级。
+    expected_sha 非空时写入 .lingshu-sha 标记，供下次秒级缓存命中。
+    """
+    import base64
+    cache = _remote_cache_dir()
+    staging = cache / "staging"
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
 
 
 # 远程拉取串行化：面板多线程同时点「检查更新/更新」时，两个线程会同时
@@ -1316,6 +1371,20 @@ def _lingshu_remote_source(force: bool = False) -> tuple[Path | None, str, str]:
 def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     cache = _remote_cache_dir()
     cached = cache / "extracted"
+    # SHA 快路径：远端最新 commit SHA 与缓存标记一致 ⇒ 远端没新提交，缓存必为
+    # 最新，直接复用（1 次轻量请求秒回，跳过几十次逐文件下载）。仅非 force 且
+    # 缓存完整时走；SHA 探测失败/拿不到标记则退回原 TTL 逻辑。
+    if (cached / "SKILL.md").is_file() and not force:
+        cached_sha = _cached_sha(cache)
+        if cached_sha:
+            for base, branch, host in ((GITEE_API_BASE, GITEE_BRANCH, "gitee"),
+                                       (GITHUB_API_BASE, GITHUB_BRANCH, "github")):
+                head = _remote_head_sha(base, branch, host)
+                if not head:
+                    continue  # 这个远端不可达，试下一个
+                if head.startswith(cached_sha) or cached_sha.startswith(head):
+                    return cached, _cached_source(cache), ""
+                break  # 远端可达但 SHA 不同 ⇒ 真有新提交，走完整拉取
     if (cached / "SKILL.md").is_file() and not force:
         # 缓存时效：超期则视为失效，重新走一遍拉取链路（重拉失败会降级报错，
         # 但此时旧缓存还在——用旧缓存兜底而不是直接报"已最新"）。
@@ -1328,9 +1397,12 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     err = ""
     # Gitee：API → zip 归档兜底（浏览器 UA）；再 GitHub。中间某一路失败但后续
     # 成功时静默（不打印失败日志），只有全部链路都失败才输出汇总错误。
+    # 拉取前先探一次 head SHA，成功后写进缓存标记（供下次 SHA 快路径命中）。
+    head_sha = _remote_head_sha(GITEE_API_BASE, GITEE_BRANCH, "gitee")
     try:
         return _fetch_tree_source(
-            GITEE_API_BASE, GITEE_BRANCH, "Gitee", "gitee"), "gitee", ""
+            GITEE_API_BASE, GITEE_BRANCH, "Gitee", "gitee",
+            expected_sha=head_sha), "gitee", ""
     except Exception as e:
         err = f"Gitee 拉取失败：{e}"
     try:
@@ -1338,8 +1410,10 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     except Exception as e:
         err = f"Gitee 归档兜底失败：{e}"
     try:
+        head_sha = _remote_head_sha(GITHUB_API_BASE, GITHUB_BRANCH, "github")
         return _fetch_tree_source(
-            GITHUB_API_BASE, GITHUB_BRANCH, "GitHub", "github"), "github", ""
+            GITHUB_API_BASE, GITHUB_BRANCH, "GitHub", "github",
+            expected_sha=head_sha), "github", ""
     except Exception as e:
         err += f"；GitHub 拉取失败：{e}"
     # 全链路失败：如果还有一份旧缓存（哪怕已超期），宁可用旧缓存也别硬报错。
