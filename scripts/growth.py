@@ -954,7 +954,10 @@ def _diff_signature(dir_path: Path) -> set:
         if not f.is_file() or "__pycache__" in f.parts or ".git" in f.parts:
             continue
         # AGENTS.md 是安装时重新生成的（区块化更新，含时间性内容），不参与差异判定
-        if f.name.endswith((".tmp", ".pyc", ".lock", ".corrupt")) or f.name == "AGENTS.md":
+        # .lingshu-source 是远程缓存的来源标记（缓存元数据），副本里没有——
+        # 不排除的话远程源签名永远比副本多一个文件，每次检查都误报 outdated
+        if (f.name.endswith((".tmp", ".pyc", ".lock", ".corrupt"))
+                or f.name in ("AGENTS.md", ".lingshu-source")):
             continue
         try:
             st = f.stat()
@@ -1168,6 +1171,11 @@ def _fetch_gitee_zip_source() -> Path:
             if f.read(4) != b"PK\x03\x04":
                 raise RuntimeError("Gitee zip 归档签名校验失败（拿到的是 HTML 风控页）")
         with zipfile.ZipFile(tmp) as zf:
+            # 防 zip slip：归档里出现 ../ 或绝对路径的成员名一律拒绝解压
+            for member in zf.namelist():
+                p = (staging / member).resolve()
+                if not str(p).startswith(str(staging.resolve())):
+                    raise RuntimeError(f"Gitee zip 归档含非法路径成员：{member}")
             zf.extractall(staging)
         # Gitee 归档带一层顶层目录，定位含 SKILL.md 的真实根。
         if (staging / "SKILL.md").is_file():
@@ -1668,7 +1676,7 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
     for item in src_dir.rglob("*"):
         if item.is_dir() or "__pycache__" in item.parts or ".git" in item.parts:
             continue
-        if item.name.endswith((".tmp", ".pyc")):
+        if (item.name.endswith((".tmp", ".pyc")) or item.name == ".lingshu-source"):
             continue
         rel = item.relative_to(src_dir)
         target = dst_dir / rel
