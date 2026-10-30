@@ -1471,12 +1471,12 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
     if not READONLY or ASSOC_FILE.exists():
         for r in load_assoc():
             if r["src"] in top_ids and r["dst"] not in top_ids:
-                w = float(r.get("weight", 1))
+                w = _num(r.get("weight"), 1)
                 for item in scored[len(top):]:
                     if item[0]["id"] == r["dst"]:
                         item[1] += min(0.12, 0.04 * w)
             elif r["dst"] in top_ids and r["src"] not in top_ids:
-                w = float(r.get("weight", 1))
+                w = _num(r.get("weight"), 1)
                 for item in scored[len(top):]:
                     if item[0]["id"] == r["src"]:
                         item[1] += min(0.12, 0.04 * w)
@@ -2007,9 +2007,9 @@ def emotion_cool(factor: float = 0.15) -> dict:
         horizon = now_ts() - 24 * HOUR
         cooled = 0
         for ev in rows:
-            if float(ev.get("ts", 0)) < horizon:
+            if _num(ev.get("ts")) < horizon:
                 continue
-            entry_w = float(ev.get("intensity", 0))
+            entry_w = _num(ev.get("intensity"))
             if entry_w >= 0.25:
                 ev["intensity"] = round(max(0.03, entry_w * factor), 3)
                 ev["cooled_at"] = now_ts()
@@ -2064,7 +2064,7 @@ def feel(name: str, intensity: float = 0.6, why: str = "",
                       if e.get("emotion") == name
                       and (e.get("about") or "").strip() == _about
                       and (e.get("why") or "").strip() == _why
-                      and ts_now - float(e.get("ts", 0)) < 12 * HOUR)
+                      and ts_now - _num(e.get("ts")) < 12 * HOUR)
         if repeats:
             eff *= 0.85 ** repeats
             habituation = repeats
@@ -2137,12 +2137,25 @@ def mood_now(at: float | None = None) -> dict:
                 "intensity": 0.0, "active": [], "groups": [], "complex": False,
                 "storm": False, "note": "情绪都已散去"}
     v = max(-1.0, min(1.0, sv / sw))
-    a = max(0.0, min(1.0, sa / sw))
+    # arousal 只对高权重事件加权平均：情绪风暴（高唤醒）常被大量低唤醒的疲惫/
+    # 平静稀释掉，storm 触发不到——只统计 weight≥0.1 的活跃情绪，低谷时无强事件
+    # 则回退全量平均，避免 arousal 突变。
+    sa_hi, sw_hi = 0.0, 0.0
+    for ev in rows[:60]:
+        ets = _num(ev.get("ts"), now)
+        age_h = max(0.0, (now - ets) / HOUR)
+        half = max(0.5, _num(ev.get("decay_hours"), EMOTION_HALF_LIFE / HOUR))
+        w = _num(ev.get("intensity"), 0.5) * (0.5 ** (age_h / half))
+        if w >= 0.1:
+            sa_hi += _num(ev.get("arousal"), 0.3) * w
+            sw_hi += w
+    a = max(0.0, min(1.0, (sa_hi / sw_hi) if sw_hi > 0 else (sa / sw)))
     active.sort(key=lambda x: x["weight"], reverse=True)
     groups = [{"group": g, "weight": round(w, 3), "pct": round(w / sw * 100)}
               for g, w in sorted(gweights.items(), key=lambda kv: kv[1], reverse=True)]
-    # 复杂情绪：两股以上、占比都够分量的情绪同时在——比如"悲喜交加"
-    strong = [g for g in groups if g["pct"] >= 15]
+    # 复杂情绪：两股以上、占比都够分量的情绪同时在——比如"悲喜交加"。
+    # 「静」是中性基底不是真情绪，混进 strong 会让"疲惫+开心"被误判成悲喜交加。
+    strong = [g for g in groups if g["pct"] >= 15 and g["group"] != "静"]
     complex_flag = len(strong) >= 2
     return {"valence": round(v, 3), "arousal": round(a, 3),
             "label": _mood_label(v, a),
@@ -2291,17 +2304,17 @@ def emotion_arc(days: int = 7) -> dict:
         tone = "这段时间起起伏伏，整体平稳"
     # 峰终定律：对一段体验的记忆几乎只由「最强烈的一刻（峰）」和「结尾（终）」决定，
     # 中间过程大多被忽略（Kahneman 1999）。所以回顾情绪时，高峰和最近一次最值得拎出来。
-    peak = max(rows, key=lambda r: (abs(float(r.get("intensity", 0.5))), float(r.get("ts", 0))))
+    peak = max(rows, key=lambda r: (abs(_num(r.get("intensity"), 0.5)), _num(r.get("ts"))))
     end = rows[-1]
     return {
         "days": days, "count": len(rows), "avg_valence": round(avg, 3),
         "tone": tone,
         "peak": {"emotion": peak.get("emotion", ""),
-                 "intensity": float(peak.get("intensity", 0.5)),
+                 "intensity": _num(peak.get("intensity"), 0.5),
                  "ts": peak.get("ts", 0),
                  "why": peak.get("why", "")},
         "end": {"emotion": end.get("emotion", ""),
-                "intensity": float(end.get("intensity", 0.5)),
+                "intensity": _num(end.get("intensity"), 0.5),
                 "ts": end.get("ts", 0),
                 "why": end.get("why", "")},
         "top": [{"emotion": k, "times": v} for k, v in top],
@@ -2419,8 +2432,8 @@ def emotion_evaluate(event: str, polarity: str = "auto", importance: float = 0.6
         raise ValueError(f"极性只能是 positive / negative / neutral / auto，收到：{polarity}")
     if polar == "auto":
         polar = _detect_polarity(event)
-    if polar == "neutral":
-        polar = "positive" if imp >= 0.75 else "neutral"
+    # 中性重要事不凭空变好事：原逻辑 imp>=0.75 会把 neutral 强转 positive，
+    # 语义不成立（"重要"≠"好"）——保持中性，分量交给 intensity/decision 体现。
     emo = _pick_emotion_by_appraisal(polar, imp)
     evaluation = {"polarity": polar, "importance": imp, "event": event[:120]}
     how = "好事" if polar == "positive" else ("坏事" if polar == "negative" else "平常事")
@@ -3021,7 +3034,12 @@ def _persona_rollback_inner(p: dict, index: int | None = None) -> dict:
             if isinstance(current, list) and (leaf in _PERSONA_LIST_FIELDS or leaf == "locked"):
                 node[leaf] = [x for x in current if x != to]
             elif isinstance(current, dict):
-                pass  # 无旧值可还原的结构段：不清空，避免丢数据
+                # 无旧值可还原的结构段：不清空，避免丢数据；也不记"回滚"历史——
+                # 实际什么都没回退，记了会让回滚轨迹失真（下次回滚会数错条）。
+                save_persona(p)
+                return {"field": field, "from": None, "to": frm,
+                        "why": entry.get("why", ""), "overwrote_later": False,
+                        "note": "该字段无旧值可还原，未做改动"}
             else:
                 node.pop(leaf, None)
         elif isinstance(current, dict) and isinstance(frm, str):
@@ -3292,7 +3310,7 @@ def mind_weigh(topic: str, benefit: float = 5, cost: float = 5,
             f"好处 {benefit:g} × 把握 {confidence:.0%} = {benefit * confidence:.1f}",
             f"坏处/代价 {cost:g}" + (f"（紧迫度 {urgency:.0%}，可压缩一部分）" if urgency else ""),
             f"净收益 {net:.1f}，收益代价比 {ratio:.1f}",
-            notes.pop(0) if notes else "理智与好奇心没有冲突。",
+            "；".join(notes) if notes else "理智与好奇心没有冲突。",
         ],
     }
 
@@ -3527,10 +3545,10 @@ def cluster_memories(records: list, max_clusters: int = 6, include_ids: set | No
 
     clusters = []
     for gid, members in groups.items():
-        if len(members) < 2 and max(m.get("importance", 0) for m in members) < 0.7:
+        if len(members) < 2 and max(_num(m.get("importance")) for m in members) < 0.7:
             continue
         clusters.append(members)
-    clusters.sort(key=lambda g: (len(g) * max(m.get("importance", 0) for m in g)), reverse=True)
+    clusters.sort(key=lambda g: (len(g) * max(_num(m.get("importance")) for m in g)), reverse=True)
 
     out = []
     now = now_ts()
