@@ -1997,7 +1997,7 @@ def emotion_modify(n: int, emotion: str = "", intensity: float | None = None,
     path = HOME / "emotions.jsonl"
     with _locked(path):
         rows = read_jsonl(path)
-        desc = sorted(rows, key=lambda r: r.get("ts", 0), reverse=True)
+        desc = sorted(rows, key=lambda r: _num(r.get("ts"), 0), reverse=True)
         if n < 1 or n > len(desc):
             raise ValueError(f"序号越界：情绪事件共 {len(rows)} 条，调整写 1..{len(rows)}。")
         ev = desc[n - 1]
@@ -2033,7 +2033,7 @@ def emotion_delete(n: int) -> dict:
     path = HOME / "emotions.jsonl"
     with _locked(path):
         rows = read_jsonl(path)
-        desc = sorted(rows, key=lambda r: r.get("ts", 0), reverse=True)
+        desc = sorted(rows, key=lambda r: _num(r.get("ts"), 0), reverse=True)
         if n < 1 or n > len(desc):
             raise ValueError(f"序号越界：情绪事件共 {len(rows)} 条，删除写 1..{len(rows)}。")
         ev = desc[n - 1]
@@ -4837,7 +4837,7 @@ def auto_dream(trigger: str = "auto", dry_run: bool = False) -> dict:
     memories = []
     for c in report["clusters"]:
         texts = c["texts"]
-        top = sorted(texts, key=lambda t: float(t.get("importance", 0.5)), reverse=True)[:3]
+        top = sorted(texts, key=lambda t: _num(t.get("importance"), 0.5), reverse=True)[:3]
         kind = Counter(t["kind"] for t in texts).most_common(1)[0][0]
         label = "、".join(c["tags"][:4]) or "、".join(c["entities"][:4]) or "未命名主题"
         joined = "；".join(t["text"] for t in top)
@@ -4845,7 +4845,7 @@ def auto_dream(trigger: str = "auto", dry_run: bool = False) -> dict:
             "kind": kind,
             "text": f"最近关于「{label}」的一组事情（{len(texts)} 条）：{joined}"[:400],
             "gist": f"关于「{label}」的 {len(texts)} 条经历",
-            "importance": min(0.9, max(float(t.get("importance", 0.5)) for t in texts)),
+            "importance": min(0.9, max((_num(t.get("importance"), 0.5) for t in texts), default=0.5)),
             "tags": c["tags"],
             "entities": c["entities"],
             "source_ids": c["ids"],

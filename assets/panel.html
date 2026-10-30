@@ -1593,8 +1593,9 @@ function renderAiChanges(ov){
   const hist = p.history || [];
   box.innerHTML = rows.length
     ? `<table class="hist"><tbody>${rows.map(x => {
-        // 回滚到"这条改动之前"：历史按旧→新存，1-based 倒序序号 = total - 位置
-        const pos = hist.findIndex(hh => hh.ts === x.ts && hh.field === x.field);
+        // 回滚到"这条改动之前"：历史按旧→新存，1-based 倒序序号 = total - 位置。
+        // findLastIndex：同毫秒同字段可能有多条，命中"最后一条"（离这条 ts 最近的）才对
+        const pos = hist.findLastIndex(hh => hh.ts === x.ts && hh.field === x.field);
         const seq = pos >= 0 ? Math.max(1, total - pos) : null;
         const btn = seq ? `<button class="ghost" style="padding:2px 9px;font-size:11px" data-rollback="${seq}">回滚</button>`
                         : `<span class="sub">—</span>`;
@@ -2073,9 +2074,12 @@ $("sidefoot").addEventListener("click", async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 
-$("mem-list").addEventListener("click", async (e) => {
+// 委托绑 document 级而非 #mem-list：概览页「最近写下的事」也复用 memCard
+// 产出 data-pin/edit/forget/review 按钮，绑在 mem-list 上它们点不动（历史教训同 data-rollback）
+document.addEventListener("click", async (e) => {
   const pin = e.target.closest("[data-pin]"), ed = e.target.closest("[data-edit]"), fg = e.target.closest("[data-forget]");
   const rv = e.target.closest("[data-review]");
+  if (!pin && !ed && !fg && !rv) return;
   const findMem = id => (S.memIndex && S.memIndex[id]) || (S.ov && S.ov.memories.find(x => x.id === id));
   try {
     if (rv) {
@@ -2886,6 +2890,8 @@ async function checkUpdate(auto){
     }
     if (r.outdated) {
       dot.style.display = "inline-block";
+      // auto 模式只点亮红点不弹窗：自动检查的本意是"不打扰"，弹窗会打断用户手头操作
+      if (auto) return;
       const srcLabel = r.source === "gitee" ? "来源：Gitee 远程"
                      : r.source === "github" ? "来源：GitHub 远程"
                      : r.source === "local" ? "来源：本地目录"

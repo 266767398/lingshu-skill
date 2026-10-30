@@ -32,7 +32,7 @@ _WRITE_ENDPOINTS = {
     "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/auto",
     "/api/dream/apply", "/api/dream/draft", "/api/memory/bulk",
     "/api/emotion", "/api/mode", "/api/link",
-    "/api/forget", "/api/daily",
+    "/api/forget", "/api/daily", "/api/dream/instruction",
 }
 
 # 本机随机 token：页面加载时注入，之后每个 API 请求都要带上。
@@ -512,6 +512,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if not self._origin_ok() or not self._token_ok():
+            # 拒绝前没读请求体：keep-alive 连接里残留的 body 会被下一轮当成请求行解析，
+            # 造成连接错乱——断开连接最干净
+            self.close_connection = True
             self._json({"error": "forbidden"}, 403)
             return
         path = urlparse(self.path).path
@@ -520,6 +523,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         # 只读门控：写接口在数据目录不可写时直接 403（展示/预览接口放行）
         if brain.READONLY and path in _WRITE_ENDPOINTS and not _readonly_allowed(path, data):
+            self.close_connection = True
             self._json({"error": "readonly", "message": "数据目录当前只读，写操作已被禁用。"}, 403)
             return
         try:
@@ -1025,8 +1029,9 @@ class Handler(BaseHTTPRequestHandler):
             print(f"[面板] 文件被占用: {exc}", file=sys.stderr)
             self._json({"error": "文件被占用或没有写入权限"}, 400)
         except (ValueError, KeyError) as exc:
-            # 业务异常 / 参数错：消息本身就是给用户看的，直接回显
-            self._json({"error": str(exc)}, 400)
+            # 业务异常 / 参数错：消息本身就是给用户看的，直接回显。
+            # KeyError 的 str() 自带英文引号（"'没有这个技能'"），剥掉再给前端
+            self._json({"error": str(exc).strip("'\"")}, 400)
         except Exception:  # 含 TypeError/AttributeError 等服务端编程错误：日志留全栈，响应只给通用文案，避免回显本机路径
             import traceback
             traceback.print_exc()

@@ -740,7 +740,11 @@ def save_registry(reg: dict) -> None:
     with brain._locked(SKILL_REG):
         cur = load_registry()
         for name, entry in reg.items():
-            if isinstance(entry, dict) and isinstance(cur.get(name), dict):
+            if entry is None:
+                # 删除语义：调用方 pop 掉的条目要真正从盘上清掉，
+                # 否则"合并式"写法会让 remove_skill 的清档永远不生效
+                cur.pop(name, None)
+            elif isinstance(entry, dict) and isinstance(cur.get(name), dict):
                 cur[name].update(entry)
             else:
                 cur[name] = entry
@@ -1923,7 +1927,8 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
     for item in src_dir.rglob("*"):
         if item.is_dir() or "__pycache__" in item.parts or ".git" in item.parts:
             continue
-        if (item.name.endswith((".tmp", ".pyc")) or item.name == ".lingshu-source"):
+        if (item.name.endswith((".tmp", ".pyc"))
+                or item.name in (".lingshu-source", ".lingshu-sha")):
             continue
         rel = item.relative_to(src_dir)
         target = dst_dir / rel
@@ -2036,7 +2041,7 @@ def remove_skill(name: str) -> bool:
         return False
     reg = load_registry()
     reg.pop(name, None)
-    save_registry(reg)
+    save_registry({**reg, name: None})   # pop 之外再显式传 None：save_registry 的删除语义
     return True
 
 
