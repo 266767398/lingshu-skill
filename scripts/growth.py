@@ -1110,7 +1110,7 @@ def _fetch_tree_source(api_base: str, branch: str, label: str, host: str) -> Pat
             blob = _remote_api(
                 f"{api_base}/contents/{_urlparse.quote(path)}?ref={branch}", host)
         except Exception as e:
-            if host == "github" and "403" in str(e):
+            if isinstance(e, _urlreq.HTTPError) and e.code == 403:
                 raise RuntimeError(
                     f"{label} 匿名限额已用尽（403），约 1 小时后自动恢复") from e
             raise
@@ -1128,6 +1128,7 @@ def _fetch_tree_source(api_base: str, branch: str, label: str, host: str) -> Pat
     # 全部文件拉完并校验通过后才替换正式缓存：中途失败只会留下 staging 残渣，
     # 下次拉取会先清掉它，绝不会把半截源当有效缓存复用。
     _atomic_replace_dir(staging, cache / "extracted")
+    _mark_source(cache, host)
     return cache / "extracted"
 
 
@@ -1148,9 +1149,21 @@ def _fetch_gitee_zip_source() -> Path:
     try:
         req = _urlreq.Request(GITEE_ZIP_URL, headers={
             "User-Agent": BROWSER_UA, "Accept": "application/zip"})
-        with _urlreq.urlopen(req, timeout=REMOTE_TIMEOUT) as resp, \
-                os.fdopen(fd, "wb") as f:
-            f.write(resp.read())
+        # fd 先包进 with：urlopen 失败时也能正确关闭，不泄漏文件描述符。
+        # 分块写入落盘（resp.read() 全量进内存在仓库变大后峰值不可控），
+        # 超过 50MB 认为指错仓库，主动中止。
+        limit = 50 * 1024 * 1024
+        with os.fdopen(fd, "wb") as f, \
+                _urlreq.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+            total = 0
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > limit:
+                    raise RuntimeError("Gitee zip 归档超过 50MB 上限（可能指错仓库），已停止")
+                f.write(chunk)
         with open(tmp, "rb") as f:
             if f.read(4) != b"PK\x03\x04":
                 raise RuntimeError("Gitee zip 归档签名校验失败（拿到的是 HTML 风控页）")
@@ -1170,6 +1183,7 @@ def _fetch_gitee_zip_source() -> Path:
             _atomic_replace_dir(staging, cache / "extracted")
         else:
             _atomic_replace_dir(real_root, cache / "extracted")
+        _mark_source(cache, "gitee")
         return cache / "extracted"
     except _urlreq.HTTPError as e:
         if e.code == 403:
@@ -1193,14 +1207,42 @@ def _atomic_replace_dir(src: Path, dst: Path) -> None:
     if old.exists():
         shutil.rmtree(old, ignore_errors=True)
     if dst.exists():
-        try:
-            dst.rename(old)
-        except OSError:
+        moved = False
+        # Windows 杀软/索引器会瞬时锁住目录导致 rename 失败，重试几次常能过
+        for _ in range(3):
+            try:
+                dst.rename(old)
+                moved = True
+                break
+            except OSError:
+                time.sleep(0.2)
+        if not moved:
             shutil.rmtree(dst, ignore_errors=True)
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
     if old.exists():
         shutil.rmtree(old, ignore_errors=True)
+
+
+def _mark_source(cache: Path, source: str) -> None:
+    """把远程缓存的实际来源写进标记文件，命中缓存时回读，来源显示不失真。"""
+    try:
+        (cache / "extracted" / ".lingshu-source").write_text(source, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _cached_source(cache: Path) -> str:
+    try:
+        return (cache / "extracted" / ".lingshu-source").read_text(
+            encoding="utf-8").strip() or "gitee"
+    except OSError:
+        return "gitee"
+
+
+# 缓存时效：面板进程长期挂着时，旧缓存会让"检查更新"永远显示已最新。
+# 超过 10 分钟自动重拉一次（点「更新」仍无条件 force）。
+REMOTE_CACHE_TTL = 600.0
 
 
 # 远程拉取串行化：面板多线程同时点「检查更新/更新」时，两个线程会同时
@@ -1213,9 +1255,9 @@ def _lingshu_remote_source(force: bool = False) -> tuple[Path | None, str, str]:
 
     成功时路径非 None，来源为 "gitee" 或 "github"，错误说明为空；两个远端都
     失败时路径为 None（调用方降级），错误说明是给用户看的可读信息。复用缓存
-    目录里已拉取的源（同一会话内不重复下载），force=True 强制重新拉取（点
-    「更新」时用，确保拿到最新代码）。缓存有效性以是否解压出 SKILL.md 为准。
-    整个拉取过程持 _remote_lock 串行，防止并发线程互踩缓存目录。
+    目录里已拉取的源（10 分钟内有效，force=True 强制重新拉取——点「更新」
+    时用，确保拿到最新代码）。缓存有效性以是否解压出 SKILL.md 为准；实际
+    来源记录在 .lingshu-source 标记文件里。整个拉取过程持锁串行防互踩。
     """
     with _remote_lock:
         return _lingshu_remote_source_locked(force)
@@ -1225,7 +1267,14 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     cache = _remote_cache_dir()
     cached = cache / "extracted"
     if (cached / "SKILL.md").is_file() and not force:
-        return cached, "gitee", ""
+        # 缓存时效：超期则视为失效，重新走一遍拉取链路（重拉失败会降级报错，
+        # 但此时旧缓存还在——用旧缓存兜底而不是直接报"已最新"）。
+        try:
+            fresh = time.time() - cached.stat().st_mtime < REMOTE_CACHE_TTL
+        except OSError:
+            fresh = True
+        if fresh:
+            return cached, _cached_source(cache), ""
     err = ""
     # Gitee：API → zip 归档兜底（浏览器 UA）；再 GitHub。中间某一路失败但后续
     # 成功时静默（不打印失败日志），只有全部链路都失败才输出汇总错误。
@@ -1243,6 +1292,11 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
             GITHUB_API_BASE, GITHUB_BRANCH, "GitHub", "github"), "github", ""
     except Exception as e:
         err += f"；GitHub 拉取失败：{e}"
+    # 全链路失败：如果还有一份旧缓存（哪怕已超期），宁可用旧缓存也别硬报错。
+    if (cached / "SKILL.md").is_file():
+        print(f"[lingshu] 远程拉取失败，复用上次缓存的旧源（可能不是最新）。{err}",
+              file=sys.stderr)
+        return cached, _cached_source(cache), ""
     print(f"[lingshu] 远程拉取失败（Gitee 与 GitHub 均不可达），降级为本地副本源。{err}",
           file=sys.stderr)
     return None, "none", err

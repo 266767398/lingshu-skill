@@ -2738,7 +2738,8 @@ async function checkUpdate(auto){
   const btn = $("btn-self-update");
   try {
     if (!auto) btn.disabled = true;
-    const r = await api("/api/self-update");
+    // 检查更新可能要现场拉远程源（最坏 90s+），走通用 15s 超时会误报失败——单独放宽到 120s
+    const r = await api("/api/self-update", {signal: AbortSignal.timeout(120000)});
     if (!auto) btn.disabled = false;
     const dot = $("upd-dot");
     if (!r.installed) {
