@@ -878,9 +878,12 @@ def create_skill(name: str, description: str, body: str, overwrite: bool = False
         _atomic_write_text(path, _compose(name, description, body, version, created, _today(), origin))
 
         reg = load_registry()
+        old = reg.get(name) or {}
         reg[name] = {"description": description, "version": version,
-                     "created": reg.get(name, {}).get("created", brain.now_ts()),
-                     "updated": brain.now_ts(), "installed_at": reg.get(name, {}).get("installed_at")}
+                     "created": old.get("created", brain.now_ts()),
+                     "updated": brain.now_ts()}
+        # installed_at 不在重建条目里：save_registry 的 dict-update 分支只合并给出的键，
+        # 漏写即保留盘上原值——避免把 install 刚写的安装时间覆盖回 None
         save_registry(reg)
     return {"name": name, "path": str(path), "version": version}
 
@@ -927,8 +930,9 @@ def edit_skill(name: str, body: str | None = None, append: str | None = None,
                                     meta2.get("origin", "灵枢")))
         reg = load_registry()
         reg[name] = {"description": final_desc, "version": version,
-                     "created": reg.get(name, {}).get("created", brain.now_ts()),
-                     "updated": brain.now_ts(), "installed_at": reg.get(name, {}).get("installed_at")}
+                     "created": (reg.get(name) or {}).get("created", brain.now_ts()),
+                     "updated": brain.now_ts()}
+        # 同 create：不重建 installed_at，保留盘上原值
         save_registry(reg)
     return {"name": name, "version": version, "path": cur2["path"]}
 
@@ -2559,7 +2563,7 @@ EVOLVE_KINDS = ("persona", "skill", "knowledge", "thinking", "self")
 
 def load_evolution(limit: int | None = None) -> list:
     rows = brain.read_jsonl(EVOLUTION_FILE)
-    rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+    rows.sort(key=lambda r: r["ts"] if isinstance(r.get("ts"), (int, float)) else 0, reverse=True)
     return rows[:limit] if limit else rows
 
 

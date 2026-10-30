@@ -1097,6 +1097,10 @@ function renderOverview(){
 }
 
 function renderPersonaEditor(p){
+  // 正在编辑任一 pf-* 字段时不重绘：30s 轮询把用户改到一半的值刷回旧数据
+  // （focus 守卫是双保险——轮询侧已跳过，手动触发 renderOverview 也要防）
+  if (["pf-name","pf-role","pf-callme","pf-traits","pf-likes","pf-dislikes"]
+      .some(id => document.activeElement === $(id))) return;
   const ident = p.identity || {};
   const dr = p.drives || {};
   $("pf-name").value = ident["名字"] || "";
@@ -2132,15 +2136,20 @@ $("add-save").addEventListener("click", async () => {
 
 $("btn-persona").addEventListener("click", async () => {
   const traits = {};
+  let badLines = 0;
   $("pf-traits").value.split("\n").forEach(line => {
-    const m = line.match(/^\s*([^:：]+)[:：]\s*(\d+)\s*$/);
+    // 允许小数与百分号（好奇：85.5 / 好奇:85%），解析不了的行明确告知而不是静默丢
+    const m = line.match(/^\s*([^:：]+)[:：]\s*([\d.]+)\s*%?\s*$/);
     if (m) traits[m[1].trim()] = Math.max(0, Math.min(100, Number(m[2])));
+    else if (line.trim()) badLines++;
   });
   const drives = {};
   const cur = $("pf-cur").value.trim();
   const rea = $("pf-reason").value.trim();
-  if (cur !== "") drives.curiosity = Number(cur);
-  if (rea !== "") drives.reason = Number(rea);
+  // Number("abc")→NaN、Number("1e999")→Infinity，原样提交后端会存坏值
+  const curN = Number(cur), reaN = Number(rea);
+  if (cur !== "" && Number.isFinite(curN)) drives.curiosity = Math.max(0, Math.min(100, curN));
+  if (rea !== "" && Number.isFinite(reaN)) drives.reason = Math.max(0, Math.min(100, reaN));
   try {
     await api("/api/persona/edit", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
       identity: {
@@ -2154,7 +2163,7 @@ $("btn-persona").addEventListener("click", async () => {
       dislikes: $("pf-dislikes").value.split(/[,，]/).map(x => x.trim()).filter(Boolean),
       why: "面板改写人格",
     })});
-    toast("人格已更新，改动记入历史");
+    toast("人格已更新，改动记入历史" + (badLines ? `（${badLines} 行特质格式不对被忽略）` : ""));
     await load(); loadWS();
   } catch (e) { toast(e.message, true); }
 });
@@ -2856,9 +2865,11 @@ setInterval(() => {
 // 静态加载的话面板永远停在打开那一刻。每 30s 轻量拉一次 overview
 // （纯读接口），情绪回落、欲望恢复在面板上会自己动起来。
 // 用户正在编辑状态输入时跳过，避免滑块被后台刷新拽走。
+// pf-*（人格编辑器）同等待遇：否则 30s 后正在打的字被后台数据整段抹掉。
 setInterval(async () => {
   if (!S.ov || document.hidden) return;
-  const editing = ["st-mood", "st-note", "st-energy", "st-closeness"]
+  const editing = ["st-mood", "st-note", "st-energy", "st-closeness",
+                   "pf-name", "pf-role", "pf-callme", "pf-traits", "pf-likes", "pf-dislikes"]
     .some(id => document.activeElement === $(id));
   if (editing) return;
   try {

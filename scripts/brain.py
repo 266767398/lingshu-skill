@@ -553,6 +553,9 @@ def set_memory_review(mid: str, status: str) -> dict:
             target["review"] = "confirmed"
             target["review_at"] = now_ts()
         elif status == "discard":
+            # pinned 不许 discard：与 apply_dream 的 forget 同一道防线
+            if target.get("pinned"):
+                raise ValueError("这条记忆是用户置顶的，不能 discard，请直接 confirm 或手动处理")
             target["layer"] = "dust"
             target["forgotten_at"] = now_ts()
             target["review"] = "discarded"
@@ -3982,6 +3985,11 @@ def apply_dream(result: dict) -> dict:
         for sid in result.get("forget") or []:
             m = by_id.get(sid)
             if m and m.get("layer") != "dust":
+                # pinned 与 dream 主循环同一待遇：用户置顶的不许 AI 梦里淡忘——
+                # 否则 apply.json 里给个 pinned id 就能绕过防线
+                if m.get("pinned"):
+                    applied["rejected"].append(f"拒绝淡忘 {sid}：用户置顶的记忆不参与做梦淡忘")
+                    continue
                 m["layer"] = "dust"
                 m["forgotten_at"] = now_ts()
                 applied["forgotten"] += 1
