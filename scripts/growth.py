@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1089,10 +1090,10 @@ def _fetch_tree_source(api_base: str, branch: str, label: str, host: str) -> Pat
     """
     import base64
     cache = _remote_cache_dir()
-    extract_root = cache / "extracted"
-    if extract_root.exists():
-        shutil.rmtree(extract_root, ignore_errors=True)
-    extract_root.mkdir(parents=True, exist_ok=True)
+    staging = cache / "staging"
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
 
     tree = _remote_api(f"{api_base}/git/trees/{branch}?recursive=1", host)
     if tree.get("truncated"):
@@ -1116,15 +1117,18 @@ def _fetch_tree_source(api_base: str, branch: str, label: str, host: str) -> Pat
         if blob.get("encoding") != "base64":
             raise RuntimeError(f"{label} 返回内容编码异常：{path}")
         data = base64.b64decode(blob.get("content", ""))
-        target = extract_root / path
+        target = staging / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         n += 1
         if n > 500:
             raise RuntimeError("文件数异常（>500），可能指错仓库，已停止")
-    if not (extract_root / "SKILL.md").is_file():
+    if not (staging / "SKILL.md").is_file():
         raise RuntimeError(f"{label} 拉取结果里找不到 SKILL.md（可能仓库结构变了）")
-    return extract_root
+    # 全部文件拉完并校验通过后才替换正式缓存：中途失败只会留下 staging 残渣，
+    # 下次拉取会先清掉它，绝不会把半截源当有效缓存复用。
+    _atomic_replace_dir(staging, cache / "extracted")
+    return cache / "extracted"
 
 
 def _fetch_gitee_zip_source() -> Path:
@@ -1136,10 +1140,10 @@ def _fetch_gitee_zip_source() -> Path:
     import zipfile
     import tempfile
     cache = _remote_cache_dir()
-    extract_root = cache / "extracted"
-    if extract_root.exists():
-        shutil.rmtree(extract_root, ignore_errors=True)
-    extract_root.mkdir(parents=True, exist_ok=True)
+    staging = cache / "staging"
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(suffix=".zip", dir=str(cache))
     try:
         req = _urlreq.Request(GITEE_ZIP_URL, headers={
@@ -1151,14 +1155,22 @@ def _fetch_gitee_zip_source() -> Path:
             if f.read(4) != b"PK\x03\x04":
                 raise RuntimeError("Gitee zip 归档签名校验失败（拿到的是 HTML 风控页）")
         with zipfile.ZipFile(tmp) as zf:
-            zf.extractall(extract_root)
+            zf.extractall(staging)
         # Gitee 归档带一层顶层目录，定位含 SKILL.md 的真实根。
-        if (extract_root / "SKILL.md").is_file():
-            return extract_root
-        for d in sorted(extract_root.iterdir()):
-            if d.is_dir() and (d / "SKILL.md").is_file():
-                return d
-        raise RuntimeError("Gitee zip 归档解压后找不到 SKILL.md")
+        if (staging / "SKILL.md").is_file():
+            real_root = staging
+        else:
+            real_root = next(
+                (d for d in sorted(staging.iterdir())
+                 if d.is_dir() and (d / "SKILL.md").is_file()), None)
+        if real_root is None:
+            raise RuntimeError("Gitee zip 归档解压后找不到 SKILL.md")
+        # 全部校验通过后才替换正式缓存（防止半截解压被当成有效缓存复用）。
+        if real_root is staging:
+            _atomic_replace_dir(staging, cache / "extracted")
+        else:
+            _atomic_replace_dir(real_root, cache / "extracted")
+        return cache / "extracted"
     except _urlreq.HTTPError as e:
         if e.code == 403:
             raise RuntimeError("Gitee 归档直下也被风控（403）") from e
@@ -1170,6 +1182,32 @@ def _fetch_gitee_zip_source() -> Path:
             pass
 
 
+def _atomic_replace_dir(src: Path, dst: Path) -> None:
+    """把 staging 目录原子替换为正式缓存目录。
+
+    Windows 的 Path.rename 不能覆盖已存在的目录，所以顺序是：先把旧目录挪到
+    .old（挪不动说明有进程正占用，退化为直接删），再 rename staging 进来，
+    最后清掉 .old。任何一步失败都不会让 dst 处于半截状态。
+    """
+    old = dst.parent / (dst.name + ".old")
+    if old.exists():
+        shutil.rmtree(old, ignore_errors=True)
+    if dst.exists():
+        try:
+            dst.rename(old)
+        except OSError:
+            shutil.rmtree(dst, ignore_errors=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)
+    if old.exists():
+        shutil.rmtree(old, ignore_errors=True)
+
+
+# 远程拉取串行化：面板多线程同时点「检查更新/更新」时，两个线程会同时
+# rmtree / mkdir / rename 同一个缓存目录互相踩踏，这里用模块级锁整体串行。
+_remote_lock = threading.Lock()
+
+
 def _lingshu_remote_source(force: bool = False) -> tuple[Path | None, str, str]:
     """获取远程源目录：先 Gitee，失败再 GitHub。返回 (路径, 来源, 错误说明)。
 
@@ -1177,7 +1215,13 @@ def _lingshu_remote_source(force: bool = False) -> tuple[Path | None, str, str]:
     失败时路径为 None（调用方降级），错误说明是给用户看的可读信息。复用缓存
     目录里已拉取的源（同一会话内不重复下载），force=True 强制重新拉取（点
     「更新」时用，确保拿到最新代码）。缓存有效性以是否解压出 SKILL.md 为准。
+    整个拉取过程持 _remote_lock 串行，防止并发线程互踩缓存目录。
     """
+    with _remote_lock:
+        return _lingshu_remote_source_locked(force)
+
+
+def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     cache = _remote_cache_dir()
     cached = cache / "extracted"
     if (cached / "SKILL.md").is_file() and not force:
