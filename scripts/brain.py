@@ -641,6 +641,8 @@ def bulk_memory_action(ids: list, action: str, value=None) -> dict:
                 m["forgotten_at"] = now_ts()
                 m["review"] = "discarded"
             elif action == "importance":
+                # 刻度约定：>1 视为 10 分制（如 8 → 0.8），≤1 视为 0-1 小数。
+                # 0.1~1 之间是合法小数；正好 1 当作满分 1.0（10 分制不会写 1）
                 m["importance"] = round(max(0.0, min(1.0, imp_val / 10 if imp_val > 1 else imp_val)), 3)
             elif action == "add_tags":
                 cur = [str(t) for t in (m.get("tags") or [])]
@@ -987,7 +989,9 @@ def _strengthen_write(touched: list) -> None:
     """
     if READONLY or not touched:
         return
-    patch_fields = ("access_count", "stability", "last_access", "detail")
+    patch_fields = ("access_count", "stability", "last_access")
+    # detail 已从 patch 字段剔除：快照是锁外旧值，dream 淡化该记忆后写回旧 detail
+    # 会把淡化抵消掉。强化只碰访问统计，不改内容。
     with _locked(HOME / "hippocampus.jsonl"):
         updates: dict = {}
         for m in touched:
@@ -1994,6 +1998,7 @@ def emotion_modify(n: int, emotion: str = "", intensity: float | None = None,
     """微调一条历史情绪事件（序号从最新往前数：1 = 最新一条）。
 
     模型把情绪判错时，不用整条删掉重来：直接改强度/情绪名/原因，保留时间线。
+    锁内重读排序：序号定位与修改同一把锁内完成，并发 feel 追加不会错位改错条。
     """
     if READONLY:
         raise PermissionError("记忆库当前只读，无法修改情绪事件。")
@@ -2134,6 +2139,8 @@ def feel(name: str, intensity: float = 0.6, why: str = "",
     if suppressed:
         ev["intensity"] = round(ev["intensity"] * 0.4, 3)
         ev["suppressed_by"] = cfg.get("notes") or "情感设置里被我自己抑制"
+    # 写入与序号定位共用一把锁：emotion adjust/del 的"第 n 条"以锁内看到的
+    # 最新状态为准，并发 feel 追加不会让序号错位改/删错条（append 收进锁内）。
     with _locked(HOME / "emotions.jsonl"):
         rows = read_jsonl(HOME / "emotions.jsonl")
         rows.append(ev)
@@ -4050,7 +4057,8 @@ def read_user_rules() -> list:
 def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
     ensure_home()
     cfg = load_config()
-    budget = budget_tokens or _cfg_num(cfg, "budget_tokens", 1400, int)
+    # budget 0/负数按 1 兜底：`budget_tokens or ...` 会把 0 静默吞掉，负数则算出负 char_budget
+    budget = budget_tokens if isinstance(budget_tokens, int) and budget_tokens > 0 else _cfg_num(cfg, "budget_tokens", 1400, int)
     char_budget = int(budget * 1.8)
     p = load_persona()
     session_mode = resolve_mode(query)
@@ -4158,10 +4166,11 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
         header = "\n## 最近的记忆"
     lines = []
     for m, score, _ in mems:
+        # append 之后累计再判：append 前判会把"当前这行自身"的长度漏算，实际可超预算一行
+        lines.append(f"- [{fmt_date(m.get('created', 0))} {'★' * max(1, round(_num(m.get('importance'), 0.5) * 5))}] {display_text(m)}")
         if used + lines_join_len(lines) > char_budget * 0.75:
+            lines.pop()   # 超预算：这行不放，留一条整记忆不切半
             break
-        star = "★" * max(1, round(_num(m.get("importance"), 0.5) * 5))
-        lines.append(f"- [{fmt_date(m.get('created', 0))} {star}] {display_text(m)}")
     if lines:
         out.append(header)
         out.extend(lines)

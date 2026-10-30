@@ -1508,7 +1508,12 @@ function graphHit(x, y){
 
 function initGraphInteractions(){
   const canvas = $("graph-canvas"); if (!canvas) return;
-  let dragging = false, lastX = 0, lastY = 0;
+  let dragging = false, lastX = 0, lastY = 0, _gRaf = null;
+  // pointermove 每次都全量重绘（600 节点投影），低配机会卡——按帧合并，一帧最多画一次
+  const scheduleGraph = () => {
+    if (_gRaf) return;
+    _gRaf = requestAnimationFrame(() => { _gRaf = null; renderGraph(); });
+  };
   canvas.addEventListener("pointerdown", e => {
     dragging = true; lastX = e.clientX; lastY = e.clientY;
     canvas.style.cursor = "grabbing";
@@ -1520,11 +1525,11 @@ function initGraphInteractions(){
       GRAPH.pitch = Math.max(-1.4, Math.min(1.4, GRAPH.pitch + (e.clientY - lastY) * 0.006));
       lastX = e.clientX; lastY = e.clientY;
       stopGraphAnim();
-      renderGraph();
+      scheduleGraph();
     } else {
       const rect = canvas.getBoundingClientRect();
       GRAPH.hover = graphHit(e.clientX - rect.left, e.clientY - rect.top);
-      renderGraph();
+      scheduleGraph();
     }
   });
   const endDrag = e => {
@@ -2055,10 +2060,14 @@ document.addEventListener("click", (e) => {
 const dshFilter = $("dsh-plugins-filter");
 if (dshFilter) dshFilter.addEventListener("input", () => renderDshPlugins());
 
-$("search").addEventListener("input", scheduleMemList);
+// 搜索词非空时，筛选器变更不刷新普通列表——否则用户搜完一改筛选，
+// 结果被静默换回普通列表，以为搜索丢了。清空搜索词即恢复。
+$("search").addEventListener("input", () => { if (!$("search").value.trim()) scheduleMemList(); });
 $("search").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
-["layerFilter", "impFilter", "timeFilter", "sortFilter"].forEach(id => $(id).addEventListener("change", scheduleMemList));
-["tagFilter", "emoFilter"].forEach(id => $(id).addEventListener("input", scheduleMemList));
+["layerFilter", "impFilter", "timeFilter", "sortFilter"].forEach(id =>
+  $(id).addEventListener("change", () => { if (!$("search").value.trim()) scheduleMemList(); }));
+["tagFilter", "emoFilter"].forEach(id =>
+  $(id).addEventListener("input", () => { if (!$("search").value.trim()) scheduleMemList(); }));
 $("btn-search").addEventListener("click", doSearch);
 $("btn-inject").addEventListener("click", openInject);
 $("btn-conflicts").addEventListener("click", loadConflicts);
