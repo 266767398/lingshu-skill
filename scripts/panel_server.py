@@ -88,8 +88,12 @@ def overview() -> dict:
                                "content": f.read_text(encoding="utf-8")[:3000]})
             except (OSError, ValueError):
                 continue
+    st = _safe("stats", brain.stats, {}) or {}
     return {
-        "stats": _safe("stats", brain.stats, {}),
+        "stats": st,
+        # 层分布统计条用：各层记忆数（含归档），纯计数不做降级分支
+        "layer_counts": {"hippo": st.get("hippo", 0), "cortex": st.get("cortex", 0),
+                         "dust": st.get("dust", 0), "archive": st.get("archive", 0)},
         "persona": _safe("persona", lambda: _persona_view(), {}),
         "memories": memories,
         "dreams": dreams,

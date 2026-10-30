@@ -599,13 +599,16 @@ def bulk_memory_action(ids: list, action: str, value=None) -> dict:
       confirm / discard      —— 审核转正 / 废弃（移入淡忘区）
       importance             —— 批量设置重要性（value: 0-1 或 0-10）
       add_tags / remove_tags —— 批量加 / 删标签（value: list[str]）
+      pin / unpin            —— 批量置顶 / 取消置顶
+      delete                 —— 批量移入淡忘区（同 forget，不真删，可回捞）
     """
     if READONLY:
         raise PermissionError("记忆库当前只读，无法批量修改。")
     ids = [str(x) for x in (ids or []) if str(x).strip()]
     if not ids:
         raise ValueError("没有选中任何记忆")
-    if action not in ("confirm", "discard", "importance", "add_tags", "remove_tags"):
+    if action not in ("confirm", "discard", "importance", "add_tags", "remove_tags",
+                      "pin", "unpin", "delete"):
         raise ValueError("不支持的批量操作")
     # 预校验参数：坏值在动库之前就报清楚，别让 float(None) 之类变成 500
     imp_val = None
@@ -644,6 +647,15 @@ def bulk_memory_action(ids: list, action: str, value=None) -> dict:
                 # 刻度约定：>1 视为 10 分制（如 8 → 0.8），≤1 视为 0-1 小数。
                 # 0.1~1 之间是合法小数；正好 1 当作满分 1.0（10 分制不会写 1）
                 m["importance"] = round(max(0.0, min(1.0, imp_val / 10 if imp_val > 1 else imp_val)), 3)
+            elif action == "pin":
+                m["pinned"] = True
+            elif action == "unpin":
+                m["pinned"] = False
+            elif action == "delete":
+                if m.get("layer") != "dust":
+                    m["layer"] = "dust"
+                    m["forgotten_at"] = now_ts()
+                    m["detail"] = round(max(0.15, _num(m.get("detail"), 1.0) * 0.5), 2)
             elif action == "add_tags":
                 cur = [str(t) for t in (m.get("tags") or [])]
                 for t in tag_list:

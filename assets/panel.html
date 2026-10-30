@@ -102,6 +102,15 @@
   }
   .mem:hover{border-color:#2c343f;transform:translateY(-1px)}
   .mem + .mem{margin-top:8px}
+  .tl-date{color:var(--teal);font-size:12px;font-weight:600;letter-spacing:1px;margin:18px 0 8px;padding-left:9px;border-left:3px solid var(--teal);font-variant-numeric:tabular-nums}
+  .tl-date:first-child{margin-top:0}
+  .layer-bar-track{display:flex;height:12px;border-radius:99px;overflow:hidden;background:#1b2129}
+  .layer-bar-track i{display:block;height:100%;transition:width .3s;min-width:2px}
+  .layer-bar-legend{display:flex;gap:14px;margin-top:7px;font-size:11px;color:var(--muted);flex-wrap:wrap}
+  .layer-bar-legend b{font-weight:500}
+  .layer-bar-legend .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:baseline}
+  .mem-check{opacity:0;transition:opacity .15s;accent-color:var(--amber);cursor:pointer;flex-shrink:0}
+  .mem:hover .mem-check, .mem-check:checked{opacity:1}
   .ring{
     --p:50;width:40px;height:40px;flex-shrink:0;border-radius:50%;
     background:conic-gradient(var(--amber) calc(var(--p) * 1%), #1e242c 0);
@@ -368,6 +377,7 @@
           <option value="retention">按记忆强度</option>
         </select>
         <button class="ghost" id="btn-search">回忆</button>
+        <button class="ghost" id="btn-viewmode" title="切换列表 / 时间线视图">▤ 时间线</button>
         <button class="ghost" id="btn-inject">注入预览</button>
         <button class="ghost" id="btn-conflicts">冲突检查</button>
         <button class="btn" id="btn-add">＋ 写一条</button>
@@ -384,7 +394,11 @@
         <input id="bulk-tag" placeholder="标签，逗号分隔" style="width:150px">
         <button class="ghost" id="bulk-tag-add">批量加标签</button>
         <button class="ghost" id="bulk-tag-rm">批量删标签</button>
+        <button class="ghost" id="bulk-pin">批量置顶</button>
+        <button class="ghost" id="bulk-unpin">批量取消置顶</button>
+        <button class="ghost" id="bulk-delete" style="color:var(--red)">批量删除</button>
       </div>
+      <div id="layer-bar" class="card" style="margin-bottom:14px;padding:10px 16px" title="记忆库各层分布"></div>
       <div class="card hidden" id="conflict-box" style="margin-bottom:14px;border-color:rgba(201,107,95,.4)">
         <h2>可能冲突的记忆</h2>
         <div class="sub" style="margin-bottom:8px">启发式扫描，只做提醒、不下结论。确认哪条过时后，手动淡忘或改写它。</div>
@@ -1034,6 +1048,7 @@ function renderOverview(){
   $("m-hippo").textContent = st.hippo ?? 0;
   $("m-archive").textContent = st.archive ?? 0;
   $("m-ret").textContent = Math.round((st.avg_retention || 0) * 100) + "%";
+  renderLayerBar();
   const rc = ov.review_counts || {};
   const rcTotal = (rc.memories || 0) + (rc.knowledge || 0) + (rc.persona || 0);
   $("sidefoot").innerHTML = `<b>记忆库</b><br>${esc(ov.home || st.home || "")}<br><br><b>人格档案</b><br>persona.json`
@@ -2081,10 +2096,66 @@ async function renderMemoryList(){
     const rows = await api("/api/memories?" + p.toString());
     if (seq !== _memSeq) return;   // 已有更新的请求在路上，丢弃这次旧结果，防止乱序覆盖
     indexMemories(rows);
-    $("mem-list").innerHTML = rows.length ? rows.map(memCard).join("")
-      : `<div class="empty">没有匹配的记忆。放宽筛选，或者按回车做一次模糊回忆。</div>`;
-    bulkUpdateCount();
+    S.memRows = rows;
+    renderMemRows(rows);
   } catch (e) { toast(e.message, true); }
+}
+
+// 列表 / 时间线渲染：同一批卡片，时间线模式按日期（created）分组加日期组头
+function memDay(m){
+  const ts = Number(m.created) * 1000;
+  if (!Number.isFinite(ts) || ts <= 0) return "未知日期";
+  const d = new Date(ts);
+  const p2 = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+}
+function renderMemRows(rows){
+  if (!rows.length) {
+    $("mem-list").innerHTML = `<div class="empty">没有匹配的记忆。放宽筛选，或者按回车做一次模糊回忆。</div>`;
+    return;
+  }
+  if (S.memView !== "timeline") {
+    $("mem-list").innerHTML = rows.map(memCard).join("");
+    bulkUpdateCount();
+    return;
+  }
+  const html = [];
+  let curDay = null;
+  rows.forEach(m => {
+    const day = memDay(m);
+    if (day !== curDay) { curDay = day; html.push(`<div class="tl-date">${esc(day)}</div>`); }
+    html.push(memCard(m));
+  });
+  $("mem-list").innerHTML = html.join("");
+  bulkUpdateCount();
+}
+$("btn-viewmode").addEventListener("click", () => {
+  S.memView = S.memView === "timeline" ? "list" : "timeline";
+  $("btn-viewmode").textContent = S.memView === "timeline" ? "▤ 列表" : "▤ 时间线";
+  renderMemRows(S.memRows || []);
+});
+
+// 层分布统计条：overview 的 layer_counts（hippo/cortex/dust + 归档）
+function renderLayerBar(){
+  const bar = $("layer-bar"); if (!bar) return;
+  const lc = (S.ov && S.ov.layer_counts) || {};
+  const defs = [
+    ["cortex", "长期记忆", "var(--amber)"],
+    ["hippo", "短期记忆", "var(--teal)"],
+    ["dust", "淡忘区", "var(--faint)"],
+    ["archive", "归档层", "#8f92b8"]
+  ];
+  const total = defs.reduce((s, [k]) => s + (Number(lc[k]) || 0), 0);
+  if (!total) { bar.innerHTML = `<span class="sub">记忆库还是空的，先写一条吧。</span>`; return; }
+  const segs = defs.map(([k, label, color]) => {
+    const n = Number(lc[k]) || 0;
+    return `<i style="width:${(n / total * 100).toFixed(2)}%;background:${color}" title="${label} ${n} 条"></i>`;
+  }).join("");
+  const legend = defs.map(([k, label, color]) => {
+    const n = Number(lc[k]) || 0;
+    return `<span><span class="dot" style="background:${color}"></span>${label} <b>${n}</b>（${Math.round(n / total * 100)}%）</span>`;
+  }).join("");
+  bar.innerHTML = `<div class="layer-bar-track">${segs}</div><div class="layer-bar-legend">${legend}</div>`;
 }
 
 async function doSearch(){
@@ -2638,6 +2709,18 @@ function bulkTags(rm){
 }
 $("bulk-tag-add").addEventListener("click", () => bulkTags(false));
 $("bulk-tag-rm").addEventListener("click", () => bulkTags(true));
+$("bulk-pin").addEventListener("click", () => bulkRun("pin", null, null));
+$("bulk-unpin").addEventListener("click", () => bulkRun("unpin", null, null));
+$("bulk-delete").addEventListener("click", () => bulkRun("delete", null, "把选中的记忆全部移入淡忘区？可从淡忘区回捞。"));
+
+// ---- "/" 快捷键：非输入框聚焦时，聚焦记忆页搜索框
+document.addEventListener("keydown", e => {
+  if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+  e.preventDefault();
+  $("search").focus();
+});
 
 // ---- 会话模式判定预览
 $("btn-mode-try").addEventListener("click", async () => {
