@@ -204,6 +204,17 @@
     main{padding:20px}
     .cols-2,.cols-4,.split{grid-template-columns:1fr}
     .metrics{gap:16px}
+    /* 窄屏：图详情卡改为底部悬浮条，不挡星图主体 */
+    #graph-detail{left:12px;right:12px;top:auto;bottom:12px;width:auto;max-height:45%}
+    #graph-canvas{height:420px !important}
+    header{flex-direction:column;align-items:flex-start}
+  }
+  @media(max-width:600px){
+    main{padding:14px}
+    .toolbar input,.toolbar select{flex:1;min-width:130px}
+    .mem{padding:12px}
+    .hero .name{font-size:21px}
+    .mood-big{font-size:32px}
   }
 
     .kg-title{margin:2px 0 6px;font-size:15px;font-weight:600}
@@ -599,6 +610,13 @@
             </div>
           </div>
           <div class="row" style="margin-left:auto;flex-wrap:wrap">
+            <input id="graph-search" placeholder="搜索记忆定位节点…" style="width:170px">
+            <select id="graph-layer" style="width:96px">
+              <option value="">全部层</option>
+              <option value="cortex">长期</option>
+              <option value="hippo">短期</option>
+              <option value="dust">淡忘</option>
+            </select>
             <select id="graph-limit" style="width:110px">
               <option value="120">120 节点</option>
               <option value="300" selected>300 节点</option>
@@ -1304,6 +1322,7 @@ async function loadGraph(limit){
   $("graph-neighbors").innerHTML = "点一个节点，看它连着什么。";
   $("graph-detail").classList.add("hidden");
   GRAPH.selected = null; GRAPH.hover = null; GRAPH.nbrs = null;
+  GRAPH.searchHits = null; GRAPH.searchPos = 0;
   stopGraphAnim();
   GRAPH.focus = {x: 0, y: 0, z: 0}; GRAPH.target = {x: 0, y: 0, z: 0};
   GRAPH.targetDist = 360;
@@ -1388,9 +1407,14 @@ function renderGraph(){
   ctx.clearRect(0, 0, W, H);
   const cx = W / 2, cy = H / 2;
   const nodes = GRAPH.data.nodes, edges = GRAPH.data.edges;
+  // 层筛选：选定层之外全部隐藏（边两端都可见才画）
+  const visible = GRAPH.layerFilter
+    ? nodes.map((n, i) => (n.layer === GRAPH.layerFilter ? i : -1)).filter(i => i >= 0)
+    : null;
+  const visSet = visible ? new Set(visible) : null;
   const proj = GRAPH.pos.map(project);
   const shown = new Set();
-  proj.forEach((p, i) => { if (p.z < GRAPH.dist * 0.9 && p.s > 0.12) shown.add(i); });
+  proj.forEach((p, i) => { if ((!visSet || visSet.has(i)) && p.z < GRAPH.dist * 0.9 && p.s > 0.12) shown.add(i); });
 
   // 注意力焦点：选中的节点 + 它的直接邻居被"点亮"，其余压暗（激活扩散 / 侧抑制）
   const sel = GRAPH.selected;
@@ -1434,6 +1458,11 @@ function renderGraph(){
       ctx.beginPath(); ctx.arc(cx + p.x, cy + p.y, r + 6, 0, Math.PI * 2);
       ctx.strokeStyle = "rgba(233,196,106,.5)"; ctx.lineWidth = 1.5; ctx.stroke();
     }
+    // 搜索命中：青色描边标记
+    if (GRAPH.searchHits && GRAPH.searchHits.includes(i)){
+      ctx.beginPath(); ctx.arc(cx + p.x, cy + p.y, r + 3.5, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(95,168,160,.9)"; ctx.lineWidth = 1.5; ctx.stroke();
+    }
     ctx.beginPath(); ctx.arc(cx + p.x, cy + p.y, focusHit ? r + 2 : r, 0, Math.PI * 2);
     ctx.fillStyle = focusHit ? "#f2efe6" : base;
     ctx.fill();
@@ -1456,6 +1485,33 @@ function renderGraph(){
       : "总记忆 " + nodes.length + " · 拖动旋转");
 }
 
+// 搜索定位：按 gist/id 找节点，选中并聚焦到它；回车循环看下一条
+function graphSearch(q, advance){
+  const data = GRAPH.data; if (!data || !GRAPH.loaded) return;
+  q = (q || "").trim().toLowerCase();
+  if (!q){ GRAPH.searchHits = null; GRAPH.searchPos = 0; renderGraph(); return; }
+  const hits = [];
+  data.nodes.forEach((n, i) => {
+    if (GRAPH.layerFilter && n.layer !== GRAPH.layerFilter) return;
+    if ((n.gist || "").toLowerCase().includes(q) || (n.id || "").toLowerCase().includes(q)) hits.push(i);
+  });
+  GRAPH.searchHits = hits;
+  if (hits.length){
+    if (advance) GRAPH.searchPos = ((GRAPH.searchPos || 0) + 1) % hits.length;
+    else GRAPH.searchPos = 0;
+    pickGraphNode(hits[GRAPH.searchPos]);
+    if (!advance) toast(`找到 ${hits.length} 条匹配，已定位第 1 条（回车看下一条）`);
+  } else {
+    GRAPH.searchPos = 0;
+    toast("没有匹配的记忆节点", true);
+    renderGraph();
+  }
+}
+// 层筛选：只显示选定层的节点（空 = 全部）
+function graphLayerFilter(){
+  GRAPH.layerFilter = $("graph-layer").value || null;
+  renderGraph();
+}
 function docsOf(n){
   return `${n.gist ? n.gist.slice(0, 40) : ""}${n.kind ? " · " + n.kind : ""} · 重要 ${Math.round((n.importance || 0) * 100)}% · ${LAYER[n.layer] || n.layer || ""}${n.emotion ? ` · ♡ ${n.emotion}` : ""}`;
 }
@@ -1488,16 +1544,21 @@ async function pickGraphNode(i){
   try {
     const r = await api("/api/assoc?id=" + encodeURIComponent(n.id));
     const nbrs = r.neighbors || [];
+    // id → 节点索引，邻居卡片可点击直接跳转到那个节点
+    const idxById = new Map(nodes.map((x, i) => [x.id, i]));
     $("graph-neighbors").innerHTML = nbrs.length
-      ? nbrs.map(x => `<div class="mem" style="margin-top:6px;padding:10px 12px">
+      ? nbrs.map(x => {
+          const j = idxById.get(x.id);
+          return `<div class="mem" data-node="${j != null ? j : ""}" data-mid="${esc(x.id || "")}" style="margin-top:6px;padding:10px 12px;${j != null ? "cursor:pointer" : ""}">
           <div class="mem-body"><div class="mem-top">
             <span class="badge">${esc(x.relation || "相关")}</span>
             <span class="sub" style="margin-left:auto">权重 ${Math.round((x.weight || 1) * 100) / 100}</span>
           </div>
           <p style="font-size:12.5px">${esc(x.gist || "")}</p>
           ${x.why ? `<div class="sub" style="font-size:11px;color:var(--faint)">${esc(x.why)}</div>` : ""}
-        </div></div>`).join("")
-      : `<div class="empty" style="padding:18px">这条记忆还没连上谁。在记忆列表里找两条相关的，去命令行 <code>assoc link</code> 连起来。</div>`;
+        </div></div>`;
+        }).join("")
+      : `<div class="empty" style="padding:18px">这条记忆还没连上谁。点「自动联想」按共享实体/标签批量补边。</div>`;
   } catch (err) {
     $("graph-neighbors").innerHTML = `<div class="sub">${esc(err.message)}</div>`;
   }
@@ -1511,6 +1572,7 @@ function graphHit(x, y){
   const proj = GRAPH.pos.map(project);
   let best = null, bestD = 14;
   nodes.forEach((n, i) => {
+    if (GRAPH.layerFilter && n.layer !== GRAPH.layerFilter) return;   // 被筛选掉的层点不到
     const p = proj[i], r = (3 + (n.importance || 0.5) * 11) * Math.max(0.4, p.s);
     const dx = x - (cx + p.x), dy = y - (cy + p.y);
     const d = Math.sqrt(dx * dx + dy * dy);
@@ -2377,6 +2439,31 @@ if (btnGa) btnGa.addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 $("graph-limit").addEventListener("change", () => loadGraph(Number($("graph-limit").value || 300)));
+// 图内搜索：输入即定位（300ms 防抖），回车看下一个命中
+let _gsTimer = null;
+$("graph-search").addEventListener("input", e => {
+  clearTimeout(_gsTimer);
+  _gsTimer = setTimeout(() => graphSearch(e.target.value, false), 300);
+});
+$("graph-search").addEventListener("keydown", e => {
+  if (e.key === "Enter"){ e.preventDefault(); graphSearch(e.target.value, true); }
+  if (e.key === "Escape"){ e.target.value = ""; graphSearch("", false); e.target.blur(); }
+});
+$("graph-layer").addEventListener("change", graphLayerFilter);
+// 邻居明细卡片：点卡片=跳到那个节点（不在图里就提示去记忆页搜）
+$("graph-neighbors").addEventListener("click", e => {
+  const card = e.target.closest(".mem[data-node]");
+  if (!card) return;
+  const j = card.dataset.node;
+  if (j !== "" && GRAPH.data && GRAPH.data.nodes[j]){
+    if (GRAPH.layerFilter && GRAPH.data.nodes[j].layer !== GRAPH.layerFilter){
+      $("graph-layer").value = ""; graphLayerFilter();   // 先解除层筛选再跳
+    }
+    pickGraphNode(Number(j));
+  } else if (card.dataset.mid){
+    toast("该记忆不在当前图中（不在前 " + $("graph-limit").value + " 条），去「记忆」页搜索它的 id 查看");
+  }
+});
 
 $("btn-dream").addEventListener("click", async () => {
   const btn = $("btn-dream");
