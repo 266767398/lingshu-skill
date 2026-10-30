@@ -90,7 +90,7 @@ def overview() -> dict:
                 continue
     return {
         "stats": _safe("stats", brain.stats, {}),
-        "persona": _safe("persona", brain.load_persona, {}),
+        "persona": _safe("persona", lambda: _persona_view(), {}),
         "memories": memories,
         "dreams": dreams,
         "pending": _safe("pending", brain.load_dream_pending, []),
@@ -116,6 +116,15 @@ def overview() -> dict:
         "log_summary": _safe("log_summary", _log_summary, {"warn": 0, "error": 0}),
         "home": str(brain.HOME),
     }
+
+
+def _persona_view() -> dict:
+    """完整人格 + 回归后的 state（energy/closeness 读时向基线懒回归，不写盘）。"""
+    p = brain.load_persona()
+    st = p.get("state") or {}
+    if st:
+        p["state"] = brain._state_regress(st)
+    return p
 
 
 def _created_key(m: dict):
@@ -523,6 +532,9 @@ class Handler(BaseHTTPRequestHandler):
                 with brain._locked(brain.HOME / "persona.json"):
                     p = brain.load_persona()
                     st = p.setdefault("state", {})
+                    # 先按时间结算衰减（精力回升/亲密回淡），再叠加面板新值，口径与读路径一致
+                    regressed = brain._state_regress(st)
+                    st.update(regressed)
                     for key in ("mood", "mood_note"):
                         if key in data:
                             st[key] = data[key]

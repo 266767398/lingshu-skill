@@ -2761,6 +2761,23 @@ setInterval(() => {
   $("clock").textContent = new Date().toLocaleString("zh-CN", {hour12: false});
 }, 1000);
 
+// 数值自动刷新：心情/六欲/记忆保留率都是"读时按时间衰减"的活数值，
+// 静态加载的话面板永远停在打开那一刻。每 30s 轻量拉一次 overview
+// （纯读接口），情绪回落、欲望恢复在面板上会自己动起来。
+// 用户正在编辑状态输入时跳过，避免滑块被后台刷新拽走。
+setInterval(async () => {
+  if (!S.ov || document.hidden) return;
+  const editing = ["st-mood", "st-note", "st-energy", "st-closeness"]
+    .some(id => document.activeElement === $(id));
+  if (editing) return;
+  try {
+    const seq = ++_ovSeq;
+    S.ov = await api("/api/overview");
+    if (seq !== _ovSeq) return;
+    renderOverview();
+  } catch (e) { /* 后台轮询静默失败，不打扰 */ }
+}, 30000);
+
 load();
 
 // ---- 灵枢本体更新：开面板自动查一次 + 右上角按钮手动查

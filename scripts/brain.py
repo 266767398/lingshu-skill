@@ -2236,6 +2236,42 @@ def mood_record_ema(m: dict) -> None:
         log_event("mood", f"心境 EMA 落盘失败：{e}", level="warn")
 
 
+# 状态的"生活惯性"：精力会慢慢恢复，亲密度久不见会淡淡疏远——
+# 读时向基线回归（不写盘，与六欲衰减同思路），有事件触碰时才真正落盘。
+ENERGY_BASELINE = 70          # 精力基线：睡一觉总能缓回来
+ENERGY_REGEN_PER_DAY = 10     # 每天向基线回 10 分
+CLOSENESS_BASELINE = 50       # 亲密度基线：久不联系会淡，但不会归零
+CLOSENESS_DECAY_PER_DAY = 0.5 # 每天向基线回 0.5 分（淡得慢）
+STATE_REGRESS_FLOOR_DAYS = 30 # 超过一个月没更新，回归到基线为止（彻底淡了）
+
+
+def _state_regress(st: dict, at: float | None = None) -> dict:
+    """把 state.energy / state.closeness 按距上次更新的时间向基线回归。
+
+    返回 {energy, closeness, updated}；未初始化（None）原样返回 None。
+    懒计算不写盘：写路径（persona/state 面板保存、update_persona）内部已先结算
+    衰减再写新值，口径一致。
+    """
+    now = at or now_ts()
+    updated = _num(st.get("updated"), now)
+    days = max(0.0, (now - updated) / DAY)
+    out = {"energy": st.get("energy"), "closeness": st.get("closeness"),
+           "updated": updated}
+    if st.get("energy") is not None:
+        base, per_day = ENERGY_BASELINE, ENERGY_REGEN_PER_DAY
+        eff_days = min(days, STATE_REGRESS_FLOOR_DAYS)
+        gap = base - _num(st.get("energy"), base)
+        step = min(abs(gap), eff_days * per_day)
+        out["energy"] = round(_num(st.get("energy"), base) + (step if gap > 0 else -step), 1)
+    if st.get("closeness") is not None:
+        base, per_day = CLOSENESS_BASELINE, CLOSENESS_DECAY_PER_DAY
+        eff_days = min(days, STATE_REGRESS_FLOOR_DAYS)
+        gap = base - _num(st.get("closeness"), base)
+        step = min(abs(gap), eff_days * per_day)
+        out["closeness"] = round(_num(st.get("closeness"), base) + (step if gap > 0 else -step), 1)
+    return out
+
+
 def mood_brief() -> str:
     """给注入用的一句话心情摘要。"""
     m = mood_now()
