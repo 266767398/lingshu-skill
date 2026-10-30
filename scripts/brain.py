@@ -501,7 +501,12 @@ def pending_memory_reviews() -> list:
 
 
 def ai_persona_changes(days: int = 7) -> list:
-    """最近 N 天里由 AI（非手动）发起的人格变更，用于溯源与漂移告警。"""
+    """最近 N 天里由 AI（非手动）发起的人格变更，用于溯源与漂移告警。
+
+    注意：做梦 traits 微调没过漂移门限也会写 history（field 带 "(漂移累积)"
+    后缀、to 写"未过门限/未变"）——那些行什么都没改，不算 AI 改动，
+    否则审核清单和漂移告警会被一堆"没生效的记账"撑得动不动就偏大。
+    """
     p = load_persona()
     cutoff = now_ts() - days * 86400
     out = []
@@ -510,6 +515,14 @@ def ai_persona_changes(days: int = 7) -> list:
             continue
         src = str(h.get("source", ""))
         why = str(h.get("why", ""))
+        field = str(h.get("field", ""))
+        to = h.get("to")
+        # 没真正改的记账行：字段带括号注记（如 "traits.幽默(漂移累积)"），
+        # 或 to 是"未过门限/未变/撞在边界上"这类说明文字而非实际新值
+        if "(" in field:
+            continue
+        if isinstance(to, str) and ("未过门限" in to or "未变" in to or "边界" in to):
+            continue
         # 优先看 source 字段（比 why 可靠）；用户自己说的（初识回答、手动编辑、
         # 回滚、面板保存）不算 AI 私改
         if src:
@@ -2233,10 +2246,15 @@ def _mood_ema(m: dict) -> dict:
         _num(ema.get("arousal"), m["arousal"]) * (1 - MOOD_EMA_ALPHA)
         + m["arousal"] * MOOD_EMA_ALPHA)), 3)
     out = dict(m)
+    raw_v, raw_a = m["valence"], m["arousal"]
     out["valence"], out["arousal"] = v, a
     out["label"] = _mood_label(v, a)
+    # 透明度：把"平滑前的真实感受"一并带回，注入给 AI/面板——
+    # 手感隔层的问题大多出在只看到折过的心境、看不到瞬时情绪；两行都给，
+    # 防线照旧（心境仍按 EMA 慢慢走），但 AI 能说清"我现在感觉X，心境是Y"。
+    out["raw"] = {"valence": raw_v, "arousal": raw_a, "label": _mood_label(raw_v, raw_a)}
     # 与瞬时值差得远时说明"情绪在恢复期"，提示一下
-    if abs(v - m["valence"]) >= 0.2:
+    if abs(v - raw_v) >= 0.2:
         out["note"] = ((out.get("note") + "，") if out.get("note") else "") + "情绪正在慢慢平复"
     return out
 
@@ -2303,8 +2321,14 @@ def mood_brief() -> str:
         return ""
     top = m["active"][0]
     tail = f"，因为{top['why']}" if top.get("why") else ""
-    return (f"{m['label']}（{top['emotion']}{tail}）"
-            f"，强度 {m['intensity']:.0%}")
+    s = (f"{m['label']}（{top['emotion']}{tail}）"
+         f"，强度 {m['intensity']:.0%}")
+    # 心境被 EMA 平滑过且与瞬时感受差得不小时，把"没折过的真实感受"补一句——
+    # AI 说得清自己现在是"瞬时激动"还是"沉淀后的心境"，手感不再隔层
+    raw = m.get("raw")
+    if raw and raw.get("label") and raw["label"] != m["label"]:
+        s += f"（此刻真实感受更偏「{raw['label']}」）"
+    return s
 
 
 def mood_tone_hint() -> str:
@@ -3292,12 +3316,13 @@ def persona_drift(days: int = 7) -> dict:
         try:
             base = json.loads((PERSONA_SNAP_DIR / f"{snaps[0]['name']}.json").read_text(encoding="utf-8"))
             bp, cur = base.get("persona") or {}, load_persona()
-            for section in ("traits", "drives", "identity", "state"):
+            for section in ("traits", "drives", "identity"):
+                # state 段（mood/energy/closeness）是瞬态：聊句心情、睡一觉精力回升
+                # 都会变，算进漂移就是"动不动就偏大"。稳定特征（性格/驱动/身份）
+                # 才是漂移该盯的；state 变更另有 history 溯源，不在这里报。
                 b = bp.get(section) or {}
                 c = cur.get(section) or {}
                 for k in set(b) | set(c):
-                    if section == "state" and k == "updated":
-                        continue  # 状态更新的时间戳是元数据，不算漂移
                     if b.get(k) != c.get(k):
                         diff.append({"section": section, "key": k,
                                      "from": b.get(k), "to": c.get(k)})
@@ -3729,7 +3754,11 @@ def dream(trigger: str = "manual", dry_run: bool = False) -> dict:
                 report["archived"].append({"id": m["id"], "gist": m.get("gist") or heuristic_gist(text)})
                 continue
             if (not verbatim and m.get("layer") == "hippo" and R < RETENTION_FLOOR
-                    and _num(m.get("importance"), 0.5) < 0.75 and now - _num(m.get("created"), now) > 2 * DAY):
+                    and _num(m.get("importance"), 0.5) < 0.6 and now - _num(m.get("created"), now) > 5 * DAY):
+                # 淡忘判据曾经是"2 天 + 重要度<0.75"：做梦触发得勤了之后（daily 自动
+                # 做梦、面板一键做梦），同一批记忆第一次被巩固处理就会大片进淡忘区，
+                # 看起来像"新版算得严了"。放宽到"满 5 天 + 重要度<0.6"——普通闲聊
+                # 碎片多留几天被想起的机会，真沉眠的才淡忘；想抓回来的仍有轮廓在 dust。
                 m["layer"] = "dust"
                 m["forgotten_at"] = now
                 m["detail"] = round(max(0.12, _num(m.get("detail"), 1) * 0.4), 2)
@@ -3982,6 +4011,11 @@ def apply_dream(result: dict) -> dict:
             body += ["", "## 梦里的叙述", narrative]
         if upd.get("insights"):
             body += ["", "## 洞见"] + [f"- {x}" for x in upd["insights"]]
+        rej = applied.get("rejected") or []
+        if rej:
+            # 被双门限/锁定/不存在拦下的改动留痕在梦报告里——AI 与人都能看到
+            # "梦想改什么、防线拦了什么"，而不是只看到悄悄没生效
+            body += ["", "## 被防线拦下的改动"] + [f"- {x}" for x in rej]
         try:
             path.write_text("\n".join(body) + "\n", encoding="utf-8")
         except OSError:

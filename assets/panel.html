@@ -414,6 +414,11 @@
         </div>
       </div>
       <div class="card" style="margin-top:14px">
+        <h2>AI 近期改动 · 待你过目</h2>
+        <div class="sub" style="margin-bottom:8px">做梦/自我总结由 AI 发起的人格变更（手动编辑、回滚、初识回答不算）。不对就点「回滚到此」撤销。</div>
+        <div id="ai-changes"></div>
+      </div>
+      <div class="card" style="margin-top:14px">
         <h2>演化历史</h2>
         <div id="history"></div>
       </div>
@@ -702,7 +707,10 @@
             <h2 style="margin-bottom:4px">睡眠巩固</h2>
             <div class="sub">重放碎片 → 抽象压缩 → 写入长期记忆 → 淡化细节 → 形成人格洞见</div>
           </div>
-          <button class="btn" id="btn-dream">现在做梦</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="ghost" id="btn-dream-ai" title="生成给 AI 的深度做梦指令，复制后发给 AI 执行">复制 AI 做梦指令</button>
+            <button class="btn" id="btn-dream" title="机器自动完成：重放 → 启发式压缩 → 直接沉淀，产出仍标待审核">现在做梦</button>
+          </div>
         </div>
         <div id="dream-summary" class="sub" style="margin-top:12px"></div>
       </div>
@@ -1010,7 +1018,7 @@ function renderOverview(){
     + `<br><br><b>模型档位</b><br>${esc(tierLabel(ov.model_tier))}`
     + `<br><br><b>会话模式</b><br>${esc(modeLabel(ov.mode))} <a href="javascript:void 0" data-mode-cycle style="color:var(--amber)">切换</a>`
     + (rcTotal ? `<br><br><b style="color:#e66450">待审核 ${rcTotal} 项</b><br>记忆 ${rc.memories || 0} · 知识 ${rc.knowledge || 0} · 人格 ${rc.persona || 0}` : "")
-    + ((ov.persona_drift && ov.persona_drift.alert) ? `<br><br><b style="color:#e66450">人格漂移偏大</b><br>用 persona drift 查看或还原快照` : "")
+    + ((ov.persona_drift && ov.persona_drift.alert) ? `<br><br><b style="color:#e66450">人格漂移偏大</b><br><a href="#" data-goto="persona" style="color:var(--amber)">去人格页查看/回滚 →</a>` : "")
     + (ov.readonly ? `<br><b style="color:var(--red)">只读模式</b>` : "");
 
   const roBanner = $("ro-banner");
@@ -1070,6 +1078,7 @@ function renderOverview(){
   renderState(p);
   renderEvolved(p);
   renderHistory(p);
+  renderAiChanges(ov);
   renderDream(ov);
 
   renderMood();
@@ -1567,6 +1576,39 @@ function renderHistory(p){
     : `<div class="sub">还没有人格变更记录。</div>`;
 }
 
+// AI 近期人格改动（审核入口）：review_counts.persona = ai_persona_changes(7)，
+// 这里取明细。回滚序号按演化历史总条数倒推（history 表序号 = 距最新第几条）。
+function renderAiChanges(ov){
+  const box = $("ai-changes");
+  if (!box) return;
+  // 过滤"没真正改"的记账行：做梦 traits 微调没过漂移门限也会写 history
+  //（field 带 "(漂移累积)" 后缀 / to 写着"未过门限""未变"）。这些行没改任何值，
+  // 列出来只是噪音，而且字段名带后缀没法回滚。
+  const noop = (x) => (x.field || "").includes("(") ||
+    (typeof x.to === "string" && (x.to.includes("未过门限") || x.to.includes("未变")));
+  const all = (ov.persona_drift && ov.persona_drift.ai_changes) || [];
+  const rows = all.filter(x => !noop(x));
+  const p = (ov.persona) || {};
+  const total = (p.history || []).length;
+  const hist = p.history || [];
+  box.innerHTML = rows.length
+    ? `<table class="hist"><tbody>${rows.map(x => {
+        // 回滚到"这条改动之前"：历史按旧→新存，1-based 倒序序号 = total - 位置
+        const pos = hist.findIndex(hh => hh.ts === x.ts && hh.field === x.field);
+        const seq = pos >= 0 ? Math.max(1, total - pos) : null;
+        const btn = seq ? `<button class="ghost" style="padding:2px 9px;font-size:11px" data-rollback="${seq}">回滚</button>`
+                        : `<span class="sub">—</span>`;
+        return `<tr>
+          <td>${esc(new Date(x.ts * 1000).toLocaleString("zh-CN").slice(5, 16))}</td>
+          <td>${esc(x.field)}</td>
+          <td>${esc(x.from)} → ${esc(typeof x.to === "object" ? JSON.stringify(x.to) : x.to)}</td>
+          <td>${esc(x.why || "")}${x.source ? ` · ${esc(x.source)}` : ""}</td>
+          <td>${btn}</td>
+        </tr>`;
+      }).join("")}</tbody></table>`
+    : `<div class="sub">近 7 天 AI 没有主动改过人格。做梦微调 traits 会先在漂移账本累积，过门限才会真正改动。</div>`;
+}
+
 function dreamBlankTemplate(pend){
   return {
     task_id: pend.task_id,
@@ -1842,15 +1884,19 @@ function renderAlerts(ov){
   const box = $("alert-box");
   if (!box) return;
   const items = [];
+  // 跳转链接：告警别只报问题不给入口——点「去处理」直接切到对应页签
+  const go = (tab, label) => `<a href="#" data-goto="${tab}" style="color:var(--amber);margin-left:6px">${label} →</a>`;
   const ea = (ov.emotion_alerts || [])[0];
   if (ea && ea.alert) {
-    items.push(`<b style="color:#e66450">情绪-输出背离</b>：${esc(ea.reason)}（去「心情」页核对）`);
+    items.push(`<b style="color:#e66450">情绪-输出背离</b>：${esc(ea.reason)}${go("persona", "去心情页核对")}`);
   }
   const ls = ov.log_summary || {};
-  if (ls.error) items.push(`<b style="color:#e66450">运行错误 ${ls.error} 条</b>：去「日志」页看原因（锁冲突 / 异常 / 解析报错）`);
-  else if (ls.warn) items.push(`运行警告 ${ls.warn} 条：去「日志」页看看`);
+  if (ls.error) items.push(`<b style="color:#e66450">运行错误 ${ls.error} 条</b>：${go("logs", "看日志")}`);
+  else if (ls.warn) items.push(`运行警告 ${ls.warn} 条：${go("logs", "看日志")}`);
   const rc = ov.review_counts || {};
-  if (rc.memories) items.push(`<b style="color:var(--amber)">待审核记忆 ${rc.memories} 条</b>：去「记忆」页勾选后可批量确认 / 废弃`);
+  if (rc.memories) items.push(`<b style="color:var(--amber)">待审核记忆 ${rc.memories} 条</b>：${go("memories", "去记忆页确认/废弃")}`);
+  if (rc.knowledge) items.push(`<b style="color:var(--amber)">待审核知识 ${rc.knowledge} 条</b>：${go("knowledge", "去知识页确认")}`);
+  if (rc.persona) items.push(`<b style="color:var(--amber)">AI 近期改过人格 ${rc.persona} 处</b>：${go("persona", "去人格页查看/回滚")}`);
   if (!items.length) { box.innerHTML = ""; return; }
   box.innerHTML = `<div class="card" style="margin-bottom:14px;border-color:rgba(230,100,80,.35)">
     <h2 style="color:#e66450">需要注意</h2>
@@ -1992,6 +2038,14 @@ function switchTab(tab){
 // ---- 事件绑定
 document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
+// 告警卡「去处理 →」链接：切到对应页签（事件委托，卡片内容每次重渲染）
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-goto]");
+  if (!a) return;
+  e.preventDefault();
+  switchTab(a.dataset.goto);
+});
+
 // DSH 插件过滤器（只读，纯前端筛选）
 const dshFilter = $("dsh-plugins-filter");
 if (dshFilter) dshFilter.addEventListener("input", () => renderDshPlugins());
@@ -2114,7 +2168,9 @@ $("btn-state").addEventListener("click", async () => {
   } catch (e) { toast(e.message, true); }
 });
 
-$("history").addEventListener("click", async (e) => {
+// 回滚按钮走 document 级委托：演化历史（#history）和 AI 近期改动（#ai-changes）
+// 两张卡片的按钮都要能用，且卡片内容每次重渲染后委托依然生效
+document.addEventListener("click", async (e) => {
   const rb = e.target.closest("[data-rollback]");
   if (!rb) return;
   const idx = Number(rb.dataset.rollback);
@@ -2289,16 +2345,40 @@ $("btn-dream").addEventListener("click", async () => {
   const btn = $("btn-dream");
   btn.disabled = true; btn.textContent = "正在入睡…";
   try {
-    const r = await api("/api/dream", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({confirm: true})});
-    const rep = r.report || {};
-    $("dream-summary").innerHTML = `重放 ${(rep.clusters || []).reduce((a, c) => a + (c.texts || []).length, 0)} 条 / ${(rep.clusters || []).length} 组 · 巩固 ${(rep.promoted || []).length} 条 · 淡忘 ${(rep.forgotten || []).length} 条 · 模糊化 ${rep.faded || 0} 条`;
+    // 一键自动做梦：重放 → 启发式压缩 → 直接沉淀（不再留 pending 等着整理）。
+    // 想让 AI 做更抽象的压缩时，用旁边的「复制 AI 做梦指令」。
+    const r = await api("/api/dream/auto", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({confirm: true})});
+    const a = r.result || {};
+    const rep = a.report || {};
+    if (a.applied) {
+      $("dream-summary").innerHTML = `自动做梦完成：沉淀 ${(a.memories || 0)} 条长期记忆 · 淡忘 ${(rep.forgotten || []).length} 条 · 雪藏 ${(rep.archived || []).length} 条${(a.rejected || []).length ? ` · 拒绝人格修改 ${(a.rejected).length} 项` : ""}`;
+      toast(`自动做梦完成：新增 ${a.memories || 0} 条（均标待审核，可在记忆页复核）`);
+    } else {
+      $("dream-summary").textContent = "做梦完成，但没有需要压缩的碎片（梦很安静）。";
+      toast("梦很安静，没有要沉淀的碎片");
+    }
     S.ov = r.overview; renderOverview(); renderMemoryList();
-    toast("梦做完了，碎片等你整理");
   } catch (e) { toast(e.message, true); }
   finally {
     btn.disabled = !!(S.ov && S.ov.readonly);
     btn.textContent = "现在做梦";
   }
+});
+
+$("btn-dream-ai").addEventListener("click", async () => {
+  const btn = $("btn-dream-ai");
+  try {
+    const r = await api("/api/dream/instruction", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+    try {
+      await navigator.clipboard.writeText(r.instruction);
+      toast(`做梦指令已复制（${r.clusters} 组碎片），粘给 AI 即可`);
+    } catch (e) {
+      // 剪贴板不可用（非 https / 权限拒绝）：退而把指令展示在梦摘要区手动复制
+      $("dream-summary").innerHTML = `<b>复制下面这段发给 AI：</b><div class="pre small" style="margin-top:6px">${esc(r.instruction)}</div>`;
+      toast("剪贴板不可用，指令已显示在下方，请手动复制", true);
+    }
+  } catch (e) { toast(e.message, true); }
+  finally { btn.disabled = false; }
 });
 
 $("btn-apply").addEventListener("click", async () => {
@@ -2672,8 +2752,15 @@ $("skill-list").addEventListener("click", async (e) => {
       // 更新 = force 镜像同步本地最新内容到全局副本（源里删掉的文件也会清掉）
       if (!confirm("把「" + upd.dataset.skupdate + "」更新到全局技能目录？\n\n以本地内容为准镜像同步（记忆数据不受影响）。")) return;
       try {
-        await post("/api/skill", {action: "install", name: upd.dataset.skupdate, force: true});
-        toast("已更新到全局技能目录");
+        const r = await post("/api/skill", {action: "install", name: upd.dataset.skupdate, force: true});
+        // 灵枢本体首次更新会先返回 risk_required（HTTP 200）：这里不能报成功，
+        // 引导走右上角「检查更新」的两段式风险告知流程
+        const st = r.result && r.result.state;
+        if (st === "risk_required") {
+          toast("首次更新灵枢本体需先接受风险告知——请用右上角「检查更新」按钮完成一次", true);
+          return;
+        }
+        toast(st === "already" ? "已是最新，无需更新" : "已更新到全局技能目录");
       } catch (err) { toast(err.message || "更新失败", true); return; }
       await loadWS();
     }

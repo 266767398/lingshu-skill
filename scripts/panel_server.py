@@ -29,8 +29,8 @@ _WRITE_ENDPOINTS = {
     "/api/persona/self", "/api/persona/rollback",
     "/api/memory", "/api/memory/review", "/api/knowledge", "/api/knowledge/review",
     "/api/note", "/api/skill",
-    "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/apply",
-    "/api/dream/draft", "/api/memory/bulk",
+    "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/auto",
+    "/api/dream/apply", "/api/dream/draft", "/api/memory/bulk",
     "/api/emotion", "/api/mode", "/api/link",
     "/api/forget", "/api/daily",
 }
@@ -734,6 +734,50 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 report = brain.dream(trigger="panel")
                 self._json({"ok": True, "report": report, "overview": overview()})
+                return
+
+            if path == "/api/dream/auto":
+                # 一键自动做梦：机器重放 → 启发式压缩 → 直接沉淀（不需要再人工审核
+                # pending）。产出照旧标 review="pending"，仍可在记忆页复核。
+                if data.get("confirm") is not True:
+                    self._json({"error": "自动做梦需要显式传 confirm: true"}, 400)
+                    return
+                if brain.READONLY:
+                    self._json({"error": "记忆库当前只读，无法自动做梦沉淀"}, 403)
+                    return
+                r = brain.auto_dream(trigger="panel")
+                self._json({"ok": True, "result": r, "overview": overview()})
+                return
+
+            if path == "/api/dream/instruction":
+                # 生成给 AI 的深度做梦指令：面板拿到现成文本，一键复制发给 AI，
+                # AI 读 pending.json → 压缩成 apply.json → dream --apply。
+                # AI 产出的记忆仍标待审核，人工在记忆页过目——这道闸不绕开。
+                # 「现在做梦」按钮已改为 auto_dream（直接沉淀、不留 pending），
+                # 所以这里没有 pending 时就先跑一次深度做梦把碎片攒成任务。
+                if brain.READONLY:
+                    self._json({"error": "记忆库当前只读，无法生成做梦任务"}, 403)
+                    return
+                pend = brain.load_dream_pending()
+                if not pend:
+                    brain.dream(trigger="panel")
+                    pend = brain.load_dream_pending()
+                if not pend:
+                    self._json({"error": "梦很安静：没有可整理的记忆碎片"}, 400)
+                    return
+                c = len(pend.get("clusters") or [])
+                instr = (
+                    f"请帮我完成一次深度做梦整理（任务 {pend.get('task_id')}）：\n"
+                    f"1. 运行 `python scripts/brain.py dream` 查看 {c} 组碎片（或直接读 "
+                    f"{(brain.HOME / 'dreams' / 'pending.json')}）；\n"
+                    "2. 把每组碎片压缩成更抽象、更持久的长期记忆（不要逐条复述原文），"
+                    "按 pending.json 里的 apply_schema 填写 memories / persona_updates / forget；\n"
+                    "3. 把结果写成 apply.json 并执行 `python scripts/brain.py dream --apply apply.json`。\n"
+                    "注意：不要编造记忆里没有的细节；人格 traits 改动只给小幅增量；"
+                    "产出会进入待审核，用户会在面板记忆页复核。"
+                )
+                self._json({"ok": True, "instruction": instr, "task_id": pend.get("task_id"),
+                            "clusters": c})
                 return
 
             if path == "/api/dream/apply":

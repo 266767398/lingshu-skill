@@ -6,10 +6,20 @@ set "PORT=%~1"
 if "%PORT%"=="" set "PORT=8765"
 
 set "PY="
-where python >nul 2>nul && set "PY=python"
-if "%PY%"=="" (
-  where py >nul 2>nul && set "PY=py -3"
-)
+rem Probe policy: `where` only proves existence, not usability -- the
+rem WindowsApps python stub also matches `where` but is a fake command that
+rem just opens the Store. So run every candidate once; only a candidate that
+rem prints its version counts. Use the first one that works.
+call :probe python
+if not defined PY call :probe py -3
+if not defined PY call :probe python3
+goto :after-probe
+
+:probe
+%1 --version >nul 2>nul && set "PY=%*"
+exit /b 0
+
+:after-probe
 
 if "%PY%"=="" (
   echo.

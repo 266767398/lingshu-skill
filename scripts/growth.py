@@ -61,18 +61,23 @@ def _panel_root() -> Path:
 def _global_roots() -> list:
     """全局技能目录候选，按优先级排列（第一个是安装目标）。
 
-    DSH（DeepSeek Harness）扫的是 ~/.dsh/skills，Trae 扫的是 ~/.trae-cn/skills。
-    灵枢本体主要跑在 DSH 里，所以两个都在时优先 DSH——否则 install 装到 Trae 目录，
-    DSH 永远看不到（表现为"装了不出现/像改名"）。可用 LINGSHU_GLOBAL_SKILLS 覆盖。
+    不同宿主的全局技能目录不同：Trae 扫 ~/.trae-cn/skills，APP（Coding
+    Agent）扫 ~/.app/skills，另有通用 Agent 生态约定 ~/.agents/skills。
+    本机存在哪个就认哪个（存在者优先、候选顺序兜底），换机器不用改代码；
+    安装目标取第一个存在的目录，避免装进宿主根本不扫的位置。
+    可用 LINGSHU_GLOBAL_SKILLS 覆盖（优先级最高）。
     """
     env = (os.environ.get("LINGSHU_GLOBAL_SKILLS") or "").strip()
     if env:
         return [Path(env).expanduser()]
-    roots = []
-    dsh = Path.home() / ".dsh" / "skills"
-    if dsh.is_dir():
-        roots.append(dsh)
-    roots.append(Path.home() / ".trae-cn" / "skills")
+    candidates = [
+        Path.home() / ".app" / "skills",      # APP（Coding Agent）
+        Path.home() / ".agents" / "skills",   # 通用 Agent 生态约定
+        Path.home() / ".trae-cn" / "skills",  # Trae
+    ]
+    roots = [c for c in candidates if c.is_dir()]
+    if not roots:
+        roots = candidates  # 都不存在时保留完整候选，安装时会自动创建第一个
     return roots
 
 
