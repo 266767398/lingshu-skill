@@ -1297,6 +1297,61 @@ function stopGraphAnim(){
   if (GRAPH.anim != null){ cancelAnimationFrame(GRAPH.anim); GRAPH.anim = null; }
 }
 
+// 持续物理模拟：斥力 + 弹簧 + 微弱噪声漂浮 + 阻尼。
+// 总动能低于阈值自动休眠（省电省 CPU），autoWake() 唤醒——借鉴 Obsidian graph 的做法。
+function startPhysics(){
+  stopPhysics();
+  let idle = 0;
+  const step = () => {
+    const nodes = GRAPH.data && GRAPH.data.nodes, pos = GRAPH.pos, vel = GRAPH.vel;
+    if (!nodes || !pos || !vel || !GRAPH.loaded){ GRAPH.phys = null; return; }
+    const n = Math.min(nodes.length, 260);
+    const kk = 24, rep = 5200;
+    let energy = 0;
+    for (let i = 0; i < n; i++){
+      let fx = 0, fy = 0, fz = 0;
+      // 微弱 Perlin 风格噪声：稳定后仍在缓慢漂浮，像" neural activity "
+      const t = performance.now() * 0.0004 + i * 1.7;
+      fx += Math.sin(t) * 0.9; fy += Math.cos(t * 0.83) * 0.9; fz += Math.sin(t * 0.71 + i) * 0.9;
+      for (let j = 0; j < n; j++){
+        if (j === i) continue;
+        const dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y, dz = pos[i].z - pos[j].z;
+        const d2 = dx*dx + dy*dy + dz*dz + 1e-6, d = Math.sqrt(d2);
+        if (d > 260) continue;   // 远距斥力截断：O(n²) 里省掉无效计算
+        const f = rep / d2;
+        fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
+      }
+      (GRAPH.springs[i] || []).forEach(([j, w]) => {
+        const dx = pos[j].x - pos[i].x, dy = pos[j].y - pos[i].y, dz = pos[j].z - pos[i].z;
+        const d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-6;
+        const f = (d - kk) * 0.03 * (0.5 + w * 0.5);
+        fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
+      });
+      vel[i].x = (vel[i].x + fx * 0.06) * 0.86;
+      vel[i].y = (vel[i].y + fy * 0.06) * 0.86;
+      vel[i].z = (vel[i].z + fz * 0.06) * 0.86;
+      pos[i].x += vel[i].x; pos[i].y += vel[i].y; pos[i].z += vel[i].z;
+      energy += vel[i].x*vel[i].x + vel[i].y*vel[i].y + vel[i].z*vel[i].z;
+    }
+    // 选中节点在物理里继续漂移 → 焦点跟着它走，保持"以它为中心"
+    if (GRAPH.selected != null && pos[GRAPH.selected]){
+      const p = pos[GRAPH.selected];
+      GRAPH.target = {x: p.x, y: p.y, z: p.z};
+    }
+    renderGraph();
+    // 动能连挂 40 帧都极低 → 休眠；任何交互 autoWake() 重新启动
+    idle = energy / Math.max(1, n) < 0.02 ? idle + 1 : 0;
+    GRAPH.phys = idle < 40 ? requestAnimationFrame(step) : null;
+  };
+  GRAPH.phys = requestAnimationFrame(step);
+}
+function stopPhysics(){
+  if (GRAPH.phys != null){ cancelAnimationFrame(GRAPH.phys); GRAPH.phys = null; }
+}
+function autoWake(){
+  if (GRAPH.loaded && GRAPH.phys == null) startPhysics();
+}
+
 // 相机缓动：朝目标焦点平滑靠近（像视线慢慢落在一件事上）
 function startGraphAnim(){
   stopGraphAnim();
@@ -1324,47 +1379,30 @@ async function loadGraph(limit){
   GRAPH.selected = null; GRAPH.hover = null; GRAPH.nbrs = null;
   GRAPH.searchHits = null; GRAPH.searchPos = 0;
   stopGraphAnim();
+  stopPhysics();
   GRAPH.focus = {x: 0, y: 0, z: 0}; GRAPH.target = {x: 0, y: 0, z: 0};
   GRAPH.targetDist = 360;
   try {
     GRAPH.data = await api("/api/graph?limit=" + (limit || 300));
+    // 节点从中心附近"绽放"散开（借鉴 Obsidian graph view 的加载动效）
+    GRAPH.vel = GRAPH.data.nodes.map(() => ({ x: 0, y: 0, z: 0 }));
     GRAPH.pos = GRAPH.data.nodes.map(n => {
       const a = hashStr(n.id) * Math.PI * 2, b = Math.acos(2 * hashStr(n.id + "#") - 1);
-      return { x: Math.sin(b) * Math.cos(a) * 140, y: Math.sin(b) * Math.sin(a) * 140, z: Math.cos(b) * 140 };
+      const r0 = 10 + hashStr(n.id + "@") * 30;
+      return { x: Math.sin(b) * Math.cos(a) * r0, y: Math.sin(b) * Math.sin(a) * r0, z: Math.cos(b) * r0 };
     });
-    // 力导向：先斥力收敛再画（几十次迭代，纯 CPU 也够快）
-    const nodes = GRAPH.data.nodes, edges = GRAPH.data.edges, pos = GRAPH.pos;
-    const n = Math.min(nodes.length, 240);
+    // 弹簧表：物理模拟用；邻接表：选中时"激活扩散"高亮
+    const nodes = GRAPH.data.nodes, edges = GRAPH.data.edges;
     const idx = new Map(nodes.map((x, i) => [x.id, i]));
-    const neighbors = Array.from({length: nodes.length}, () => []);
+    GRAPH.springs = Array.from({length: nodes.length}, () => []);
     edges.forEach(e => { const a = idx.get(e.src), b = idx.get(e.dst);
-      if (a != null && b != null && a < n && b < n) { neighbors[a].push([b, e.weight]); neighbors[b].push([a, e.weight]); } });
-    const kk = 22, rep = 5200;
-    for (let it = 0; it < 46; it++){
-      for (let i = 0; i < n; i++){
-        let fx = 0, fy = 0, fz = 0;
-        for (let j = 0; j < n; j++){
-          if (j === i) continue;
-          let dx = pos[i].x - pos[j].x, dy = pos[i].y - pos[j].y, dz = pos[i].z - pos[j].z;
-          let d2 = dx*dx + dy*dy + dz*dz + 1e-6, d = Math.sqrt(d2);
-          const f = rep / d2;
-          fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
-        }
-        neighbors[i].forEach(([j, w]) => {
-          let dx = pos[j].x - pos[i].x, dy = pos[j].y - pos[i].y, dz = pos[j].z - pos[i].z;
-          let d = Math.sqrt(dx*dx + dy*dy + dz*dz) + 1e-6;
-          const f = (d - kk) * 0.02 * (0.5 + w * 0.5);
-          fx += dx / d * f; fy += dy / d * f; fz += dz / d * f;
-        });
-        pos[i].x += fx * 0.06; pos[i].y += fy * 0.06; pos[i].z += fz * 0.06;
-      }
-    }
-    // 邻接表：选中时做"激活扩散"高亮
+      if (a != null && b != null){ GRAPH.springs[a].push([b, e.weight]); GRAPH.springs[b].push([a, e.weight]); } });
     GRAPH.nbrs = new Map();
     nodes.forEach((_, i) => GRAPH.nbrs.set(i, new Set()));
     edges.forEach(e => { const a = idx.get(e.src), b = idx.get(e.dst);
       if (a != null && b != null){ GRAPH.nbrs.get(a).add(b); GRAPH.nbrs.get(b).add(a); } });
     GRAPH.loaded = true;
+    startPhysics();   // 持续物理模拟：节点像活物一样漂浮舒展
     renderGraph();
     // 库里没有可画的记忆时给明确的空态引导，别让一片空白被当成"加载失败"
     if (!nodes.length){
@@ -1464,8 +1502,11 @@ function renderGraph(){
       ctx.strokeStyle = "rgba(95,168,160,.9)"; ctx.lineWidth = 1.5; ctx.stroke();
     }
     ctx.beginPath(); ctx.arc(cx + p.x, cy + p.y, focusHit ? r + 2 : r, 0, Math.PI * 2);
+    // 发光：重要节点和焦点节点带柔光晕（类星图质感）
+    if (focusHit || (n.importance || 0) > 0.75){ ctx.shadowColor = base; ctx.shadowBlur = focusHit ? 16 : 9; }
     ctx.fillStyle = focusHit ? "#f2efe6" : base;
     ctx.fill();
+    ctx.shadowBlur = 0;
     if (focusHit){ ctx.lineWidth = 2; ctx.strokeStyle = "#fff"; ctx.stroke(); }
     const labelable = (GRAPH.selected === i || (sel != null && hot.has(i) && i !== sel) || (GRAPH.selected == null && n.importance >= 0.8));
     if (p.s > 0.45 && labelable && !(dim && false) && shown.has(i)){
@@ -1521,6 +1562,7 @@ function focusGraphNode(i){
   const p = GRAPH.pos[i];
   GRAPH.target = {x: p.x, y: p.y, z: p.z};
   GRAPH.targetDist = 175;   // 选中即拉近，以它为中心
+  autoWake();
   startGraphAnim();
 }
 
@@ -1593,6 +1635,7 @@ function initGraphInteractions(){
     dragging = true; lastX = e.clientX; lastY = e.clientY;
     canvas.style.cursor = "grabbing";
     canvas.setPointerCapture(e.pointerId);
+    autoWake();
   });
   canvas.addEventListener("pointermove", e => {
     if (dragging){
@@ -1600,6 +1643,7 @@ function initGraphInteractions(){
       GRAPH.pitch = Math.max(-1.4, Math.min(1.4, GRAPH.pitch + (e.clientY - lastY) * 0.006));
       lastX = e.clientX; lastY = e.clientY;
       stopGraphAnim();
+      autoWake();
       scheduleGraph();
     } else {
       const rect = canvas.getBoundingClientRect();
@@ -1623,6 +1667,7 @@ function initGraphInteractions(){
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
     stopGraphAnim();
+    autoWake();
     GRAPH.targetDist = GRAPH.dist = Math.max(90, Math.min(1200, GRAPH.dist * (e.deltaY > 0 ? 1.1 : 0.9)));
     renderGraph();
   }, { passive: false });
@@ -2115,6 +2160,7 @@ function switchTab(tab){
   $("pageSub").textContent = titles[tab][1];
   if (tab === "memories") renderMemoryList();
   if (tab === "graph") loadGraph(Number($("graph-limit").value || 300));
+  else { stopPhysics(); stopGraphAnim(); }   // 离开联想页即停模拟，不空耗 CPU
   if (tab === "logs") loadLogs();
   if (["knowledge", "notes", "skills", "growth"].includes(tab)) {
     if (S.ws) { renderKnowledge(); renderNotes(); renderSkills(); renderDshPlugins(); renderGrowth(); renderOnboarding(); }
