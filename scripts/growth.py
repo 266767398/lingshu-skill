@@ -1416,15 +1416,33 @@ def update_check(name: str = "lingshu") -> dict:
     outdated = bool(src_sig != dst_sig) and (
         _real_drift(src_sig, dst_sig)
         or _ver(meta.get("version", 1)) != _ver(inst_meta.get("version", 1)))
+    # 版本守门：远程拉取全链路失败时会复用旧缓存兜底，那份缓存可能比已装版本还旧
+    # （缓存停留在 v2.16、已装已升到 v2.18）。此时绝不能报 outdated——点了"更新"
+    # 会把旧代码镜像同步回去，造成真倒退。版本号解析不出（非语义化）时保守放行，
+    # 交给内容差异判断。
+    def _ver_tuple(v) -> tuple | None:
+        try:
+            return tuple(int(x) for x in str(v).strip().split("."))
+        except (TypeError, ValueError):
+            return None
+    src_v, inst_v = _ver_tuple(meta.get("version", 1)), _ver_tuple(inst_meta.get("version", 1))
+    stale_source = False
+    if outdated and src_v is not None and inst_v is not None and src_v <= inst_v:
+        outdated = False
+        stale_source = True
     out = {
         "name": name,
         "installed": True,
         "outdated": outdated,
+        "stale_source": stale_source,   # 源比已装还旧（旧缓存兜底）：已忽略这次检查
         "source": out_src,   # 更新来源：local=本地开发仓库 / gitee=Gitee 远程 / none=无源降级
         "version": _ver(meta.get("version", 1)),
         "installed_version": _ver(inst_meta.get("version", 1)),
         "global_path": str(installed_dir),
     }
+    if stale_source:
+        out["error"] = (f"远程源不可用，缓存源版本（v{out['version']}）不比已装"
+                        f"（v{out['installed_version']}）新，已忽略这次检查，不倒退更新")
     if out["outdated"]:
         # 硬约束：面板更新说明只给人类可读正文，绝不把文件清单兜底显示给用户。
         # 所以 changed/added/removed 不进响应（前端兜底分支随之失效），
@@ -1690,6 +1708,25 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
                 raise KeyError(f"安装源过大（>{MAX_INSTALL_BYTES // (1024 * 1024)} MB），可能指错目录了，已停止。")
 
     meta, _ = parse_frontmatter(src.read_text(encoding="utf-8"))
+
+    # 版本守门（双保险第二道）：面板有 stale_source 检查，但 CLI/其他入口也可能
+    # 拿着旧缓存源来装。源版本 ≤ 已装版本时拒绝镜像，绝不倒退。
+    if _is_lingshu(name, meta, from_dir) and (dst_dir / "SKILL.md").is_file():
+        try:
+            inst_meta, _ = parse_frontmatter((dst_dir / "SKILL.md").read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            inst_meta = {}
+
+        def _vt(v) -> tuple | None:
+            try:
+                return tuple(int(x) for x in str(v).strip().split("."))
+            except (TypeError, ValueError):
+                return None
+        src_v, inst_v = _vt(meta.get("version")), _vt(inst_meta.get("version"))
+        if src_v is not None and inst_v is not None and src_v < inst_v:
+            raise KeyError(
+                f"更新源版本（v{meta.get('version')}）比已装版本（v{inst_meta.get('version')}）还旧，"
+                "疑似远程拉取失败复用了旧缓存——已拒绝倒退更新。稍后重试即可。")
 
     # 风险告知：灵枢会自动读写记忆、自动整理、能自编辑——用户得先知道并接受
     if _is_lingshu(name, meta, from_dir) and not accept_risk and not _risk_accepted(name):

@@ -2804,11 +2804,19 @@ async function checkUpdate(auto){
     } else {
       dot.style.display = "none";
       if (!auto) {
-        const srcTxt = r.source === "gitee" ? "（来源：Gitee 远程）"
-                     : r.source === "github" ? "（来源：GitHub 远程）"
-                     : r.source === "local" ? "（来源：本地目录）"
-                     : r.source === "none" && r.error ? "（远程源不可用：" + esc(String(r.error).slice(0, 120)) + "）" : "";
-        showUpdModal("已是最新", "全局副本与最新内容一致（v" + esc(r.version) + "）" + srcTxt + "，没有可更新的内容。", false);
+        if (r.stale_source) {
+          // 源比已装还旧（远程拉取失败复用了旧缓存）：明确告知不倒退，而不是说"已是最新"误导
+          showUpdModal("远程源暂时不可用",
+            "远程源拉取失败，缓存的旧源（v" + esc(r.version) + "）不比已装版本（v" +
+            esc(r.installed_version) + "）新，已忽略这次检查——<b>不会倒退更新</b>。<br><br>" +
+            "<i>稍等几分钟（匿名限额约 1 小时恢复）再点「检查更新」即可。</i>", false);
+        } else {
+          const srcTxt = r.source === "gitee" ? "（来源：Gitee 远程）"
+                       : r.source === "github" ? "（来源：GitHub 远程）"
+                       : r.source === "local" ? "（来源：本地目录）"
+                       : r.source === "none" && r.error ? "（远程源不可用：" + esc(String(r.error).slice(0, 120)) + "）" : "";
+          showUpdModal("已是最新", "全局副本与最新内容一致（v" + esc(r.version) + "）" + srcTxt + "，没有可更新的内容。", false);
+        }
       }
     }
   } catch (e) {
