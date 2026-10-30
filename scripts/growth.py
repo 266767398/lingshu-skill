@@ -1120,84 +1120,30 @@ def _remote_token(host: str) -> str:
 
 
 def _remote_api(url: str, host: str = "") -> object:
-    """调 REST 接口，配置了 token 则带认证头，否则匿名。失败抛异常由调用方降级。"""
+    """调 REST 接口，配置了 token 则带认证头，否则匿名。失败抛异常由调用方降级。
+
+    瞬时网络错误自动重试（最多 3 次，间隔递增）：下载中途断流（IncompleteRead）、
+    连接被掐、超时这类抖动重试一次通常就过；4xx/5xx 响应属于远端明确拒绝
+    （风控/限额），重试无意义，直接抛给上层走降级链路。
+    """
     headers = {"User-Agent": "lingshu-updater", "Accept": "application/json"}
     token = _remote_token(host)
     if token and host == "gitee":
         headers["PRIVATE-TOKEN"] = token
     elif token and host == "github":
         headers["Authorization"] = f"Bearer {token}"
-    req = _urlreq.Request(url, headers=headers)
-    with _urlreq.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
-        return _json.loads(resp.read().decode("utf-8"))
-
-
-def _fetch_tree_source(api_base: str, branch: str, label: str, host: str) -> Path:
-    """从指定 REST 接口拉取 main 分支全部文件到临时缓存目录，返回含 SKILL.md 的根。
-
-    先取仓库目录树（recursive=1），再逐个取文本文件内容（base64 解码）。仓库
-    规模小（几十个文件），总量可控。失败抛异常由调用方降级。
-    """
-    import base64
-    cache = _remote_cache_dir()
-    staging = cache / "staging"
-    if staging.exists():
-        shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
-
-    tree = _remote_api(f"{api_base}/git/trees/{branch}?recursive=1", host)
-    if tree.get("truncated"):
-        raise RuntimeError(f"{label} 目录树被截断（仓库过大），无法安全拉取")
-    # 小文件并发下载（4 线程）：逐文件 REST 请求是更新慢的主因（几十次串行往返），
-    # 并发把总耗时压到接近单请求耗时。文件少（<6）不值得开线程池，保持串行简单。
-    paths = []
-    for item in tree.get("tree", []):
-        if item.get("type") != "blob":
-            continue
-        path = item.get("path", "")
-        if (".git" in path.split("/") or "__pycache__" in path
-                or path.endswith((".pyc", ".tmp"))):
-            continue
-        paths.append(path)
-        if len(paths) > 500:
-            raise RuntimeError("文件数异常（>500），可能指错仓库，已停止")
-
-    def _dl(rel: str) -> None:
+    last_exc: Exception = RuntimeError("unreachable")
+    for attempt in range(3):
+        req = _urlreq.Request(url, headers=headers)
         try:
-            blob = _remote_api(
-                f"{api_base}/contents/{_urlparse.quote(rel)}?ref={branch}", host)
-        except Exception as e:
-            if isinstance(e, _urlreq.HTTPError) and e.code == 403:
-                raise RuntimeError(
-                    f"{label} 匿名限额已用尽（403），约 1 小时后自动恢复") from e
-            raise
-        if blob.get("encoding") != "base64":
-            raise RuntimeError(f"{label} 返回内容编码异常：{rel}")
-        data = base64.b64decode(blob.get("content", ""))
-        target = staging / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-
-    if len(paths) >= 6:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            # 任一线程抛异常就整体失败：list() 会把第一个异常重新抛出
-            list(pool.map(_dl, paths))
-    else:
-        for rel in paths:
-            _dl(rel)
-    if not (staging / "SKILL.md").is_file():
-        raise RuntimeError(f"{label} 拉取结果里找不到 SKILL.md（可能仓库结构变了）")
-    # 全部文件拉完并校验通过后才替换正式缓存：中途失败只会留下 staging 残渣，
-    # 下次拉取会先清掉它，绝不会把半截源当有效缓存复用。
-    _atomic_replace_dir(staging, cache / "extracted")
-    _mark_source(cache, host)
-    if expected_sha:
-        try:
-            (cache / "extracted" / ".lingshu-sha").write_text(expected_sha, encoding="utf-8")
-        except OSError:
-            pass
-    return cache / "extracted"
+            with _urlreq.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
+                return _json.loads(resp.read().decode("utf-8"))
+        except _urlreq.HTTPError:
+            raise   # 远端明确拒绝，重试无意义
+        except (OSError, _urlreq.URLError) as e:
+            last_exc = e
+            time.sleep(0.5 * (attempt + 1))
+    raise last_exc
 
 
 def _fetch_gitee_zip_source() -> Path:
@@ -1368,6 +1314,37 @@ def _lingshu_remote_source(force: bool = False) -> tuple[Path | None, str, str]:
         return _lingshu_remote_source_locked(force)
 
 
+def _try_remote_chain(expected_mark: bool = True) -> str:
+    """走一遍完整拉取链路：Gitee API → Gitee zip → GitHub。
+
+    成功直接返回源目录（内部 return）；全部失败返回空串对应的错误汇总文本。
+    expected_mark=False（整体重试轮）时不写 SHA 标记，防止把重试轮拉到的
+    内容误标成另一个 commit。
+    """
+    head_sha = _remote_head_sha(GITEE_API_BASE, GITEE_BRANCH, "gitee") if expected_mark else ""
+    try:
+        _fetch_tree_source(
+            GITEE_API_BASE, GITEE_BRANCH, "Gitee", "gitee",
+            expected_sha=head_sha)
+        return ""
+    except Exception as e:
+        err = f"Gitee 拉取失败：{e}"
+    try:
+        _fetch_gitee_zip_source()
+        return ""
+    except Exception as e:
+        err = f"Gitee 归档兜底失败：{e}"
+    try:
+        head_sha = _remote_head_sha(GITHUB_API_BASE, GITHUB_BRANCH, "github") if expected_mark else ""
+        _fetch_tree_source(
+            GITHUB_API_BASE, GITHUB_BRANCH, "GitHub", "github",
+            expected_sha=head_sha)
+        return ""
+    except Exception as e:
+        err += f"；GitHub 拉取失败：{e}"
+    return err
+
+
 def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     cache = _remote_cache_dir()
     cached = cache / "extracted"
@@ -1398,24 +1375,13 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     # Gitee：API → zip 归档兜底（浏览器 UA）；再 GitHub。中间某一路失败但后续
     # 成功时静默（不打印失败日志），只有全部链路都失败才输出汇总错误。
     # 拉取前先探一次 head SHA，成功后写进缓存标记（供下次 SHA 快路径命中）。
-    head_sha = _remote_head_sha(GITEE_API_BASE, GITEE_BRANCH, "gitee")
-    try:
-        return _fetch_tree_source(
-            GITEE_API_BASE, GITEE_BRANCH, "Gitee", "gitee",
-            expected_sha=head_sha), "gitee", ""
-    except Exception as e:
-        err = f"Gitee 拉取失败：{e}"
-    try:
-        return _fetch_gitee_zip_source(), "gitee", ""
-    except Exception as e:
-        err = f"Gitee 归档兜底失败：{e}"
-    try:
-        head_sha = _remote_head_sha(GITHUB_API_BASE, GITHUB_BRANCH, "github")
-        return _fetch_tree_source(
-            GITHUB_API_BASE, GITHUB_BRANCH, "GitHub", "github",
-            expected_sha=head_sha), "github", ""
-    except Exception as e:
-        err += f"；GitHub 拉取失败：{e}"
+    for attempt in range(2):
+        err = _try_remote_chain(expected_mark=attempt == 0)
+        if err == "":
+            break
+        # 全链路失败且不是最后一次：等 2 秒整体重试一遍（IncompleteRead/风控
+        # 间歇抖动，重试常能过）。zip 风控页这种持续失败重试也只是多花 2 秒。
+        time.sleep(2.0)
     # 全链路失败：如果还有一份旧缓存（哪怕已超期），宁可用旧缓存也别硬报错。
     if (cached / "SKILL.md").is_file():
         print(f"[lingshu] 远程拉取失败，复用上次缓存的旧源（可能不是最新）。{err}",
@@ -1426,7 +1392,7 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     return None, "none", err
 
 
-def update_check(name: str = "lingshu") -> dict:
+def update_check(name: str = "lingshu", force_pull: bool = False) -> dict:
     """检查本地源与全局已装副本的差异，返回「更新了什么」明细。
 
     面板「检查更新」用：installed=False 表示没装过；outdated=False 表示已是最新；
@@ -1504,6 +1470,26 @@ def update_check(name: str = "lingshu") -> dict:
     if outdated and src_v is not None and inst_v is not None and src_v <= inst_v:
         outdated = False
         stale_source = True
+    if stale_source and out_src in ("gitee", "github") and not force_pull:
+        # 缓存源比已装还旧：说明刚才拉取全链路失败、复用的旧缓存。静默再 force
+        # 拉一次（内部有整体重试），拿到真源就正常对比；仍失败才报 stale。
+        remote, source, err2 = _lingshu_remote_source(force=True)
+        if remote is not None:
+            src_dir = remote
+            out_src = source
+            stale_source = False
+            try:
+                meta, _ = parse_frontmatter((src_dir / "SKILL.md").read_text(encoding="utf-8"))
+            except OSError:
+                meta = {}
+            src_sig = _diff_signature(src_dir)
+            outdated = bool(src_sig != dst_sig) and (
+                _real_drift(src_sig, dst_sig)
+                or _ver(meta.get("version", 1)) != _ver(inst_meta.get("version", 1)))
+            src_v = _ver_tuple(meta.get("version", 1))
+            if outdated and src_v is not None and src_v <= inst_v:
+                outdated = False
+                stale_source = True
     out = {
         "name": name,
         "installed": True,
