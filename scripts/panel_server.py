@@ -135,6 +135,30 @@ def _created_key(m: dict):
         return 0.0
 
 
+def _imp_key(m: dict) -> float:
+    """importance 安全转 float：坏值（None/非数字字符串/list 等）沉底为 0。"""
+    try:
+        return float(m.get("importance") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _to_num(v, default=None):
+    """把请求里的值安全转 float：失败返回 default（默认 None，调用方据此走 400）。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_int(v, default=None):
+    """把请求里的值安全转 int：失败返回 default（默认 None，调用方据此走 400）。"""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _log_summary() -> dict:
     """最近 200 条里 error / warn（不含 error）各自多少条，一次读取避免重复解析。"""
     recent = brain.read_logs(200, level=None)
@@ -197,19 +221,19 @@ def filtered_memories(url) -> list:
                              " ".join(str(e) for e in (m.get("entities") or []))]).lower()
             if text not in blob:
                 continue
-        imp = float(m.get("importance") or 0)
+        imp = _imp_key(m)
         if imp < imp_min or imp > imp_max:
             continue
-        if since and float(m.get("created") or 0) < since:
+        if since and _created_key(m) < since:
             continue
         rows.append(m)
 
     if sort == "importance":
-        rows.sort(key=lambda m: float(m.get("importance") or 0), reverse=True)
+        rows.sort(key=_imp_key, reverse=True)
     elif sort == "retention":
         rows.sort(key=lambda m: brain.retention(m), reverse=True)
     else:
-        rows.sort(key=lambda m: m.get("created") or 0, reverse=True)
+        rows.sort(key=_created_key, reverse=True)
     return [memory_view(m) for m in rows[:limit]]
 
 
@@ -540,7 +564,11 @@ class Handler(BaseHTTPRequestHandler):
                             st[key] = data[key]
                     for key in ("energy", "closeness"):
                         if key in data:
-                            st[key] = max(0, min(100, int(data[key])))
+                            v = _to_int(data[key])
+                            if v is None:
+                                self._json({"error": f"{key} 必须是数字"}, 400)
+                                return
+                            st[key] = max(0, min(100, v))
                     st["updated"] = brain.now_ts()
                     p.setdefault("history", []).append({
                         "ts": brain.now_ts(), "field": "state", "from": None,
@@ -567,8 +595,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/persona/mind":
                 if data.get("mode") == "tune":
-                    dr = brain.mind_tune(int(data.get("curiosity") or 0),
-                                         int(data.get("reason") or 0),
+                    cur, rsn = _to_int(data.get("curiosity")), _to_int(data.get("reason"))
+                    if cur is None or rsn is None:
+                        self._json({"error": "curiosity / reason 必须是数字"}, 400)
+                        return
+                    dr = brain.mind_tune(cur, rsn,
                                          why=data.get("why") or "面板调节")
                 else:
                     dr = brain.mind_set(data.get("curiosity"), data.get("reason"), why="面板设定")
@@ -591,7 +622,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "alerts": brain.emotion_checks_recent(10)})
                     return
                 if act == "feel":
-                    brain.feel(data.get("emotion", ""), data.get("intensity", 0.6),
+                    intensity = _to_num(data.get("intensity"), 0.6)
+                    if intensity is None:
+                        self._json({"error": "intensity 必须是数字"}, 400)
+                        return
+                    brain.feel(data.get("emotion", ""), intensity,
                                why=data.get("why", ""), about=data.get("about", ""),
                                decay_hours=data.get("decay_hours"))
                     self._json({"ok": True, "mood": brain.mood_now(),
@@ -634,7 +669,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "rationality": brain.rationality()})
                     return
                 if act == "desire":
-                    brain.desire_satisfy(data.get("emotion", ""), data.get("amount", 15))
+                    amount = _to_num(data.get("amount"), 15)
+                    if amount is None:
+                        self._json({"error": "amount 必须是数字"}, 400)
+                        return
+                    brain.desire_satisfy(data.get("emotion", ""), amount)
                     self._json({"ok": True, "mood": brain.mood_now(),
                                 "rationality": brain.rationality(),
                                 "emotion_arc": brain.emotion_arc(7),
@@ -679,7 +718,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/skill/self-review":
-                r = growth.self_review(force=bool(data.get("force")), days=int(data.get("days", 3) or 3))
+                r = growth.self_review(force=bool(data.get("force")),
+                                       days=_to_int(data.get("days", 3) or 3, 3) or 3)
                 self._json({"ok": True, "result": r})
                 return
 
@@ -742,7 +782,10 @@ class Handler(BaseHTTPRequestHandler):
                             return
                         target["kind"] = kind
                     if "importance" in data:
-                        imp = float(data["importance"])
+                        imp = _to_num(data["importance"])
+                        if imp is None:
+                            self._json({"error": "importance 必须是数字"}, 400)
+                            return
                         target["importance"] = round(max(0.0, min(1.0, imp / 10 if imp > 1 else imp)), 3)
                     if "tags" in data:
                         tags = data["tags"]
@@ -884,9 +927,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/persona/rollback":
-                idx = data.get("index") or 0
+                idx = _to_int(data.get("index"))
+                if idx is None:
+                    self._json({"error": "index 必须是数字"}, 400)
+                    return
                 try:
-                    p = brain.persona_rollback(int(idx))
+                    p = brain.persona_rollback(idx)
                 except (ValueError, IndexError) as exc:
                     self._json({"error": str(exc)}, 400)
                     return

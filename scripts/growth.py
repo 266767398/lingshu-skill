@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -22,6 +23,7 @@ import shutil
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 # Windows 控制台默认 GBK，中文输出会变乱码。无条件 reconfigure 成 UTF-8；
@@ -993,8 +995,9 @@ def _diff_signature(dir_path: Path) -> set:
         # AGENTS.md 是安装时重新生成的（区块化更新，含时间性内容），不参与差异判定
         # .lingshu-source 是远程缓存的来源标记（缓存元数据），副本里没有——
         # 不排除的话远程源签名永远比副本多一个文件，每次检查都误报 outdated
+        # .lingshu-sha 是远程缓存的提交 SHA 标记，同属缓存元数据，一并排除
         if (f.name.endswith((".tmp", ".pyc", ".lock", ".corrupt"))
-                or f.name in ("AGENTS.md", ".lingshu-source")):
+                or f.name in ("AGENTS.md", ".lingshu-source", ".lingshu-sha")):
             continue
         try:
             st = f.stat()
@@ -1112,7 +1115,20 @@ REMOTE_CACHE_TTL = 600.0
 
 
 def _remote_token(host: str) -> str:
-    """取可选的认证 token（gitee/github），未配置返回空串。绝不打日志。"""
+    """取可选的认证 token（gitee/github），未配置返回空串。绝不打日志。
+
+    优先读环境变量（免改配置文件）：Gitee 用 GITEE_TOKEN / LINGSHU_GITEE_TOKEN，
+    GitHub 用 GITHUB_TOKEN / LINGSHU_GITHUB_TOKEN / GH_TOKEN；都没有再回退到
+    brain 配置文件里的 <host>_token 字段。
+    """
+    env_names = {
+        "gitee": ("GITEE_TOKEN", "LINGSHU_GITEE_TOKEN"),
+        "github": ("GITHUB_TOKEN", "LINGSHU_GITHUB_TOKEN", "GH_TOKEN"),
+    }.get(host, ())
+    for name in env_names:
+        val = str(os.environ.get(name, "") or "").strip()
+        if val:
+            return val
     try:
         return str(brain.load_config().get(f"{host}_token", "") or "").strip()
     except Exception:
@@ -1123,8 +1139,10 @@ def _remote_api(url: str, host: str = "") -> object:
     """调 REST 接口，配置了 token 则带认证头，否则匿名。失败抛异常由调用方降级。
 
     瞬时网络错误自动重试（最多 3 次，间隔递增）：下载中途断流（IncompleteRead）、
-    连接被掐、超时这类抖动重试一次通常就过；4xx/5xx 响应属于远端明确拒绝
-    （风控/限额），重试无意义，直接抛给上层走降级链路。
+    连接被掐、超时这类抖动重试一次通常就过。403/429 限流按 Retry-After（或递增
+    退避）等一等再重试（最多 2 次）；但 GitHub 匿名配额耗尽（60 次/小时）等再久
+    也没用，直接抛带 token 设置提示的友好错误。其余 4xx/5xx 属于远端明确拒绝
+    （风控/权限），重试无意义，直接抛给上层走降级链路。
     """
     headers = {"User-Agent": "lingshu-updater", "Accept": "application/json"}
     token = _remote_token(host)
@@ -1137,10 +1155,37 @@ def _remote_api(url: str, host: str = "") -> object:
         req = _urlreq.Request(url, headers=headers)
         try:
             with _urlreq.urlopen(req, timeout=REMOTE_TIMEOUT) as resp:
-                return _json.loads(resp.read().decode("utf-8"))
-        except _urlreq.HTTPError:
-            raise   # 远端明确拒绝，重试无意义
-        except (OSError, _urlreq.URLError) as e:
+                body = resp.read()
+                # HTML 风控页可能以 HTTP 200 返回（Gitee 匿名被风控的典型形态），
+                # 在 JSON 解析前拦住，报带 token 提示的可读错误而不是难懂 KeyError。
+                ctype = str((resp.headers or {}).get("Content-Type", "")).lower()
+                head = body[:1].lstrip()
+                if "text/html" in ctype or head == b"<":
+                    raise RuntimeError(
+                        f"{host or '远端'} 返回 HTML 风控页而非 JSON（HTTP 200）。"
+                        "Gitee 匿名请求被风控，可设置 GITEE_TOKEN 环境变量绕过")
+                return _json.loads(body.decode("utf-8"))
+        except _urlreq.HTTPError as e:
+            # GitHub 匿名配额耗尽：要等就得等一小时，重试无意义，给可操作提示
+            if (e.code == 403 and host == "github"
+                    and (e.headers or {}).get("X-RateLimit-Remaining") == "0"):
+                raise RuntimeError(
+                    "GitHub API 配额耗尽（匿名 60 次/小时），"
+                    "可设置 GITHUB_TOKEN 环境变量提高配额") from e
+            # 403/429 限流：按 Retry-After（秒）或递增退避等一等，最多重试 2 次
+            if e.code in (403, 429) and attempt < 2:
+                try:
+                    wait = float((e.headers or {}).get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    wait = 0.0
+                time.sleep(wait if wait > 0 else 0.5 * (attempt + 1) * 2)
+                last_exc = e
+                continue
+            raise   # 其余远端明确拒绝，重试无意义
+        # IncompleteRead 是 HTTPException 子类，下载中途断流时 urlopen 抛出的
+        # 是它而非 OSError/URLError，必须一并纳入重试，否则抖动一次就直接失败。
+        except (OSError, _urlreq.URLError, http.client.IncompleteRead,
+                http.client.HTTPException) as e:
             last_exc = e
             time.sleep(0.5 * (attempt + 1))
     raise last_exc
@@ -1154,14 +1199,21 @@ def _fetch_gitee_zip_source() -> Path:
     """
     import zipfile
     import tempfile
+    from uuid import uuid4
     cache = _remote_cache_dir()
-    staging = cache / "staging"
-    if staging.exists():
-        shutil.rmtree(staging, ignore_errors=True)
+    # staging 带进程+随机后缀：多进程（面板+CLI）同时拉取时互不踩踏，
+    # 用完即删（成功时被 rename 走，失败时 finally 清理）
+    staging = cache / f"staging-{os.getpid()}-{uuid4().hex[:8]}"
     staging.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(suffix=".zip", dir=str(cache))
     try:
-        req = _urlreq.Request(GITEE_ZIP_URL, headers={
+        # 配置了 token 则走 query 参数认证（Gitee 归档下载不支持 header token）
+        zip_url = GITEE_ZIP_URL
+        gitee_token = _remote_token("gitee")
+        if gitee_token:
+            sep = "&" if "?" in zip_url else "?"
+            zip_url = f"{zip_url}{sep}access_token={_urlparse.quote(gitee_token, safe='')}"
+        req = _urlreq.Request(zip_url, headers={
             "User-Agent": BROWSER_UA, "Accept": "application/zip"})
         # fd 先包进 with：urlopen 失败时也能正确关闭，不泄漏文件描述符。
         # 分块写入落盘（resp.read() 全量进内存在仓库变大后峰值不可控），
@@ -1180,7 +1232,10 @@ def _fetch_gitee_zip_source() -> Path:
                 f.write(chunk)
         with open(tmp, "rb") as f:
             if f.read(4) != b"PK\x03\x04":
-                raise RuntimeError("Gitee zip 归档签名校验失败（拿到的是 HTML 风控页）")
+                raise RuntimeError(
+                    "Gitee zip 归档签名校验失败（拿到的是 HTML 风控页）。"
+                    "Gitee 匿名下载被风控，可设置 GITEE_TOKEN 环境变量绕过；"
+                    "稍后重试或用 --force 重拉")
         with zipfile.ZipFile(tmp) as zf:
             # 防 zip slip：归档里出现 ../ 或绝对路径的成员名一律拒绝解压
             for member in zf.namelist():
@@ -1209,6 +1264,7 @@ def _fetch_gitee_zip_source() -> Path:
             raise RuntimeError("Gitee 归档直下也被风控（403）") from e
         raise
     finally:
+        shutil.rmtree(staging, ignore_errors=True)
         try:
             os.unlink(tmp)
         except OSError:
@@ -1290,10 +1346,46 @@ def _fetch_tree_source(api_base: str, branch: str, label: str, host: str,
     """
     import base64
     cache = _remote_cache_dir()
-    staging = cache / "staging"
-    if staging.exists():
+    cache.mkdir(parents=True, exist_ok=True)
+    # staging 路径带进程唯一后缀：_remote_lock 只是线程锁，跨不了进程。两个
+    # 面板进程同时检查更新会同时 rmtree/mkdir 同一个固定 staging 互相踩踏；
+    # 改为每次新建、用完即删，避免跨进程互斥的复杂度。
+    staging = cache / f"staging-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    staging.mkdir(parents=True)
+    try:
+        tree = _remote_api(f"{api_base}/git/trees/{branch}?recursive=1", host)
+        entries = tree.get("tree") or []
+        if not entries:
+            raise RuntimeError(f"{label} 目录树为空")
+        # 遍历树中所有文件条目（跳过目录），逐个取 base64 内容解码落盘
+        for item in entries:
+            if item.get("type") != "blob":
+                continue
+            rel = str(item.get("path") or "")
+            if not rel:
+                continue
+            resp = _remote_api(f"{api_base}/contents/{_urlparse.quote(rel)}?ref={branch}", host)
+            content = str(resp.get("content") or "")
+            if not resp.get("encoding") == "base64" or not content:
+                raise RuntimeError(f"{label} 文件内容异常：{rel}")
+            data = base64.b64decode(content)
+            dest = (staging / rel).resolve()
+            # 防路径穿越：resolve 后必须仍在 staging 内
+            if not str(dest).startswith(str(staging.resolve())):
+                raise RuntimeError(f"{label} 树含非法路径条目：{rel}")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        if not (staging / "SKILL.md").is_file():
+            raise RuntimeError(f"{label} 拉取完成后找不到 SKILL.md")
+        if expected_sha:
+            (staging / ".lingshu-sha").write_text(expected_sha, encoding="utf-8")
+        # 全部校验通过后才替换正式缓存（防止半截拉取被当成有效缓存复用）
+        _atomic_replace_dir(staging, cache / "extracted")
+        _mark_source(cache, host)
+        return cache / "extracted"
+    finally:
+        # 用完即删自己的 staging（成功时已被 rename 走，exist_errors 兜底）
         shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, exist_ok=True)
 
 
 # 远程拉取串行化：面板多线程同时点「检查更新/更新」时，两个线程会同时
@@ -1314,6 +1406,10 @@ def _lingshu_remote_source(force: bool = False) -> tuple[Path | None, str, str]:
         return _lingshu_remote_source_locked(force)
 
 
+# 各链路失败时附带一行 token 设置建议（命中匿名风控/限流时用户可自救）
+_TOKEN_HINT = "（提示：设置 GITEE_TOKEN / GITHUB_TOKEN 环境变量可绕过匿名风控与限流）"
+
+
 def _try_remote_chain(expected_mark: bool = True) -> str:
     """走一遍完整拉取链路：Gitee API → Gitee zip → GitHub。
 
@@ -1328,12 +1424,12 @@ def _try_remote_chain(expected_mark: bool = True) -> str:
             expected_sha=head_sha)
         return ""
     except Exception as e:
-        err = f"Gitee 拉取失败：{e}"
+        err = f"Gitee 拉取失败：{e}{_TOKEN_HINT}"
     try:
         _fetch_gitee_zip_source()
         return ""
     except Exception as e:
-        err = f"Gitee 归档兜底失败：{e}"
+        err = f"Gitee 归档兜底失败：{e}{_TOKEN_HINT}"
     try:
         head_sha = _remote_head_sha(GITHUB_API_BASE, GITHUB_BRANCH, "github") if expected_mark else ""
         _fetch_tree_source(
@@ -1341,7 +1437,7 @@ def _try_remote_chain(expected_mark: bool = True) -> str:
             expected_sha=head_sha)
         return ""
     except Exception as e:
-        err += f"；GitHub 拉取失败：{e}"
+        err += f"；GitHub 拉取失败：{e}{_TOKEN_HINT}"
     return err
 
 
@@ -1380,8 +1476,9 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
         if err == "":
             break
         # 全链路失败且不是最后一次：等 2 秒整体重试一遍（IncompleteRead/风控
-        # 间歇抖动，重试常能过）。zip 风控页这种持续失败重试也只是多花 2 秒。
-        time.sleep(2.0)
+        # 间歇抖动，重试常能过）。最后一次失败不再白等 2 秒。
+        if attempt < 1:
+            time.sleep(2.0)
     # 全链路失败：如果还有一份旧缓存（哪怕已超期），宁可用旧缓存也别硬报错。
     if (cached / "SKILL.md").is_file():
         print(f"[lingshu] 远程拉取失败，复用上次缓存的旧源（可能不是最新）。{err}",
@@ -1402,6 +1499,9 @@ def update_check(name: str = "lingshu", force_pull: bool = False) -> dict:
         src_dir = SKILLS_DIR / _require_slug(name)
     except ValueError:
         return {"name": name, "installed": False, "outdated": False}
+    # 默认：面板自身目录即源（面板直接跑在开发仓库里的场景）。
+    # 非灵枢本体的普通 skill 走不到下面重新赋值的分支，也必须有初值。
+    out_src = "local"
     if not (src_dir / "SKILL.md").is_file() and _is_lingshu(name, {}, None):
         # 灵枢本体：更新源只走远程拉取（Gitee 优先，GitHub 兜底），没有本地源。
         src_dir = Path(__file__).resolve().parent.parent

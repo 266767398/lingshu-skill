@@ -866,16 +866,23 @@ def _locked(path: Path, timeout: float = 10.0):
                 log_event("lock", f"等不到写锁：{path.name}（{timeout:.0f}s 超时）", level="error", path=path.name)
                 raise TimeoutError(f"等不到写锁：{path}")
             time.sleep(0.05)
+    _owns = False
     try:
         yield
     finally:
         _HELD_LOCKS.discard((str(lock), threading.get_ident()))
-        # 只删自己建的锁（锁文件里记着 pid）
-        if _lock_owner(lock) in (None, os.getpid()):
+        # 只在"自己成功创建或接管了锁（写入了自己 pid）"时才释放。
+        # _lock_owner 读不到内容返回 None 时不删——那可能是其他进程刚接管/正在写
+        # 锁文件，误删会让第三个进程立刻挤进来一起写。
+        if _lock_owner(lock) == os.getpid():
+            _owns = True  # 锁文件里确实记着自己是持有者
+        if _owns:
             try:
                 lock.unlink()
             except OSError:
                 pass
+        else:
+            log_event("lock", f"释放跳过：锁 {path.name} 不归本进程（pid 不符或读不到持有者）", path=path.name)
 
 
 STALE_LOCK_SECONDS = 30.0
@@ -956,31 +963,48 @@ def _strengthen_write(touched: list) -> None:
     注意只 patch 强化字段：touched 里的记录是 recall 开头无锁读的旧快照，
     若整条 update 回去，会把期间别人并发写入的 review/layer/tags 用旧值覆盖掉
     （例：刚 review confirm 的记忆被 recall 一碰又回到 pending）。
+
+    跨层竞态防护：recall 锁外读快照后，dream/archive 可能已把记忆迁移层。
+    所以锁内以旧快照的 layer 为起点重读目标文件做定向 patch——若 id 不在
+    旧 layer，按 hippo→cortex→dust 顺序在其他层找它的实际位置再 patch；
+    全找不到（可能已被归档/删除）则放弃并留日志，绝不往旧 layer 写回去。
     """
     if READONLY or not touched:
         return
     patch_fields = ("access_count", "stability", "last_access", "detail")
     with _locked(HOME / "hippocampus.jsonl"):
-        by_layer: dict = {}
+        updates: dict = {}
         for m in touched:
             if m.get("layer") == ARCHIVE_LAYER:
                 continue  # 归档记忆只读展示，不给强化（需要时 archive restore 回热）
             if not m.get("id"):
                 continue   # 畸形记录（缺 id）没法强化
-            by_layer.setdefault(m.get("layer", "hippo"), {})[m["id"]] = m
-        if not by_layer:
+            updates[m["id"]] = m
+        if not updates:
             return
         fname = {"hippo": "hippocampus.jsonl", "cortex": "cortex.jsonl", "dust": "dust.jsonl"}
-        for layer, updates in by_layer.items():
-            p = HOME / fname.get(layer, "hippocampus.jsonl")
+        order = ("hippo", "cortex", "dust")
+        # 每层文件只读一次：patch 该层命中的 id，并把别的层没找到的记到这里
+        remaining = dict(updates)
+        for layer in order:
+            if not remaining:
+                break
+            p = HOME / fname[layer]
             rows = read_jsonl(p)
+            hit_ids = set()
             for r in rows:
-                u = updates.get(r.get("id"))
+                u = remaining.get(r.get("id"))
                 if u:
+                    hit_ids.add(r["id"])
                     for f in patch_fields:
                         if f in u:
                             r[f] = u[f]
-            write_jsonl(p, rows)
+            if hit_ids:
+                write_jsonl(p, rows)
+                for mid in hit_ids:
+                    del remaining[mid]
+        for mid in remaining:
+            log_event("strengthen", f"放弃强化 {mid}：三层都找不到（可能已归档/删除）", path=fname["hippo"])
 
 
 def load_all() -> list:
@@ -4270,10 +4294,27 @@ def _extract_ro(argv: list) -> tuple:
     return out, forced
 
 
+def _recompute_paths() -> None:
+    """集中重算所有由 HOME 派生的路径常量。
+
+    这些常量分散定义在模块各处（LOG_FILE/WORKING_FILE 在开头，
+    VERBATIM_DIR/ASSOC_FILE/PERSONA_SNAP_DIR/DAILY_FILE 在各自子系统旁），
+    --home 切换目录时必须全部同步更新，否则残留旧目录的路径。
+    模块加载完成时也调用一次，保证与文件内字面定义一致。
+    """
+    global LOG_FILE, WORKING_FILE, VERBATIM_DIR, ASSOC_FILE, PERSONA_SNAP_DIR, DAILY_FILE
+    LOG_FILE = HOME / "lingshu.log"
+    WORKING_FILE = HOME / "working.jsonl"
+    VERBATIM_DIR = HOME / "verbatim"
+    ASSOC_FILE = HOME / "assoc.jsonl"
+    PERSONA_SNAP_DIR = HOME / "persona_snapshots"
+    DAILY_FILE = HOME / "daily_state.json"
+
+
 def _override_home(argv: list) -> list:
     """提取 --home <目录>/--home=<目录>，全局切换数据目录（任意位置均可）。
     同时写入环境变量，保证之后 import 的 growth 子系统读到同一个 HOME。"""
-    global HOME, WORKING_FILE, VERBATIM_DIR, ASSOC_FILE, PERSONA_SNAP_DIR, DAILY_FILE
+    global HOME
     out, i, home = [], 0, None
     while i < len(argv):
         a = argv[i]
@@ -4289,11 +4330,7 @@ def _override_home(argv: list) -> list:
         i += 1
     if home:
         HOME = Path(home).expanduser()
-        WORKING_FILE = HOME / "working.jsonl"
-        VERBATIM_DIR = HOME / "verbatim"
-        ASSOC_FILE = HOME / "assoc.jsonl"
-        PERSONA_SNAP_DIR = HOME / "persona_snapshots"
-        DAILY_FILE = HOME / "daily_state.json"
+        _recompute_paths()
         os.environ["BRAIN_MEMORY_HOME"] = str(HOME)
     return out
 
@@ -4796,6 +4833,10 @@ def auto_dream(trigger: str = "auto", dry_run: bool = False) -> dict:
 # 会话开始时 build_injection 会检查：如果今天还没跑，就提醒先跑 daily。
 
 DAILY_FILE = HOME / "daily_state.json"
+
+# 所有派生路径常量已定义完毕：集中重算一次，保证 _recompute_paths 与上面
+# 各处字面定义一致（今后新增派生路径只需改 _recompute_paths 一处）。
+_recompute_paths()
 
 
 def _daily_state() -> dict:
@@ -5840,10 +5881,12 @@ def _main(argv=None) -> int:
             except ValueError:
                 print("序号得是数字：work done <第几条>", file=sys.stderr)
                 return 2
-            rows = work_done(idx)
-            if idx < 1 or idx > len(rows):
-                print(f"序号越界：当前暂存只有 {len(rows)} 条。", file=sys.stderr)
+            # 先校验序号、后执行：越界时不能先标记完成再报错（先执行后校验会有副作用）
+            cur = work_status()
+            if idx < 1 or idx > cur["count"]:
+                print(f"序号越界：当前暂存只有 {cur['count']} 条。", file=sys.stderr)
                 return 2
+            rows = work_done(idx)
             done = rows[idx - 1]
             print(f"第 {idx} 条已标记完成：{done.get('text', '')}——做完的事不再占心思。")
             return 0
