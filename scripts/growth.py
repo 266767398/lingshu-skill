@@ -83,6 +83,10 @@ MAX_INSTALL_BYTES = 200 * 1024 * 1024
 NOTE_KINDS = ("journal", "log", "growth")
 # 技能名：小写字母/数字/连字符/下划线，也允许中文（中文生态里技能就叫「质检评审」这类名字）
 SLUG_RE = re.compile(r"^[a-z0-9\u4e00-\u9fff][a-z0-9-_\u4e00-\u9fff]{0,62}$")
+# Windows 保留设备名：即使过了正则也不能当技能目录名（con/com1 建目录会失败或异常）
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul",
+                     *(f"com{i}" for i in range(1, 10)),
+                     *(f"lpt{i}" for i in range(1, 10))}
 
 # 灵枢是"会自动记忆、会自动整理、能自己改说明书"的技能——装它的后果要说清楚，让用户自己决定。
 LINGSHU_RISKS = [
@@ -722,12 +726,17 @@ def load_registry() -> dict:
 
 
 def save_registry(reg: dict) -> None:
-    # 内部持锁 + 合并式写法：调用方传过来的是旧快照，但 update() 里已经改了要改的键。
-    # 这里先 load 当前盘上的最新值，再用 reg 合并——这样并发的两个 save_registry 不会
-    # 互相覆盖（串行化：后一个 load 到前一个刚写的值，合并自己的，再写）。
+    # 内部持锁 + 条目级合并写法：调用方传过来的是旧快照，但 update() 里已经改了要改的键。
+    # 这里先 load 当前盘上的最新值，再按【每个技能条目内部】合并——只覆盖 reg 里明确
+    # 提供的字段，其余字段（如并发 install 刚写入的 installed_at）保留盘上最新值，
+    # 防止旧快照里的整条 entry 把新字段抹掉。
     with brain._locked(SKILL_REG):
         cur = load_registry()
-        cur.update(reg)
+        for name, entry in reg.items():
+            if isinstance(entry, dict) and isinstance(cur.get(name), dict):
+                cur[name].update(entry)
+            else:
+                cur[name] = entry
         brain.atomic_json(SKILL_REG, cur)
 
 
@@ -750,6 +759,8 @@ def _require_slug(name: str) -> str:
     name = _SKILL_NAME_ALIASES.get(name, name)   # 中文名折算成 kebab-case（DSH 才认）
     if not SLUG_RE.match(name):
         raise ValueError("技能名不合法：只能用字母/数字/连字符/下划线/中文，1-63 个字符")
+    if name in _WINDOWS_RESERVED:   # con/com1 这类设备名在 Windows 上建目录会失败
+        raise ValueError(f"技能名不能用 Windows 保留设备名：{name}")
     return name
 
 
@@ -844,21 +855,40 @@ def create_skill(name: str, description: str, body: str, overwrite: bool = False
     path = _skill_path(name)
     if path.exists() and not overwrite:
         raise FileExistsError(f"技能 {name} 已存在；要改内容用 skill edit，要覆盖用 --force")
-    created = _today()
-    old = read_skill(name) if path.exists() else None
-    version = int(old["meta"].get("version", 1)) + 1 if old else 1
-    if old:
-        created = old["meta"].get("created", created)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_compose(name, description, body, version, created, _today(), origin),
-                    encoding="utf-8")
+    # 读-改-写整段加锁 + 原子写：并发 create/edit 后写者覆盖前者、崩溃留下半截
+    # SKILL.md，都会让技能静默损坏——与 save_registry 同一把文件锁串行化。
+    with brain._locked(SKILL_REG):
+        created = _today()
+        old = read_skill(name) if path.exists() else None
+        version = int(old["meta"].get("version", 1)) + 1 if old else 1
+        if old:
+            created = old["meta"].get("created", created)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(path, _compose(name, description, body, version, created, _today(), origin))
 
-    reg = load_registry()
-    reg[name] = {"description": description, "version": version,
-                 "created": reg.get(name, {}).get("created", brain.now_ts()),
-                 "updated": brain.now_ts(), "installed_at": reg.get(name, {}).get("installed_at")}
-    save_registry(reg)
+        reg = load_registry()
+        reg[name] = {"description": description, "version": version,
+                     "created": reg.get(name, {}).get("created", brain.now_ts()),
+                     "updated": brain.now_ts(), "installed_at": reg.get(name, {}).get("installed_at")}
+        save_registry(reg)
     return {"name": name, "path": str(path), "version": version}
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """原子写文本文件：先写临时文件再 os.replace，崩溃不留半截文件。"""
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def edit_skill(name: str, body: str | None = None, append: str | None = None,
@@ -871,18 +901,25 @@ def edit_skill(name: str, body: str | None = None, append: str | None = None,
         new_body = new_body.rstrip() + "\n\n" + append.strip()
     if len(new_body.strip()) < 40:
         raise ValueError("正文太短，技能至少要有用途、步骤、注意事项")
-    desc = description if description is not None else meta.get("description", "")
-    version = int(meta.get("version", 1)) + 1
-    created = meta.get("created") or _today()
-    Path(cur["path"]).write_text(
-        _compose(name, desc, new_body, version, created, _today(),
-                 meta.get("origin", "灵枢")), encoding="utf-8")
-    reg = load_registry()
-    reg[name] = {"description": desc, "version": version,
-                 "created": reg.get(name, {}).get("created", brain.now_ts()),
-                 "updated": brain.now_ts(), "installed_at": reg.get(name, {}).get("installed_at")}
-    save_registry(reg)
-    return {"name": name, "version": version, "path": cur["path"]}
+    # 与 create_skill 同锁同原子写：防并发 edit 互相覆盖、崩溃留半截文件
+    with brain._locked(SKILL_REG):
+        cur2 = read_skill(name)   # 锁内重读：拿到并发改动后的最新版本，别基于旧快照 +1
+        meta2 = cur2["meta"]
+        latest = (body if body is not None else cur2["body"])
+        if append:
+            latest = latest.rstrip() + "\n\n" + append.strip()
+        version = int(meta2.get("version", 1)) + 1
+        created = meta2.get("created") or _today()
+        final_desc = description if description is not None else meta2.get("description", "")
+        _atomic_write_text(Path(cur2["path"]),
+                           _compose(name, final_desc, latest, version, created, _today(),
+                                    meta2.get("origin", "灵枢")))
+        reg = load_registry()
+        reg[name] = {"description": final_desc, "version": version,
+                     "created": reg.get(name, {}).get("created", brain.now_ts()),
+                     "updated": brain.now_ts(), "installed_at": reg.get(name, {}).get("installed_at")}
+        save_registry(reg)
+    return {"name": name, "version": version, "path": cur2["path"]}
 
 
 def _ver(v) -> object:
@@ -998,7 +1035,12 @@ def list_skills() -> list:
             p = d / "SKILL.md"
             if not p.is_file():
                 continue
-            meta, body = parse_frontmatter(p.read_text(encoding="utf-8"))
+            try:
+                meta, body = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
+            except (OSError, UnicodeError, ValueError):
+                # SKILL.md 读不出来/解析失败（手改坏了、编码异常）：跳过，不能让列表整个崩
+                brain.log_event("growth", f"list_skills 跳过损坏技能 {d.name}", level="warn")
+                continue
             name = meta.get("name") or d.name
             try:
                 installed_dir = _find_installed(_require_slug(name))
@@ -1563,14 +1605,17 @@ def _risk_accepted(name: str) -> bool:
 
 
 def _accept_risk(name: str) -> None:
-    cfg = brain.load_config()
-    ra = dict(cfg.get("risk_accepted") or {})
-    ra[name] = brain.now_ts()
-    cfg["risk_accepted"] = ra
-    try:
-        brain.atomic_json(brain.HOME / "config.json", cfg)
-    except OSError:
-        pass
+    # 锁内重读盘上最新 config，只改自己的键再写回——旧快照整份回写会把
+    # 并发写入的其它键（token、模式等）抹掉。
+    with brain._locked(brain.HOME / "config.json"):
+        cfg = brain.load_config()
+        ra = dict(cfg.get("risk_accepted") or {})
+        ra[name] = brain.now_ts()
+        cfg["risk_accepted"] = ra
+        try:
+            brain.atomic_json(brain.HOME / "config.json", cfg)
+        except OSError:
+            pass
 
 
 def install_skill(name: str, force: bool = False, from_dir: str | None = None,
@@ -1891,8 +1936,9 @@ def self_review(force: bool = False, days: int = 3) -> dict:
     if not _readonly():
         try:
             with brain._locked(brain.HOME / "config.json"):
-                cfg["last_self_review"] = now
-                brain.atomic_json(brain.HOME / "config.json", cfg)
+                fresh = brain.load_config()   # 锁内重读：别把旧快照整份回写抹掉并发改动
+                fresh["last_self_review"] = now
+                brain.atomic_json(brain.HOME / "config.json", fresh)
             saved = True
         except OSError:
             saved = False

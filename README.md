@@ -392,6 +392,7 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 | 知识库 | `knowledge add\|list\|search\|show\|pin\|rm\|tidy\|review\|confirm <id>\|discard <id>` |
 | 冲突检查 | `detect-conflicts [--json] [--limit 50]`（启发式，只提醒不下结论） |
 | 模型档位 | `config show` / `config set model_tier small` / `config unset model_tier` |
+| 更新源认证 | `config set gitee_token <令牌>` / `config set github_token <PAT>`（可选；Gitee 令牌在 gitee.com 设置-私人令牌生成，无需勾权限即可访问公开仓库；GitHub PAT 同理） |
 | 笔记 | `note write\|search\|digest` |
 | 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow` |
 | 扩展模块 | `ext new\|edit\|show\|list\|run\|check\|rm`（可执行钩子，数据目录，更新永不覆盖） |

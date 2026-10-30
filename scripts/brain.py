@@ -1061,11 +1061,14 @@ def _append_archive(new_rows: list) -> None:
     记录会同时留在热层和 archive，重跑时这里按 id 去重，不会越堆越多。"""
     if not new_rows:
         return
-    existing = load_archive()
-    have = {m.get("id") for m in existing if m.get("id")}
-    add = [m for m in new_rows if m.get("id") not in have]
-    if add:
-        write_jsonl(HOME / "archive.jsonl", existing + add)
+    # archive.jsonl 的读-改-写自身加锁：调用方（archive_run/dream）只持热层锁，
+    # 没有互斥保护 archive；restore 那边是两把锁都持，不加这把会互相踩丢行。
+    with _locked(HOME / "archive.jsonl"):
+        existing = load_archive()
+        have = {m.get("id") for m in existing if m.get("id")}
+        add = [m for m in new_rows if m.get("id") not in have]
+        if add:
+            write_jsonl(HOME / "archive.jsonl", existing + add)
 
 
 def archive_run(dry_run: bool = False) -> dict:
@@ -2238,8 +2241,8 @@ def emotion_consistency_check(reply_text: str, record: bool = True) -> dict:
     """
     m = mood_now()
     rv = _reply_valence(reply_text)
-    mv = float(m.get("valence", 0))
-    mi = float(m.get("intensity", 0))
+    mv = _num(m.get("valence"), 0)
+    mi = _num(m.get("intensity"), 0)
     alert, reason = False, ""
     # 内部情绪够强 + 回复极性够明确 + 符号相反 + 落差够大，才告警（避免误报）
     if mi >= 0.25 and abs(mv) >= 0.35 and abs(rv) >= 0.3 and (mv * rv) < 0:
@@ -2354,7 +2357,7 @@ def rationality() -> dict:
     dr = mind_state()
     base = RATIONAL_DEFAULT if dr["reason"] is None else int(dr["reason"])
     m = mood_now()
-    pressure = sum(float(x.get("weight", 0)) * float(x.get("arousal", 0.3))
+    pressure = sum(_num(x.get("weight"), 0) * _num(x.get("arousal"), 0.3)
                    for x in m["active"]) if m.get("active") else 0.0
     suppress = min(EMOTION_SUPPRESS_MAX, pressure * 0.30)
     effective = round(base * (1 - suppress), 1)
@@ -2610,7 +2613,7 @@ def assoc_graph(limit: int = 300) -> dict:
     节点上限 limit（默认 300，太多画不动）；边只保留两端都在图里的。
     """
     records = [m for m in load_all() if m.get("layer") != "dust"]
-    records.sort(key=lambda m: (float(m.get("importance", 0.5)),
+    records.sort(key=lambda m: (_num(m.get("importance"), 0.5),
                                 float(retention(m))), reverse=True)
     nodes = records[:limit]
     ids = {n["id"] for n in nodes}
@@ -2623,7 +2626,7 @@ def assoc_graph(limit: int = 300) -> dict:
     return {
         "nodes": [{"id": m["id"], "gist": m.get("gist") or heuristic_gist(m.get("text", "")),
                    "kind": m.get("kind", ""), "layer": m.get("layer", "hippo"),
-                   "importance": float(m.get("importance", 0.5)),
+                   "importance": _num(m.get("importance"), 0.5),
                    "emotion": m.get("emotion", ""),
                    "recency": round(retention(m), 2)} for m in nodes],
         "edges": edges,
@@ -3113,7 +3116,7 @@ def persona_restore(name: str) -> dict:
     cur_hist = (load_persona().get("history") or [])
     snap_hist = persona.get("history") or []
     merged, seen = [], set()
-    for h in sorted(snap_hist + cur_hist, key=lambda x: float(x.get("ts", 0) or 0)):
+    for h in sorted(snap_hist + cur_hist, key=lambda x: _num(x.get("ts"), 0)):
         key = (h.get("ts"), h.get("field"), str(h.get("to")), h.get("why"))
         if key in seen:
             continue
@@ -3536,7 +3539,7 @@ def cluster_memories(records: list, max_clusters: int = 6, include_ids: set | No
             "ids": [m["id"] for m in g],
             "texts": [{"id": m["id"], "kind": m.get("kind", "fact"),
                        "text": m.get("text", ""), "importance": m.get("importance", 0.5),
-                       "age_days": round((now - float(m.get("created", now))) / DAY, 1)} for m in g],
+                       "age_days": round((now - _num(m.get("created"), now)) / DAY, 1)} for m in g],
             "tags": _dedupe([t for m in g for t in m.get("tags", [])]),
             "entities": _dedupe([e for m in g for e in m.get("entities", [])]),
         })
@@ -3939,7 +3942,7 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
         # 并从「最近的记忆」里剔除，两段互斥不重复。
         # >= 而非 >：同秒写入（startup 落盘和 remember 同一秒很常见）也要算进来。
         _last = (load_config().get("last_startup") or {}).get("ts") or 0
-        new_mem = [m for m in recent(20) if float(m.get("created", 0)) >= _last][:4]
+        new_mem = [m for m in recent(20) if _num(m.get("created"), 0) >= _last][:4]
         _new_ids = {m.get("id") for m in new_mem}
         mems = [(m, 0, {}) for m in recent(6 + len(new_mem)) if m.get("id") not in _new_ids][:6]
         header = "\n## 最近的记忆"
@@ -3947,7 +3950,7 @@ def build_injection(query: str = "", budget_tokens: int | None = None) -> str:
     for m, score, _ in mems:
         if used + lines_join_len(lines) > char_budget * 0.75:
             break
-        star = "★" * max(1, round(float(m.get("importance", 0.5)) * 5))
+        star = "★" * max(1, round(_num(m.get("importance"), 0.5) * 5))
         lines.append(f"- [{fmt_date(m.get('created', 0))} {star}] {display_text(m)}")
     if lines:
         out.append(header)
@@ -4726,7 +4729,7 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
                     tags=(m.get("tags") or [])[:4],
                     entities=(m.get("entities") or [])[:4],
                     source_ids=[m["id"]],
-                    confidence=min(0.9, 0.55 + 0.3 * float(m.get("importance", 0.5))))
+                    confidence=min(0.9, 0.55 + 0.3 * _num(m.get("importance"), 0.5)))
                 if how == "merged":
                     k_merged += 1
                 else:
@@ -4771,7 +4774,7 @@ def daily(dry_run: bool = False, force: bool = False) -> dict:
 # ---------------------------------------------------------------- CLI
 
 def _print_mem(m: dict, score: float | None = None, parts: dict | None = None) -> None:
-    star = "★" * max(1, round(float(m.get("importance", 0.5)) * 5))
+    star = "★" * max(1, round(_num(m.get("importance"), 0.5) * 5))
     layer = {"hippo": "海马体", "cortex": "皮层", "dust": "淡忘"}.get(m.get("layer"), m.get("layer"))
     head = f"[{fmt_time(m.get('created', 0))}] {layer} · {m.get('kind')} · {star}"
     if score is not None:

@@ -39,6 +39,11 @@ _WRITE_ENDPOINTS = {
 # 注意：token 会随首页响应下发，本机进程 GET / 即可提取，所以它防的不是本机进程，
 # 而是浏览器上下文里的误用（恶意网页跨站调用本机端口）；跨站防护主要靠 Host/Origin 校验。
 TOKEN = os.environ.get("LINGSHU_PANEL_TOKEN") or secrets.token_urlsafe(24)
+# 环境变量给了空串/空白时不能退化成空 token（否则任何请求都能过鉴权）——直接拒启
+if not TOKEN.strip():
+    print("[面板] LINGSHU_PANEL_TOKEN 为空，拒绝启动（空 token 等于不设防）", file=sys.stderr)
+    raise SystemExit(2)
+TOKEN = TOKEN.strip()
 
 
 def _int_param(url, key: str, default: int, low: int, high: int) -> int:
@@ -58,43 +63,67 @@ def memory_view(m: dict) -> dict:
 
 
 def overview() -> dict:
+    # 逐条 try/except 降级：单条坏记忆/坏文件不能让整个 overview 500（面板全页挂掉）
+    def _safe(label: str, fn, default):
+        try:
+            return fn()
+        except Exception as exc:
+            brain.log_event("panel", f"overview {label} 降级：{exc}", level="warn")
+            return default
+
     records = brain.load_all() + brain.load_archive()
-    ordered = sorted(records, key=lambda m: m.get("created", 0), reverse=True)
+    ordered = sorted(records, key=lambda m: _created_key(m), reverse=True)
+    memories = []
+    for m in ordered[:80]:
+        try:
+            memories.append(memory_view(m))
+        except Exception as exc:
+            brain.log_event("panel", f"overview 跳过坏记忆 {m.get('id')}: {exc}", level="warn")
     dreams = []
     ddir = brain.HOME / "dreams"
     if ddir.exists():
         for f in sorted(ddir.glob("*.md"), reverse=True)[:12]:
-            dreams.append({"name": f.name, "mtime": brain.fmt_time(int(f.stat().st_mtime)),
-                           "content": f.read_text(encoding="utf-8")[:3000]})
-    pending = brain.load_dream_pending()  # 与 CLI 同一套解析，避免两处逻辑漂移
+            try:
+                dreams.append({"name": f.name, "mtime": brain.fmt_time(int(f.stat().st_mtime)),
+                               "content": f.read_text(encoding="utf-8")[:3000]})
+            except (OSError, ValueError):
+                continue
     return {
-        "stats": brain.stats(),
-        "persona": brain.load_persona(),
-        "memories": [memory_view(m) for m in ordered[:80]],
+        "stats": _safe("stats", brain.stats, {}),
+        "persona": _safe("persona", brain.load_persona, {}),
+        "memories": memories,
         "dreams": dreams,
-        "pending": pending,
-        "mind": brain.mind_state(),
-        "mood": brain.mood_now(),
-        "emotion_arc": brain.emotion_arc(7),
-        "desires": brain.desire_state(),
-        "emotion_groups": brain.EMOTION_GROUPS,
-        "desire_defs": brain.DESIRES,
-        "rationality": brain.rationality(),
-        "emotion_cfg": brain.emotion_cfg(),
-        "daily_state": brain._daily_state(),
+        "pending": _safe("pending", brain.load_dream_pending, []),
+        "mind": _safe("mind", brain.mind_state, {}),
+        "mood": _safe("mood", brain.mood_now, {}),
+        "emotion_arc": _safe("emotion_arc", lambda: brain.emotion_arc(7), []),
+        "desires": _safe("desires", brain.desire_state, {}),
+        "emotion_groups": _safe("emotion_groups", lambda: brain.EMOTION_GROUPS, {}),
+        "desire_defs": _safe("desire_defs", lambda: brain.DESIRES, {}),
+        "rationality": _safe("rationality", brain.rationality, {}),
+        "emotion_cfg": _safe("emotion_cfg", brain.emotion_cfg, {}),
+        "daily_state": _safe("daily_state", brain._daily_state, {}),
         "last_self_review": load_config_last_review(),
-        "onboarding": brain.onboarding_state(),
+        "onboarding": _safe("onboarding", brain.onboarding_state, {}),
         "readonly": bool(brain.READONLY),
         "model_tier": brain.model_tier(),
-        "mode": str(brain.load_config().get("mode", "auto") or "auto").lower(),
-        "review_counts": brain.review_counts(),
-        "persona_drift": brain.persona_drift(7),
-        "emotion_alerts": brain.emotion_checks_recent(10),
-        "dream_draft": brain.load_dream_draft(),
-        "mode_detail": brain.resolve_mode_detail(""),
-        "log_summary": _log_summary(),
+        "mode": _safe("mode", lambda: str(brain.load_config().get("mode", "auto") or "auto").lower(), "auto"),
+        "review_counts": _safe("review_counts", brain.review_counts, {}),
+        "persona_drift": _safe("persona_drift", lambda: brain.persona_drift(7), []),
+        "emotion_alerts": _safe("emotion_alerts", lambda: brain.emotion_checks_recent(10), []),
+        "dream_draft": _safe("dream_draft", brain.load_dream_draft, None),
+        "mode_detail": _safe("mode_detail", lambda: brain.resolve_mode_detail(""), {}),
+        "log_summary": _safe("log_summary", _log_summary, {"warn": 0, "error": 0}),
         "home": str(brain.HOME),
     }
+
+
+def _created_key(m: dict):
+    """排序键：created 可能是坏类型（手改/LLM 产出），坏值沉底不抛异常。"""
+    try:
+        return float(m.get("created", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _log_summary() -> dict:
@@ -260,7 +289,8 @@ class Handler(BaseHTTPRequestHandler):
         # 页面有内联 <script>/<style>，明确放开；其余资源只能同源，禁止外链脚本/图片域名
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; script-src 'unsafe-inline'; "
-                         "style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+                         "style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+                         "frame-ancestors 'none'")  # 防恶意网页 iframe 嵌入面板（点击劫持）
         self.end_headers()
         self.wfile.write(body)
 
@@ -326,7 +356,9 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
             got = auth[7:].strip()
-        return hmac.compare_digest(got, TOKEN)
+        # encode 成 bytes 再比：非 ASCII header（恶意/异常客户端）直接传 str 会让
+        # compare_digest 抛 TypeError，且 do_POST 的鉴权调用不在 try 里，会断连
+        return hmac.compare_digest(got.encode("utf-8"), TOKEN.encode("utf-8"))
 
     # -------------------------------------------------- routes
     def do_GET(self):

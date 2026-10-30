@@ -13,6 +13,17 @@
 - **降级安全**：两个远端都失败时降级为「源即副本」（显示已最新），不崩溃。
 - **来源标识**：更新检查结果 `source` 字段取值改为 gitee / github / none，
   面板更新弹窗显示「来源：Gitee 远程 / GitHub 远程」。
+- **可选 token 认证**：Gitee 匿名 API 触发 IP 风控（403）、GitHub 匿名限额
+  60 次/小时按 IP 共享易耗尽。可在 config 配 `gitee_token` / `github_token`
+  走认证（`python scripts/brain.py config set gitee_token <令牌>`）。Gitee
+  令牌在 gitee.com「设置-私人令牌」生成（无需勾任何权限即可访问公开仓库）；
+  GitHub PAT 同理（github.com/settings/tokens）。请求头：Gitee 带
+  `PRIVATE-TOKEN`，GitHub 带 `Authorization: Bearer`；未配置保持匿名，
+  token 绝不打日志。
+- **Gitee zip 归档兜底**：Gitee API 403 时，尝试直下
+  `repository/archive/main.zip`（浏览器 UA），校验 zip 签名（PK\x03\x04）
+  后解压并定位含 SKILL.md 的真实根；校验失败（HTML 风控页）自动走下一链路。
+  403 错误信息会提示配置对应 token 的方法。
 
 ## v2.17 — 全量代码审查修复：28 项（6 严重 + 11 中等 + 11 建议）
 
