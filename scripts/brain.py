@@ -55,6 +55,12 @@ DEFAULT_STABILITY = 2 * DAY
 MAX_STABILITY = 240 * DAY
 RETENTION_FLOOR = 0.10
 
+# 人格漂移防线（做梦微调 traits 用）：
+#   同一方向的微调先在 state.trait_drift 账本上累积，不满门限不动真格——
+#   防止单场对话/一次梦把人格带偏；过了门限也只按 EMA 比例兑现一部分。
+TRAIT_DRIFT_GATE = 5     # 账面倾向累计满 ±5 才真正改人格
+TRAIT_DRIFT_EMA = 0.6    # 兑现比例：账面 6 分只改 3.6 分，余款下次接着用
+
 KINDS = ("episode", "fact", "preference", "emotion", "insight", "identity", "habit")
 LAYERS = ("hippo", "cortex", "dust")
 
@@ -1394,6 +1400,9 @@ def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
     cfg = load_config()
     w = cfg["weights"]
     records = [m for m in load_all() if m.get("id") and (m.get("layer") in layers or (include_dust and m.get("layer") == "dust"))]
+    # 被取代的记忆默认跳过：观念已更新，回忆里只出现新说法；
+    # 需要"翻旧账"时走 show 单条查，沿 superseded_by 链还能回溯到旧观念。
+    records = [m for m in records if not m.get("superseded_by")]
     if include_archive:
         records += [m for m in load_archive() if m.get("id")]
     if not records:
@@ -2097,6 +2106,8 @@ def feel(name: str, intensity: float = 0.6, why: str = "",
         scale = 0.5 + 0.5 * eff          # 强度 0~1 → 缩放 0.5~1.0
         desire_nudge({k: round(v * scale, 2)
                       for k, v in DESIRE_EMO_MAP[grp].items()})
+    # 心境沉淀：把这次情绪事件折进 EMA 心境账（下一刻的"心情"就有了惯性）
+    mood_record_ema(mood_now())
     return ev
 
 
@@ -2157,13 +2168,14 @@ def mood_now(at: float | None = None) -> dict:
     # 「静」是中性基底不是真情绪，混进 strong 会让"疲惫+开心"被误判成悲喜交加。
     strong = [g for g in groups if g["pct"] >= 15 and g["group"] != "静"]
     complex_flag = len(strong) >= 2
-    return {"valence": round(v, 3), "arousal": round(a, 3),
+    base = {"valence": round(v, 3), "arousal": round(a, 3),
             "label": _mood_label(v, a),
             "category": groups[0]["group"] if groups else "静",
             "intensity": round(min(1.0, sw), 3),
             "active": active[:6], "groups": groups,
             "complex": complex_flag, "storm": a >= STORM_AROUSAL,
             "note": "悲喜交加" if complex_flag else ""}
+    return _mood_ema(base)
 
 
 def _mood_label(v: float, a: float) -> str:
@@ -2177,6 +2189,51 @@ def _mood_label(v: float, a: float) -> str:
     if v > -0.45:
         return "焦虑" if a >= 0.6 else "失落"
     return "生气" if a >= 0.7 else ("委屈" if a >= 0.45 else "难过")
+
+
+# 心境 EMA：单事件情绪是"一瞬间"，心境是"这段时间的状态"。
+# mood_now 的瞬时值向 state.mood_ema 里沉淀的心境靠拢，单条激动事件
+# 只能把心境拉一部分，不会让情绪一夜之间天翻地覆。
+MOOD_EMA_ALPHA = 0.35
+
+
+def _mood_ema(m: dict) -> dict:
+    """把瞬时情绪向沉淀的心境（state.mood_ema）平滑，返回平滑后的情绪 dict。"""
+    p = _slurp_json(HOME / "persona.json")
+    ema = (p or {}).get("state", {}).get("mood_ema") or {}
+    if not ema or _num(ema.get("ts"), 0) < now_ts() - 3 * DAY:
+        return m   # 没有沉淀或超过三天没更新（心境已随时间消散）：直接用瞬时值
+    v = round(_num(ema.get("valence"), m["valence"]) * (1 - MOOD_EMA_ALPHA)
+              + m["valence"] * MOOD_EMA_ALPHA, 3)
+    a = round(max(0.0, min(1.0,
+        _num(ema.get("arousal"), m["arousal"]) * (1 - MOOD_EMA_ALPHA)
+        + m["arousal"] * MOOD_EMA_ALPHA)), 3)
+    out = dict(m)
+    out["valence"], out["arousal"] = v, a
+    out["label"] = _mood_label(v, a)
+    # 与瞬时值差得远时说明"情绪在恢复期"，提示一下
+    if abs(v - m["valence"]) >= 0.2:
+        out["note"] = ((out.get("note") + "，") if out.get("note") else "") + "情绪正在慢慢平复"
+    return out
+
+
+def mood_record_ema(m: dict) -> None:
+    """把平滑后的心境写回 state.mood_ema（低频落盘：仅在情绪事件写入时调用）。"""
+    if READONLY:
+        return
+    try:
+        with _locked(HOME / "persona.json"):
+            p = load_persona()
+            st = p.setdefault("state", {})
+            old = st.get("mood_ema") or {}
+            v = _num(old.get("valence"), m["valence"]) * (1 - MOOD_EMA_ALPHA) + m["valence"] * MOOD_EMA_ALPHA
+            a = _num(old.get("arousal"), m["arousal"]) * (1 - MOOD_EMA_ALPHA) + m["arousal"] * MOOD_EMA_ALPHA
+            st["mood_ema"] = {"valence": round(max(-1.0, min(1.0, v)), 3),
+                              "arousal": round(max(0.0, min(1.0, a)), 3),
+                              "ts": now_ts()}
+            atomic_json(HOME / "persona.json", p)
+    except Exception as e:
+        log_event("mood", f"心境 EMA 落盘失败：{e}", level="warn")
 
 
 def mood_brief() -> str:
@@ -2856,10 +2913,26 @@ def _update_persona_inner(updates: dict, why: str, source: str,
             if why == "做梦整理" and isinstance(val, (int, float)):
                 # old 可能是合法的 0：不能用 `old or 50`（0 会被当成 50）
                 base = 50 if old is None else int(old)
-                new = base + int(val)              # 做梦只做微调（增量 ±3 以内）
+                # —— 人格漂移双门限 + EMA ——
+                # 人格是长年累月养成的，不该被一两场对话带偏：做梦给出的微调先记在
+                # drift 账本上，小幅波动（低于门限）只是心里动了一下，不落盘；同向
+                # 攒够门限才真正改人格，改的幅度也打六折——越大的转变越要慢慢来。
+                drift = st.setdefault("trait_drift", {})
+                acc = _num(drift.get(key), 0.0) + max(-10, min(10, int(val)))
+                if abs(acc) < TRAIT_DRIFT_GATE:
+                    drift[key] = round(acc, 2)
+                    log(f"traits.{key}(漂移累积)", old, f"账面 {acc:+.1f}，未过门限未改动")
+                    continue
+                eff = acc * TRAIT_DRIFT_EMA
+                new = base + int(round(eff))
+                drift[key] = round(acc - eff, 2)   # 平滑掉的余额留在账上，下次接着攒
+                new = max(0, min(100, new))
+                if new == old:
+                    log(f"traits.{key}", old, f"倾向 {acc:+.1f} 但撞在边界上，未变")
+                    continue
             else:
                 new = int(val)                     # 面板 / CLI：绝对值 0-100
-            new = max(0, min(100, new))
+                new = max(0, min(100, new))
         except (TypeError, ValueError):
             rejected.append(f"traits.{key}(非法值)")
             continue
@@ -3790,6 +3863,23 @@ def apply_dream(result: dict) -> dict:
             # AI 整理出来的记忆先标"待审核"：防止做梦合并/编造的内容直接当事实沉淀。
             rec["review"] = "pending"
             rec["review_source"] = "dream"
+            # —— 矛盾记忆不覆盖，留链路 ——
+            # 新记忆与旧记忆高度相似但内容不同（说法变了/事实更新）时，旧的不删，
+            # 打上 superseded_by 指向新的：回忆默认跳过被取代者，需要时仍可回溯
+            # "我以前是怎么想的"——像人一样，观念变了但旧观念还在记忆深处。
+            for old in records:
+                if old is rec or old.get("layer") == "dust" or old.get("superseded_by"):
+                    continue
+                old_terms = terms(str(old.get("text", "")))
+                if not old_terms:
+                    continue
+                sim = jaccard(terms(text), old_terms)
+                if sim >= 0.55 and str(old.get("text", "")).strip() != text:
+                    old["superseded_by"] = rec["id"]
+                    rec.setdefault("links", [])
+                    if old["id"] not in rec["links"]:
+                        rec["links"].append(old["id"])
+                    applied.setdefault("superseded", []).append(old["id"])
             records.append(rec)
             applied["memories"] += 1
             for sid in rec["links"]:

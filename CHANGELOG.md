@@ -2,6 +2,20 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.20 — 拟人情感/记忆增强（双门限 + EMA + 记忆取代链）
+
+- **人格漂移双门限 + EMA**（brain.py `update_persona`）：做梦给出的 traits 微调
+  不再直接落盘，先记在 `state.trait_drift` 账本上累积；同向累计不满 ±5
+  （`TRAIT_DRIFT_GATE`）只是"心里动了一下"，越过门限也只按 60%
+  （`TRAIT_DRIFT_EMA`）兑现，余款下次接着用——单场对话/一次梦带不偏人格。
+- **矛盾记忆 superseded_by 链**（`apply_dream`）：梦整理产出的新记忆与旧记忆
+  相似度 ≥0.55 且内容不同时，旧记忆不删、打上 `superseded_by` 指向新记忆并
+  互相链接；recall 默认跳过被取代者，需要时沿链回溯"我以前是怎么想的"。
+- **心境 EMA**（`mood_now` / `mood_record_ema`）：情绪事件写入时把瞬时心情按
+  α=0.35 折进 `state.mood_ema` 心境账；mood_now 返回值向心境平滑——单条激动
+  事件只能把心情拉一部分，情绪有惯性、也会"慢慢平复"（差距大时附 note）。
+  超过三天未更新则心境消散，回退纯瞬时值。
+
 ## v2.19 — 全面审计修复 + 更新链路防倒退
 
 ### 稳健性（brain.py）
