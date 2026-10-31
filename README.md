@@ -180,6 +180,8 @@ python scripts/brain.py assoc unlink m_3f2a... m_9c1d...
 ### 技能自编辑与全局化
 
 技能是固化的做法：`skill new` 写 → `skill check` 自检 → `skill install` 装进全局技能目录（`~/.trae-cn/skills/`），新会话直接可调。`skill use --auto` 用技能时自动全局化；`skill borrow` 借鉴别人的技能变成自己的版本（诚实标注来源）。**支持中文技能名**。
+
+**跨宿主技能发现（v2.23）**：灵枢会只读扫描本机各 AI 工具的全局技能目录（DSH、Trae CN/Trae、Claude Code、Codex、Cursor、Gemini 等 15 个候选），`skill roots` 看哪里有技能、`skill scan` 列出可复用的、`skill use` 照做、`skill borrow` 借为己用。也可以用 `skill root-add <路径>` 手动添加目录，或设环境变量 `LINGSHU_GLOBAL_SKILLS`（多个用 `; ,` 分隔）。面板「技能」页同样能看/加根目录并重扫。
 技能有两种形态：`skill` 是说明书（给人/别的 AI 复用）；`ext`（扩展模块）是 AI 自己写进灵枢引擎的**可执行 Python 钩子**（`inject` 并入每会话注入、`run` 加自定义命令），放在数据目录 `~/.brain-memory/extensions/`，**更新永不覆盖**、坏模块自动跳过。
 
 ### 进化日志
@@ -424,9 +426,16 @@ python scripts/brain.py serve   # 或直接双击 start-panel.bat
 ├── assets/
 │   └── panel.html          # 可视化面板前端（单文件，无依赖）
 └── scripts/
-    ├── brain.py            # 核心引擎：记忆/人格/做梦/工作记忆/备份恢复/上下文防线/面板服务
+    ├── brain.py            # 入口与 re-export（保持全部旧命令/旧 import 兼容）
+    ├── core.py             # 环境/配置/路径/锁/原子写/JSONL IO/只读降级
+    ├── memory.py           # 分层记忆/回忆/归档/工作记忆/capture/关联/注入与统计
+    ├── emotion.py          # 七情六欲/心境/认知评价/共情/理智
+    ├── persona.py          # 人格/快照回滚/初识与自我设定
+    ├── dream.py            # 做梦：聚类巩固与梦境应用
+    ├── cli.py              # 子命令解析与执行/备份恢复/启动注入/每日例行
     ├── growth.py           # 成长系统：知识库/笔记/技能/进化日志/DSH 插件扫描
-    └── panel_server.py     # 本地面板 HTTP 服务（token 鉴权 + 来源校验）
+    ├── panel_server.py     # 本地面板 HTTP 服务（token 鉴权 + 来源校验）
+    └── check_version.py    # 版本硬检查：改代码必须升 SKILL.md 版本（可装 pre-commit）
 ```
 
 运行时数据（默认 `~/.brain-memory/`，`--home` 可迁移）：

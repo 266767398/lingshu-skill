@@ -1,7 +1,7 @@
 ---
 name: lingshu
 title: 灵枢
-version: 2.21
+version: 2.25
 description: 类脑持久记忆、人格与成长系统——跨会话记住事情、长出自己的人格、上下文将满时做梦式整理记忆。用户提到记忆/记住/上次/人格/设定/性格/知识库/笔记/日志/成长/自我进化/工作记忆，或新会话开始需要恢复关系与上下文时使用。纯本地零依赖。
 ---
 
@@ -45,7 +45,7 @@ skills/        你自己写的技能      extensions/     扩展模块（可执�
 lingshu.user.md 用户附加规则（更新技能永不覆盖，每会话自动注入）
 ```
 
-脚本：`<本技能目录>/scripts/brain.py`（成长子系统 `growth.py`，由 brain.py 转发）。
+脚本：`<本技能目录>/scripts/brain.py`（成长子系统 `growth.py`，由 brain.py 转发；记忆/情绪/人格/做梦实现已按领域拆到同目录 `memory.py` / `emotion.py` / `persona.py` / `dream.py` / `cli.py`，由 `brain.py` 合并命名空间并 re-export，命令与旧 import 全部兼容）。
 
 > **路径约定（重要）**：本文命令一律写作 `python scripts/brain.py ...`，但你的 cwd 不一定是技能目录。
 > 实际执行时二选一：
@@ -202,13 +202,14 @@ python scripts/brain.py ext rm <名字>                    # 删除
 
 - [ ] 出现约定/承诺/截止 → 立刻 `remember --kind fact --importance 8`
 - [ ] 情绪高点、关系推进 → 记记忆 + `emotion feel <情绪名> --intensity N --why "..."`
-- [ ] 被问起过去 → 先 `recall <关键词>` 再回答
+- [ ] 被问起过去 → 先 `recall <关键词>` 再回答；回答里真用上了找回的内容 → `usage --reply "<你的回复>"`
 - [ ] ≈60% → `check-context` 清点；≈75% → `dream --auto`；≈90% 且绝不能丢 → `capture "原文" --tag 逃生`
 
 会话结束：
 
 - [ ] 工作记忆值得留的 → `work flush`（已完成不想留 → `--skip-done`）
 - [ ] 值得长留而没记的 → 补 `remember`；今日总结/沉淀 → `daily --force`
+- [ ] 顺手提炼当天对话里的 1-3 个情绪事件 → `daily --feel "情绪:强度:原因"`（可重复；这是情绪系统的主要输入源，不写就一直是空骨架）
 
 ## 高频命令索引
 
@@ -219,7 +220,8 @@ python scripts/brain.py recall "关键词" --k 6
 python scripts/brain.py check-context --used 68      # 60 清点 / 75 做梦 / 90 封存
 python scripts/brain.py capture "原文" --tag 逃生
 python scripts/brain.py dream --auto                 # 做梦整理
-python scripts/brain.py daily                        # 每日例行
+python scripts/brain.py daily [--feel "开心:0.7:原因"]  # 每日例行（顺手记情绪事件，可重复）
+python scripts/brain.py usage --reply "回复文本"       # 核对上一轮找回的记忆是否真被用上
 python scripts/brain.py mode show|work|human|auto|explain  # 会话模式（explain 看 auto 判定依据）
 python scripts/brain.py review | audit               # 审核闸 / 自查
 python scripts/brain.py persona show|history|snapshot|drift

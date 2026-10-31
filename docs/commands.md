@@ -36,15 +36,18 @@
 | 情绪-输出一致性 | `emotion check "回复文本"`（内部情绪 vs 回复语气是否背离，重度背离时告警） |
 | 共情 / 情感设置 | `emotion mirror "用户情绪" [--intensity 0.7]` / `emotion config [--empathy mirror\|mild\|off] [--gain 0.5] [--max-intensity 0.8] [--suppress "怒,恶"] [--notes "..."]` |
 | 记忆关联 | `assoc [link <idA> <idB> --relation 因果 --weight 1\|unlink <idA> <idB>\|of <id>\|auto [--dry-run]\|graph --limit 300]` |
-| 每日例行 | `daily [--dry-run] [--force]`（写日记 + 沉淀知识 + 过期的梦自动做掉） |
+| 每日例行 | `daily [--dry-run] [--force] [--feel "情绪:强度:原因"]`（写日记 + 沉淀知识 + 过期的梦自动做掉；`--feel` 可重复，顺手把当天对话里的情绪事件记进情绪流） |
+| 回忆使用反馈 | `usage --reply "回复文本" [--json]`（核对上一轮 recall/注入的记忆有没有出现在回复里，按关键词重叠粗判；命中的记忆会加一次使用强化） |
 | 自我总结（每2-3天） | `skill self-review [--force] [--days 3]` |
 | 知识库 | `knowledge add\|list\|search\|show\|pin\|rm` |
 | 整理知识 | `knowledge tidy` → 填 apply.json → `knowledge tidy --apply apply.json` |
 | 知识审核 | `knowledge review` / `knowledge confirm <id>` / `knowledge discard <id>` |
 | 笔记 | `note write "标题" --type journal\|log\|growth --body ...` / `note list [--type ...]` / `note show <id>` |
 | 笔记检索 / 素材 | `note search "词"` / `note digest --days 7` |
-| 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow` |
+| 技能 | `skill new\|edit\|list\|show\|check\|install\|uninstall\|rm\|find\|use\|borrow\|roots\|scan` |
 | 技能安装 | `skill install <名字> [--force] [--from 外部目录]`（整目录 + 自动生成 AGENTS.md；装灵枢本体需先过风险确认 `--yes`，中文名/英文名 `lingshu` 都认；自动装到 DSH 的 `~/.dsh/skills`，无则回落 Trae 的 `~/.trae-cn/skills`） |
+| 技能根目录（跨宿主） | `skill roots`（列出全部根目录与技能数）/ `skill root-add <路径>` / `skill root-rm <路径>`（手动增删自定义根目录，写入 config.json `skill_roots`；也支持环境变量 `LINGSHU_GLOBAL_SKILLS`，多个用 `; ,` 分隔）。内置 15 个宿主候选：DSH / Trae CN / Trae / Agents / Claude Code / Codex / Cursor / Gemini / Antigravity / Amp / Qwen / Windsurf / OpenCode / Cline / GitHub |
+| 跨宿主扫描 | `skill scan`（只读扫描所有根目录，列出其他宿主里现成可复用的技能；`skill use <名字>` 可直接读正文照做，`skill borrow <名字>` 可复制为本地技能自由修改） |
 | 已装技能自查 | `skill list --global`（列出全局技能目录已装的技能，核对目录名是否为 kebab-case；DSH/Trae 两目录都会扫，旧版中文目录会被标 `✗`） |
 | 技能卸载 | `skill uninstall <名字>`（`lingshu` 会连旧版中文目录 `灵枢` 一起删掉，两个全局目录都清，避免 DSH 仍去扫空壳） |
 | 技能自动全局化 | `skill use <名字> --auto` |

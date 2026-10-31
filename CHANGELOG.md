@@ -2,6 +2,106 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.25 — 更新检测只在面板服务启动时做一次
+
+- **浏览器刷新不再触发更新检测**：面板服务（panel_server）启动时后台检测
+  一次更新并写缓存，浏览器刷新面板只读缓存点亮红点，绝不联网。
+- `update_check(auto=True)` 改为严格只读缓存：缓存不存在就返回
+  `cached=False` 由前端静默降级，不再回落联网检测。
+- 用户手动点「检查更新」仍会重新拉远程源刷新缓存（行为不变）。
+
+## v2.24 — 面板 API 健壮性修复 + 前端体验大扫除
+
+### 后端
+- **`/api/persona/edit` 不再 500**：identity/traits/drives 传非对象、style/values/
+  likes/dislikes/background 传非列表时返回明确 400；字符串列表字段自动按逗号
+  （含中文逗号）拆分容错。此前恶意/手滑的字符串输入会让 `edit_persona` 抛
+  `AttributeError` 导致整个请求 500。
+- **备份目录可显式指定**：新增环境变量 `BRAIN_MEMORY_BACKUP_DIR`，设置后
+  `backup` 的默认输出目录只跟随它——测试/自定义 `BRAIN_MEMORY_HOME` 场景
+  不再意外把备份写到 D 盘或桌面。
+- 面板 API 端到端回归：15 个 GET + 33 个 POST + 11 个安全/防御用例全部符合预期。
+
+### 前端（panel.html）
+- **写操作防重复提交**：所有会改数据的按钮点击后立即禁用 + 转圈 loading，
+  完成或失败后恢复——连点不再发出一串重复请求。
+- **搜索/注入/模式判定竞态防护**：连发请求只认最新一次（seq 计号），
+  旧响应晚到不再覆盖新结果。
+- **`prompt()` 全部替换为弹窗编辑器**：多行内容不再被浏览器原生弹窗卡住。
+- **离线横幅**：后端失联 30s×3 后页面顶部提示「连接已断开」，恢复自动隐藏。
+- **错误不再静默吞掉**：所有写操作 catch 补 `console.error`，F12 能看到根因。
+- **长内容限宽**：历史/列表表格改定宽布局 + 省略号，超长记忆不再撑爆页面。
+- **小修**：星级显示对 importance 取整夹取（不再出现负星/六星）、进度环
+  百分比 clamp、移动端 ≤720px 单列布局、导航按钮补 aria-label、共用行
+  模板抽取去重、内联样式收敛为类。
+
+
+## v2.23 — 跨宿主技能发现 + 面板可用性大扫除
+
+### 技能系统：知道哪里有技能，能跨宿主复用
+- **15 个宿主技能根目录候选**（`SKILL_ROOT_CANDIDATES`）：DSH / Trae CN / Trae /
+  Agents / Claude Code / Codex / Cursor / Gemini / Antigravity / Amp / Qwen /
+  Windsurf / OpenCode / Cline / GitHub——本机哪个存在就扫哪个，换机器不用改代码。
+- **三层根目录合并**：环境变量 `LINGSHU_GLOBAL_SKILLS`（最高优先，`; ,` 分隔）
+  → 真实存在的宿主约定目录 → 用户手动添加（config.json `skill_roots`）。
+- **新命令**：`skill roots`（列出根目录及技能数）、`skill root-add <路径>` /
+  `skill root-rm <路径>`（手动增删根目录）、`skill scan`（跨宿主扫描可用技能）。
+- **`memory.build_injection` 注入技能库位置**：上下文里直接告诉 AI 哪些目录有技能、
+  有几个，附 `skill scan / skill use / skill borrow` 用法提示。
+
+### 面板（panel.html + panel_server.py）
+- **技能页新增两张卡**：「技能根目录 · 跨宿主发现」（列出各根目录、可手动输入
+  路径添加、一键重扫）与「其他宿主的技能 · 只读可复用」（列出扫描到的外部技能，
+  支持查看内容 / 照做使用 / 借用为本地技能）。
+- **日志可删了**：单条精确删除（按 ts/kind/msg 匹配）+ 一键清空，报错不再赖着不走。
+- **顶部加载条删除**：`topProgress` 改为 no-op 空壳，不再来回滑。
+- **检查更新提速**：6 小时磁盘缓存 + `auto=1`（开面板静默读缓存，秒回）/
+  `refresh=1`（手动点按钮才真联网）；按钮加 loading 转圈态，超时 120s 上限。
+- **彻底消除 WinError 10053 traceback 刷屏**：`_send` 全流程吞掉客户端断连异常
+  （浏览器刷新/关闭是正常行为，不是错误），`do_GET`/`do_POST` 兜底不再打印堆栈。
+
+## v2.22 — 情绪有了输入源 + 回忆用没用的度量 + 版本硬检查
+
+### 情绪系统不再空转
+- **`daily --feel "情绪:强度:原因"`**（可重复）：把情绪采集挂到已有的每日例行动作上。
+  写日记的同时顺手把当天对话里的 1-3 个情绪事件记进 `emotions.jsonl`；强度可省
+  （默认 0.5），`>1` 按 0-10 分制折算成 0-1；不认识的情绪名进 `feelings_bad` 不落盘。
+  即使今天已例行过，也**先记情绪再返回 skipped**，不丢事件；`--dry-run` 只预览不写。
+  六欲的"随日常波动"由此第一次有了真实输入源。
+- **`stats` 情绪行修复**：原读 `persona.state.mood`（从未被写入，永远空），改为
+  `mood_brief() or mood_now()`，输出真实瞬时心情。
+
+### 回忆使用率：存得好不好，第一次有数
+- **`last_retrieval.json` 快照**：`recall` 与 `startup/inject` 每次把本轮命中的记忆
+  （id + 正文摘要）记下来，供下一轮核对。
+- **`usage --reply "回复文本"`**：按关键词重叠粗判（中文二元组去虚词；共享 ≥2 个词元
+  且占比 ≥8%，或短记忆共享 1 个词元即算），判断找回的记忆有没有真出现在回复里。
+  命中的记忆累加 `used_count`/`used_hits` 并走一次定向强化；未核对的快照不重复计数。
+- **`recall_usage.jsonl`**：保留最近 1000 次核对事件。
+- **`stats` 新增三项**：回忆使用率（used/recalled）、从未被命中占比、满月且从未命中
+  的 archive 候选数——调 `weights`/阈值不再全靠感觉。
+
+### 版本与内容绑定
+- **`scripts/check_version.py`**：git 变更里有代码文件（`scripts/`、`assets/`、
+  `cordis-plugin/`、`start-panel.bat`、`package.json`）但 `SKILL.md` 的 `version`
+  没变 → 退出码 1 拒绝提交。支持 `--staged`（供钩子用）与 `--json`。
+- **`scripts/hooks/pre-commit`** + `check_version.py --install`：把检查装进
+  `.git/hooks/`（已有钩子自动备份），补上"改代码必须升版本"这半条。
+
+### brain.py 物理拆分（305KB → 6 个领域模块）
+- `scripts/` 下新增 `core.py`（环境/配置/路径/锁/原子写/JSONL IO/只读降级）、
+  `memory.py`（记忆/回忆/归档/工作记忆/capture/关联/注入/统计）、`emotion.py`、
+  `persona.py`、`dream.py`、`cli.py`；函数体原样搬运，不改逻辑。
+- **`brain.py` 只做命名空间合并与 re-export**：导入六个模块 → 合并其命名空间 →
+  回灌给每个子模块，跨模块裸名调用照旧解析；`python scripts/brain.py <子命令>`
+  与外部 `import brain` 的旧名字全部可用（含 `_locked` 等下划线内部名字）。
+- **`--home` / `--ro` 状态同步**：`core._SYNC_TARGETS` + `_sync_state()` 在路径重算
+  与只读判定后把 HOME/READONLY/派生路径回灌给所有子模块，避免拆分后各模块仍指向
+  旧目录（单文件时天然共享的隐性契约，现在显式化）。
+- 验证：30 条 CLI 子命令冒烟（含 startup/recall/usage/daily/dream/emotion/persona/
+  assoc/archive/capture/work/review/audit 与 growth/skill/note 转发）+
+  `--home` 双库隔离 + `--ro` 降级 + `panel_server.overview()` 全部通过。
+
 ## v2.21 — 面板数值活性：自动刷新 + 精力/亲密基线回归
 
 - **面板 30 秒自动轮询**（panel.html）：overview 数据每 30s 静默刷新，

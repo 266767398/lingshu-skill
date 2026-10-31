@@ -58,27 +58,94 @@ def _panel_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _global_roots() -> list:
-    """全局技能目录候选，按优先级排列（第一个是安装目标）。
+# 各宿主（AI 编程工具）约定的全局技能目录，按安装目标优先级排列。
+# 灵枢只读扫描这些目录，发现现成技能就能直接 skill use / skill borrow；
+# 换机器、换宿主都不用改代码。项目级目录（.trae/skills 等）随项目走，不在这里扫。
+SKILL_ROOT_CANDIDATES = [
+    (".dsh/skills", "DSH"),
+    (".trae-cn/skills", "Trae CN"),          # Trae 国内版
+    (".trae/skills", "Trae"),                # Trae 国际版 / SOLO
+    (".agents/skills", "Agents"),            # 通用 Agent 生态约定
+    (".claude/skills", "Claude Code"),
+    (".codex/skills", "Codex"),
+    (".cursor/skills", "Cursor"),
+    (".gemini/skills", "Gemini"),
+    (".gemini/antigravity/skills", "Antigravity"),
+    (".config/agents/skills", "Amp"),
+    (".qwen/skills", "Qwen"),
+    (".windsurf/skills", "Windsurf"),
+    (".config/opencode/skill", "OpenCode"),
+    (".cline/skills", "Cline"),
+    (".github/skills", "GitHub"),
+]
 
-    不同宿主的全局技能目录不同：Trae 扫 ~/.trae-cn/skills，APP（Coding
-    Agent）扫 ~/.app/skills，另有通用 Agent 生态约定 ~/.agents/skills。
-    本机存在哪个就认哪个（存在者优先、候选顺序兜底），换机器不用改代码；
-    安装目标取第一个存在的目录，避免装进宿主根本不扫的位置。
-    可用 LINGSHU_GLOBAL_SKILLS 覆盖（优先级最高）。
+
+def _config_roots() -> list:
+    """用户在配置里手动添加的技能根目录（config.json 的 skill_roots）。"""
+    try:
+        raw = brain.load_config().get("skill_roots") or []
+    except Exception:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    out, seen = [], set()
+    for item in raw:
+        try:
+            p = Path(str(item)).expanduser()
+        except (TypeError, ValueError):
+            continue
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def _global_roots() -> list:
+    """全局技能目录，按优先级排列（第一个是安装目标）。
+
+    来源三层：环境变量 LINGSHU_GLOBAL_SKILLS（最高优先，多个用 ; , 分隔）
+    → 本机真实存在的各宿主约定目录 → 用户手动添加的自定义目录。
+    存在者优先、候选顺序兜底，换机器不用改代码；安装目标取第一个，
+    避免装进宿主根本不扫的位置。
     """
+    out, seen = [], set()
+
+    def _add(p: Path):
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+
     env = (os.environ.get("LINGSHU_GLOBAL_SKILLS") or "").strip()
     if env:
-        return [Path(env).expanduser()]
-    candidates = [
-        Path.home() / ".app" / "skills",      # APP（Coding Agent）
-        Path.home() / ".agents" / "skills",   # 通用 Agent 生态约定
-        Path.home() / ".trae-cn" / "skills",  # Trae
-    ]
-    roots = [c for c in candidates if c.is_dir()]
-    if not roots:
-        roots = candidates  # 都不存在时保留完整候选，安装时会自动创建第一个
-    return roots
+        for part in re.split(r"[;；,，]", env):
+            if part.strip():
+                _add(Path(part.strip()).expanduser())
+    candidates = [Path.home() / rel for rel, _ in SKILL_ROOT_CANDIDATES]
+    for c in candidates:
+        if c.is_dir():
+            _add(c)
+    for c in _config_roots():
+        _add(c)
+    if not out:
+        out = candidates  # 都不存在时保留完整候选，安装时会自动创建第一个
+    return out
+
+
+def _root_label(path: Path) -> str:
+    """技能目录的人类可读标签（宿主名 / 自定义）。"""
+    for rel, label in SKILL_ROOT_CANDIDATES:
+        if str(path) == str(Path.home() / rel):
+            return label
+    try:
+        rel = path.resolve().relative_to(Path.home().resolve()).as_posix()
+    except (OSError, ValueError):
+        return "自定义"
+    for cand, label in SKILL_ROOT_CANDIDATES:
+        if rel == cand:
+            return label
+    return "自定义"
 
 
 GLOBAL_SKILLS = _global_roots()[0]  # 安装目标（主目录）
@@ -99,7 +166,7 @@ _WINDOWS_RESERVED = {"con", "prn", "aux", "nul",
 LINGSHU_RISKS = [
     "它会在你本机 ~/.brain-memory 下长期保存：对话记忆、你告诉它的个人偏好与情绪记录（本地明文）。换机器/共享电脑时请注意隐私。",
     "上下文接近满时它会自动原文封存（capture）与做梦压缩，并每天写日记、更新知识库——这些是自动行为，内容会持续增长。",
-    "它会只读扫描全局技能目录（~/.dsh/skills、~/.trae-cn/skills）与 DSH（~/.dsh/profiles）插件清单，判断有没有现成能力可用。",
+    "它会只读扫描多个宿主的全局技能目录（~/.dsh/skills、~/.trae-cn/skills、~/.claude/skills 等）与 DSH（~/.dsh/profiles）插件清单，判断有没有现成能力可用。",
     "它有自我编辑能力（skill new/edit/install），理论上能改写它自己的说明书与全局副本，并生成 AGENTS.md。",
     "记忆只存在本地，误删/损坏依赖手动备份：建议首次启用先跑 python scripts/brain.py backup。",
 ]
@@ -1126,6 +1193,12 @@ def _remote_cache_dir() -> Path:
 # 超过 10 分钟自动重拉一次（点「更新」仍无条件 force）。
 REMOTE_CACHE_TTL = 600.0
 
+# 「检查更新」结果缓存：面板打开就自动查一次，若每次都同步拉远程会卡十几秒
+# （还会因为用户中途关页面触发断连报错）。所以结果落盘复用：
+#   自动检查（auto=1）→ 只读缓存，不联网；手动检查（refresh=1）→ 联网并刷新缓存。
+UPDATE_CACHE_FILE = HOME / "update_check.json"
+UPDATE_CACHE_TTL = 6 * 3600.0   # 缓存 6 小时内视为可信
+
 
 def _remote_token(host: str) -> str:
     """取可选的认证 token（gitee/github），未配置返回空串。绝不打日志。
@@ -1502,7 +1575,7 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
     return None, "none", err
 
 
-def update_check(name: str = "lingshu", force_pull: bool = False) -> dict:
+def _update_check_live(name: str = "lingshu", force_pull: bool = False) -> dict:
     """检查本地源与全局已装副本的差异，返回「更新了什么」明细。
 
     面板「检查更新」用：installed=False 表示没装过；outdated=False 表示已是最新；
@@ -1624,6 +1697,59 @@ def update_check(name: str = "lingshu", force_pull: bool = False) -> dict:
             _changelog_between(src_dir, out["installed_version"], out["version"])
             or "本次更新内容较多，详见 CHANGELOG.md。")
     return out
+
+
+def _load_update_cache() -> dict | None:
+    """读「检查更新」结果缓存；文件不存在/损坏返回 None。"""
+    try:
+        if not UPDATE_CACHE_FILE.is_file():
+            return None
+        return _read_json(UPDATE_CACHE_FILE)
+    except (OSError, ValueError):
+        return None
+
+
+def _save_update_cache(result: dict) -> None:
+    """写「检查更新」结果缓存（只缓存真正查到东西的结果，只读模式跳过）。"""
+    if brain.READONLY:
+        return
+    if not result or result.get("source") in (None, "none"):
+        return
+    try:
+        UPDATE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        brain.atomic_json(UPDATE_CACHE_FILE, {"ts": int(time.time()), "result": result})
+    except (OSError, ValueError):
+        pass
+
+
+def update_check(name: str = "lingshu", force_pull: bool = False, auto: bool = False) -> dict:
+    """检查更新（带缓存）：auto=True 严格只读缓存绝不联网，force_pull=True 联网并刷新缓存。
+
+    面板服务启动时后台用 force_pull=True 检测一次并写缓存；浏览器刷新面板
+    用 auto=True（毫秒级返回，永不联网、永不阻塞页面），缓存不存在就返回
+    cached=False 由前端自行降级。用户手动点「检查更新」才走 force_pull=True。
+    """
+    cache = _load_update_cache()
+    if auto:
+        if cache and isinstance(cache.get("result"), dict):
+            res = dict(cache["result"])
+            res["cached"] = True
+            res["checked_at"] = int(cache.get("ts") or 0)
+            return res
+        return {"cached": False}   # 没缓存也不联网：检测只发生在服务启动/手动检查
+    if not force_pull and cache and isinstance(cache.get("result"), dict):
+        try:
+            fresh = time.time() - float(cache.get("ts") or 0) < UPDATE_CACHE_TTL
+        except (TypeError, ValueError):
+            fresh = False
+        if fresh:
+            res = dict(cache["result"])
+            res["cached"] = True
+            res["checked_at"] = int(cache.get("ts") or 0)
+            return res
+    res = _update_check_live(name, force_pull=force_pull)
+    _save_update_cache(res)
+    return res
 
 
 def _changelog_between(src_dir: Path, old_ver: str, new_ver: str) -> str:
@@ -2233,10 +2359,128 @@ def list_dsh_plugins() -> list:
 
 
 def _skill_roots() -> list:
+    """(来源标签, 目录) 列表：自己写的在最前，其余按宿主名标注。"""
     roots = [("自己", SKILLS_DIR)]
-    for i, r in enumerate(_global_roots()):
-        roots.append(("全局" if i == 0 else f"全局({r.parent.name})", r))
+    seen = {str(SKILLS_DIR)}
+    for r in _global_roots():
+        if str(r) in seen:
+            continue
+        seen.add(str(r))
+        roots.append((_root_label(r), r))
     return roots
+
+
+def _count_skills(root: Path) -> int:
+    """目录下有多少个技能（子目录里有 SKILL.md）。"""
+    try:
+        return sum(1 for _ in root.glob("*/SKILL.md"))
+    except OSError:
+        return 0
+
+
+def skill_roots() -> list:
+    """所有技能根目录的清单：标签、路径、是否存在、是否自定义、技能数量。"""
+    custom = {str(p) for p in _config_roots()}
+    out = []
+    for label, root in _skill_roots():
+        out.append({
+            "label": label,
+            "path": str(root),
+            "exists": root.is_dir(),
+            "custom": str(root) in custom,
+            "count": _count_skills(root) if root.is_dir() else 0,
+            "writable": not brain.READONLY,
+        })
+    return out
+
+
+def add_skill_root(path: str) -> dict:
+    """把用户手动指定的目录登记为技能根目录（写进 config.json 的 skill_roots）。"""
+    raw = (path or "").strip().strip('"').strip("'")
+    if not raw:
+        raise ValueError("要给出一个目录路径")
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = (Path.cwd() / p)
+    try:
+        p = p.resolve()
+    except OSError:
+        pass
+    if not p.is_dir():
+        raise ValueError(f"目录不存在：{p}")
+    roots = [str(x) for x in _config_roots()]
+    if str(p) in roots:
+        return {"path": str(p), "added": False, "reason": "已经在列表里了", "count": _count_skills(p)}
+    roots.append(str(p))
+    brain.config_set("skill_roots", roots)
+    brain.log_event("skill", f"添加技能根目录 {p}")
+    return {"path": str(p), "added": True, "count": _count_skills(p)}
+
+
+def remove_skill_root(path: str) -> dict:
+    """从配置里移除一个自定义技能根目录（不动磁盘上的文件）。"""
+    raw = (path or "").strip()
+    if not raw:
+        raise ValueError("要给出一个目录路径")
+    target = str(Path(raw).expanduser())
+    try:
+        target = str(Path(raw).expanduser().resolve())
+    except OSError:
+        pass
+    roots = [str(x) for x in _config_roots()]
+    keep = []
+    hit = False
+    for r in roots:
+        same = r == target
+        if not same:
+            try:
+                same = str(Path(r).resolve()) == target
+            except OSError:
+                same = False
+        if same:
+            hit = True
+        else:
+            keep.append(r)
+    if not hit:
+        raise KeyError(f"这个目录不在自定义列表里：{raw}")
+    if keep:
+        brain.config_set("skill_roots", keep)
+    else:
+        brain.config_unset("skill_roots")
+    brain.log_event("skill", f"移除技能根目录 {target}")
+    return {"path": target, "removed": True, "remaining": len(keep)}
+
+
+def scan_skills(root_filter: str | None = None) -> list:
+    """扫描所有技能根目录，列出发现的技能（跨宿主可用）。"""
+    want = (root_filter or "").strip()
+    out, seen = [], set()
+    for label, root in _skill_roots():
+        if want and str(root) != want and label != want:
+            continue
+        if not root.is_dir():
+            continue
+        for p in sorted(root.glob("*/SKILL.md")):
+            name = p.parent.name
+            key = (name, str(root))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                meta, body = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
+            except (OSError, UnicodeDecodeError):
+                meta, body = {}, ""
+            out.append({
+                "name": meta.get("name") or name,
+                "dir": name,
+                "source": label,
+                "root": str(root),
+                "description": meta.get("description", ""),
+                "version": str(meta.get("version") or ""),
+                "path": str(p),
+                "self": (name or "").lower() in _SELF_NAMES,
+            })
+    return out
 
 
 def search_skills(query: str, limit: int = 12) -> list:
@@ -2304,14 +2548,17 @@ def search_dsh_plugins(query: str, limit: int = 12) -> list:
     return out[:limit]
 
 
-def locate_skill(name: str) -> dict:
-    """按名字定位技能：先找自己写的，再找全局目录。"""
+def locate_skill(name: str, root: str | None = None) -> dict:
+    """按名字定位技能：先找自己写的，再找全局目录。root 可限定只在某个目录/标签里找。"""
     name = (name or "").strip()
     if not name:
         raise ValueError("要给出技能名")
     name = _require_slug(name)   # 归一化 + 防路径穿越，与 read_skill 保持一致
-    for source, root in _skill_roots():
-        p = root / name / "SKILL.md"
+    want = (root or "").strip()
+    for source, r in _skill_roots():
+        if want and str(r) != want and source != want:
+            continue
+        p = r / name / "SKILL.md"
         if p.is_file():
             meta, body = parse_frontmatter(p.read_text(encoding="utf-8-sig"))
             return {"name": meta.get("name") or name, "source": source, "meta": meta,
@@ -2319,9 +2566,9 @@ def locate_skill(name: str) -> dict:
     raise KeyError(f"没有这个技能：{name}")
 
 
-def use_skill(name: str, max_chars: int = 6000) -> dict:
+def use_skill(name: str, max_chars: int = 6000, root: str | None = None) -> dict:
     """把别人的技能读出来直接用：给步骤、路径、原文。"""
-    sk = locate_skill(name)
+    sk = locate_skill(name, root=root)
     body = sk["body"]
     clipped = body[:max_chars]
     return {"name": sk["name"], "source": sk["source"], "description": sk["meta"].get("description", ""),
@@ -2329,9 +2576,10 @@ def use_skill(name: str, max_chars: int = 6000) -> dict:
             "truncated": len(body) > max_chars}
 
 
-def borrow_skill(name: str, as_name: str = "", note: str = "", force: bool = False) -> dict:
+def borrow_skill(name: str, as_name: str = "", note: str = "", force: bool = False,
+                 root: str | None = None) -> dict:
     """借鉴一个现成技能：把它变成自己的版本，写上出处，再记一条进化。"""
-    sk = locate_skill(name)
+    sk = locate_skill(name, root=root)
     if sk["source"] == "自己":
         raise ValueError("这是你自己写的技能，直接用 skill edit 改就行，不用借鉴")
     target = (as_name or "").strip()
@@ -2816,11 +3064,24 @@ def _run(argv=None) -> int:
     a.add_argument("name")
     a.add_argument("--chars", type=int, default=6000)
     a.add_argument("--auto", action="store_true", help="未全局化时自动装到全局技能目录")
+    a.add_argument("--root", default=None, help="只在这个技能根目录/标签里找")
     a = ss.add_parser("borrow", help="借鉴一个技能，变成自己的版本")
     a.add_argument("name")
     a.add_argument("--as", dest="as_name", default="")
     a.add_argument("--note", default="")
     a.add_argument("--force", action="store_true")
+    a.add_argument("--root", default=None, help="只在这个技能根目录/标签里找")
+    a = ss.add_parser("roots", help="列出所有技能根目录（各宿主全局目录 + 自定义）")
+    a.add_argument("--json", action="store_true")
+    a = ss.add_parser("root-add", help="手动添加一个技能根目录（如 C:/Users/你/.trae-cn/skills）")
+    a.add_argument("path")
+    a.add_argument("--json", action="store_true")
+    a = ss.add_parser("root-rm", help="移除手动添加的技能根目录（不动磁盘文件）")
+    a.add_argument("path")
+    a.add_argument("--json", action="store_true")
+    a = ss.add_parser("scan", help="扫描所有技能根目录，列出跨宿主可用的技能")
+    a.add_argument("--root", default=None, help="只看某个目录/标签")
+    a.add_argument("--json", action="store_true")
 
     # ---- 扩展模块（AI 自己写的可执行钩子，数据目录，更新永不覆盖）
     p = sub.add_parser("ext", help="扩展模块：自己写的可执行钩子（inject / run），更新技能永不覆盖")
@@ -3192,7 +3453,7 @@ def _run(argv=None) -> int:
                 print("\n（只读：本次总结时间未记录，下次仍会提醒）")
             return 0
         if args.act == "use":
-            sk = use_skill(args.name, args.chars)
+            sk = use_skill(args.name, args.chars, root=getattr(args, "root", None))
             print(f"# 技能：{sk['name']}（{sk['source']}）")
             print(f"# 路径：{sk['path']}")
             print(f"# 用途：{sk['description']}\n")
@@ -3223,9 +3484,69 @@ def _run(argv=None) -> int:
                     pass
             return 0
         if args.act == "borrow":
-            res = borrow_skill(args.name, args.as_name, args.note, args.force)
+            res = borrow_skill(args.name, args.as_name, args.note, args.force,
+                               root=getattr(args, "root", None))
             print(f"已借鉴成自己的技能：{res['path']}（v{res['version']}）")
             print("接下来按你自己的情况改写，然后 skill check / skill install。")
+            return 0
+        if args.act == "roots":
+            rows = skill_roots()
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+                return 0
+            print(f"技能根目录 {len(rows)} 个（第一个是自己写的，其余按宿主标注）：\n")
+            for r in rows:
+                flag = "✓" if r["exists"] else "✗ 不存在"
+                tag = "（自定义）" if r["custom"] else ""
+                print(f"[{r['label']}]{tag}  {flag}  {r['count']} 个技能")
+                print(f"  {r['path']}\n")
+            print("手动添加：skill root-add \"D:/某处/skills\"；移除：skill root-rm \"D:/某处/skills\"")
+            print("看有哪些技能：skill scan")
+            return 0
+        if args.act == "root-add":
+            try:
+                res = add_skill_root(args.path)
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 1
+            if args.json:
+                print(json.dumps(res, ensure_ascii=False, indent=2))
+            elif res["added"]:
+                print(f"已添加技能根目录：{res['path']}（发现 {res['count']} 个技能）")
+                print("现在 skill scan 就能看到里面的技能了。")
+            else:
+                print(f"没重复添加：{res['path']}（{res['reason']}，{res['count']} 个技能）")
+            return 0
+        if args.act == "root-rm":
+            try:
+                res = remove_skill_root(args.path)
+            except (ValueError, KeyError) as e:
+                print(str(e), file=sys.stderr)
+                return 1
+            if args.json:
+                print(json.dumps(res, ensure_ascii=False, indent=2))
+            else:
+                print(f"已移除技能根目录：{res['path']}（还剩 {res['remaining']} 个自定义目录，磁盘文件未动）")
+            return 0
+        if args.act == "scan":
+            rows = scan_skills(getattr(args, "root", None))
+            if args.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            elif not rows:
+                print("没扫到技能。先看看根目录：skill roots；或手动添加：skill root-add \"路径\"")
+            else:
+                print(f"扫到 {len(rows)} 个技能（跨宿主可用）\n")
+                cur = None
+                for r in rows:
+                    if r["source"] != cur:
+                        cur = r["source"]
+                        print(f"── {cur}")
+                    ver = f" v{r['version']}" if r["version"] else ""
+                    mark = " ← 你自己" if r["self"] else ""
+                    print(f"  {r['name']}{ver}{mark}")
+                    print(f"    {_clip(r['description'], 100)}")
+                    print(f"    {r['path']}")
+                print("\n要直接照做：skill use <名字> [--root <目录或宿主名>]；要变成自己的：skill borrow <名字>")
             return 0
 
     # ---------------- ext（扩展模块：AI 自己写的可执行钩子）

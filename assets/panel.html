@@ -156,11 +156,6 @@
   .btn.loading::after{content:"";display:inline-block;width:12px;height:12px;margin-left:7px;
     vertical-align:-2px;border:2px solid rgba(0,0,0,.25);border-top-color:#1a1206;
     border-radius:50%;animation:btnspin .7s linear infinite}
-  /* 全局进度条：更新下载时贴在页面顶部 */
-  #top-progress{position:fixed;top:0;left:0;height:3px;width:0;z-index:9999;
-    background:linear-gradient(90deg,#d9a441,#f0c674);transition:width .4s ease;pointer-events:none}
-  #top-progress.indet{width:30%;animation:indet 1.4s ease-in-out infinite}
-  @keyframes indet{0%{margin-left:0}50%{margin-left:70%}100%{margin-left:0}}
   button.ghost:disabled,button.iconbtn:disabled,button.mini:disabled{opacity:.45;cursor:not-allowed}
   button:disabled{filter:saturate(.6)}
   button.ghost{
@@ -235,9 +230,34 @@
     .statline:last-child{border-bottom:none}
     .statline b{font-weight:500;color:var(--muted);text-align:right}
     @media(max-width:900px){.kgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+  /* 离线提示横幅：后台轮询连续失败 ≥3 次时置顶显示，恢复即隐藏 */
+  #net-banner{position:fixed;top:0;left:0;right:0;z-index:98;background:rgba(201,107,95,.94);
+    color:#fff;font-size:12.5px;text-align:center;padding:6px 14px;display:none}
+  #net-banner.on{display:block}
+  /* 历史/表格长值撑破布局：定宽 + 省略号 */
+  .hist{table-layout:fixed}
+  .hist td{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .hist td.c-time{width:136px}
+  .hist td.c-field{width:120px}
+  .hist td.c-act{width:88px}
+  /* 长内容容器：允许收缩 + 省略 */
+  .ellip{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* 内联样式收敛：出现 ≥3 次的抽成类 */
+  .w100{width:100%}
+  .mb8{margin-bottom:8px}
+  button.ghost.mini{padding:2px 9px;font-size:11px}
+  /* 移动端：单列 + 批量操作条换行 */
+  @media(max-width:720px){
+    .app{grid-template-columns:1fr}
+    aside{position:static;height:auto;flex-direction:row;align-items:center;padding:10px;gap:10px;overflow:auto}
+    main{padding:12px}
+    #bulk-bar{flex-wrap:wrap}
+  }
   </style>
 </head>
 <body>
+<div id="net-banner">面板连接中断，正在重试…</div>
 <div class="app">
   <aside>
     <div class="brand">
@@ -245,17 +265,17 @@
       <div>灵枢<small>类脑记忆</small></div>
     </div>
     <nav>
-      <button class="active" data-tab="overview"><span class="ic">◉</span><span>概览</span></button>
-      <button data-tab="memories"><span class="ic">◈</span><span>记忆</span></button>
-      <button data-tab="persona"><span class="ic">☾</span><span>人格</span></button>
-      <button data-tab="knowledge"><span class="ic">▤</span><span>知识</span></button>
-      <button data-tab="notes"><span class="ic">✎</span><span>笔记</span></button>
-      <button data-tab="skills"><span class="ic">⚙</span><span>技能</span></button>
-      <button data-tab="emotion"><span class="ic">♡</span><span>心情</span></button>
-      <button data-tab="graph"><span class="ic">⌬</span><span>联想</span></button>
-      <button data-tab="growth"><span class="ic">↗</span><span>成长</span></button>
-      <button data-tab="dream"><span class="ic">✦</span><span>梦</span></button>
-      <button data-tab="logs"><span class="ic">☰</span><span>日志</span></button>
+      <button class="active" data-tab="overview" aria-label="概览"><span class="ic">◉</span><span>概览</span></button>
+      <button data-tab="memories" aria-label="记忆"><span class="ic">◈</span><span>记忆</span></button>
+      <button data-tab="persona" aria-label="人格"><span class="ic">☾</span><span>人格</span></button>
+      <button data-tab="knowledge" aria-label="知识"><span class="ic">▤</span><span>知识</span></button>
+      <button data-tab="notes" aria-label="笔记"><span class="ic">✎</span><span>笔记</span></button>
+      <button data-tab="skills" aria-label="技能"><span class="ic">⚙</span><span>技能</span></button>
+      <button data-tab="emotion" aria-label="心情"><span class="ic">♡</span><span>心情</span></button>
+      <button data-tab="graph" aria-label="联想"><span class="ic">⌬</span><span>联想</span></button>
+      <button data-tab="growth" aria-label="成长"><span class="ic">↗</span><span>成长</span></button>
+      <button data-tab="dream" aria-label="梦"><span class="ic">✦</span><span>梦</span></button>
+      <button data-tab="logs" aria-label="日志"><span class="ic">☰</span><span>日志</span></button>
     </nav>
     <div class="sidefoot" id="sidefoot"></div>
   </aside>
@@ -504,10 +524,25 @@
       </div>
       <div id="skill-check"></div>
       <div class="card" style="margin-bottom:12px">
+        <h2>技能根目录 · 跨宿主发现</h2>
+        <p class="sub">灵枢会只读扫描各宿主（DSH / Trae / Claude Code / Cursor…）约定的全局技能目录，发现现成技能就能直接使用或借用，不必先安装。也可以手动添加任意目录：</p>
+        <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+          <input id="skill-root-input" placeholder="例如 C:\Users\你\.trae-cn\skills" style="flex:1;min-width:260px">
+          <button class="btn" id="skill-root-add">添加目录</button>
+          <button class="ghost" id="skill-root-rescan">重新扫描</button>
+        </div>
+        <div id="skill-root-list" style="margin-top:12px"><div class="sub">加载中…</div></div>
+      </div>
+      <div class="card" style="margin-bottom:12px">
         <h2>DSH（DeepSeek）插件 · 只读</h2>
         <p class="sub">来自 <code>~/.dsh/profiles</code> 各 profile 的 bundle。这些是 DSH 运行时插件，不是灵枢技能——这里只展示，不修改。</p>
         <div class="sub" style="margin-top:4px"><input id="dsh-plugins-filter" placeholder="过滤插件…" style="width:240px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--text)"></div>
         <div id="dsh-plugin-list" style="margin-top:10px"></div>
+      </div>
+      <div class="card" style="margin-bottom:12px">
+        <h2>其他宿主的技能 · 只读可复用</h2>
+        <p class="sub">从上面各根目录扫描到的现成技能。「▶ 使用」= 读出内容照做；「⇙ 借用」= 复制一份变成自己的技能。</p>
+        <div id="skill-scan-list" style="margin-top:10px"></div>
       </div>
       <div id="skill-list"></div>
     </section>
@@ -791,6 +826,7 @@
               <option value="error">仅错误</option>
             </select>
             <button class="ghost" id="btn-log-refresh">刷新</button>
+            <button class="danger" id="btn-log-clear">清空日志</button>
           </div>
         </div>
         <div id="log-list" style="margin-top:12px"><div class="empty">加载中…</div></div>
@@ -799,24 +835,12 @@
   </main>
 </div>
 
-<div id="toast" class="">Failed to fetch</div>
+<div id="toast" class=""></div>
 
-<div id="top-progress"></div>
 <script>
-// 顶部进度条：indet(true)=来回扫（不知道总量的阶段），set(p)=推进到 p%，done()=走完收起
+// 顶部进度条已移除（来回扫的加载条太碍眼）。保留空壳接口，免得调用点报错。
 function topProgress(){
-  const el = document.getElementById("top-progress");
-  let fake = null;
-  const stopFake = () => { if (fake) { clearInterval(fake); fake = null; } };
-  return {
-    indet(){ el.classList.add("indet"); },
-    set(p){ stopFake(); el.classList.remove("indet"); el.style.width = Math.min(100, Math.max(0, p)) + "%"; },
-    // 后端是单请求整包返回，拿不到真实字节进度：下载期间用缓慢爬升的假进度给用户"在动"的反馈
-    fake(from, cap){ stopFake(); el.classList.remove("indet"); el.style.width = from + "%";
-      fake = setInterval(() => { el.style.width = Math.min(cap, parseFloat(el.style.width) + 0.5) + "%"; }, 400); },
-    done(){ stopFake(); el.style.width = "100%";
-      setTimeout(() => { el.style.width = "0"; }, 500); },
-  };
+  return { indet(){}, set(){}, fake(){}, done(){} };
 }
 const progress = topProgress();
 </script>
@@ -918,6 +942,18 @@ const progress = topProgress();
   </div>
 </div>
 
+<!-- 长文本编辑弹窗：替代 prompt()（prompt 单行化多行内容，且不能换行预览） -->
+<div class="modal hidden" id="edit-modal">
+  <div class="box">
+    <h3 id="edit-title">编辑内容</h3>
+    <div class="field"><textarea id="edit-text" rows="8" spellcheck="false"></textarea></div>
+    <div class="row" style="margin-top:16px">
+      <button class="ghost" id="edit-cancel">取消</button>
+      <button class="btn" id="edit-save">保存</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const S = { ov: null, tab: "overview", ws: null, memIndex: {} };
 const $ = (id) => document.getElementById(id);
@@ -964,7 +1000,8 @@ async function api(path, opts){
   return data;
 }
 
-function stars(imp){ return "★".repeat(Math.max(1, Math.round((imp || 0) * 5))); }
+// importance 为 0 时不该硬给一颗星（0 分 = 没有分量），按实际值四舍五入显示
+function stars(imp){ return "★".repeat(Math.max(0, Math.round((imp || 0) * 5))); }
 
 // 心情徽章配色：七情各有底色，静为灰
 const MOOD_COLORS = {
@@ -983,7 +1020,7 @@ function hexA(hex, alpha){
 }
 
 function memCard(m){
-  const pct = Math.round((m.retention || 0) * 100);
+  const pct = Math.round(Math.max(0, Math.min(100, (m.retention || 0) * 100)));   // clamp：conic-gradient 的 --p 不能越界
   const pending = m.review === "pending";
   return `<article class="mem">
     <input type="checkbox" class="mem-check" data-id="${esc(m.id)}" title="加入批量操作" style="margin-top:4px;accent-color:var(--amber)">
@@ -1619,6 +1656,7 @@ async function pickGraphNode(i){
         }).join("")
       : `<div class="empty" style="padding:18px">这条记忆还没连上谁。点「自动联想」按共享实体/标签批量补边。</div>`;
   } catch (err) {
+    console.error("加载记忆关联:", err);
     $("graph-neighbors").innerHTML = `<div class="sub">${esc(err.message)}</div>`;
   }
 }
@@ -1707,18 +1745,27 @@ function renderEvolved(p){
   $("evolved").innerHTML = html || `<div class="sub">还没有长出新东西。每次做梦都可能留下痕迹。</div>`;
 }
 
+// 历史行共用模板：演化历史表与 AI 改动表结构一致，抽成一个函数避免两处各拼一份
+function renderHistoryRow(cells, rollbackHtml){
+  return `<tr>
+    <td class="c-time">${esc(cells.time)}</td>
+    <td class="c-field">${esc(cells.field)}</td>
+    <td>${esc(cells.change)}</td>
+    <td>${esc(cells.why)}</td>
+    <td class="c-act">${rollbackHtml}</td>
+  </tr>`;
+}
 function renderHistory(p){
   const all = p.history || [];
   const h = all.slice(-24).reverse();
   $("history").innerHTML = h.length
     ? `<div class="sub" style="margin-bottom:8px">序号从最新一条往前数：1 = 撤销最近一次改动。回滚本身也会留一条历史。</div>
-       <table class="hist"><tbody>${h.map((x, j) => `<tr>
-         <td>${esc(new Date(x.ts * 1000).toLocaleString("zh-CN"))}</td>
-         <td>${esc(x.field)}</td>
-         <td>${esc(x.from)} → ${esc(typeof x.to === "object" ? JSON.stringify(x.to) : x.to)}</td>
-         <td>${esc(x.why || "")}</td>
-         <td><button class="ghost" style="padding:2px 9px;font-size:11px" data-rollback="${j + 1}">回滚到此</button></td>
-       </tr>`).join("")}</tbody></table>`
+       <table class="hist"><tbody>${h.map((x, j) => renderHistoryRow({
+         time: new Date(x.ts * 1000).toLocaleString("zh-CN"),
+         field: x.field,
+         change: `${x.from} → ${typeof x.to === "object" ? JSON.stringify(x.to) : x.to}`,
+         why: x.why || ""
+       }, `<button class="ghost mini" data-rollback="${j + 1}">回滚到此</button>`)).join("")}</tbody></table>`
     : `<div class="sub">还没有人格变更记录。</div>`;
 }
 
@@ -1743,15 +1790,14 @@ function renderAiChanges(ov){
         // findLastIndex：同毫秒同字段可能有多条，命中"最后一条"（离这条 ts 最近的）才对
         const pos = hist.findLastIndex(hh => hh.ts === x.ts && hh.field === x.field);
         const seq = pos >= 0 ? Math.max(1, total - pos) : null;
-        const btn = seq ? `<button class="ghost" style="padding:2px 9px;font-size:11px" data-rollback="${seq}">回滚</button>`
+        const btn = seq ? `<button class="ghost mini" data-rollback="${seq}">回滚</button>`
                         : `<span class="sub">—</span>`;
-        return `<tr>
-          <td>${esc(new Date(x.ts * 1000).toLocaleString("zh-CN").slice(5, 16))}</td>
-          <td>${esc(x.field)}</td>
-          <td>${esc(x.from)} → ${esc(typeof x.to === "object" ? JSON.stringify(x.to) : x.to)}</td>
-          <td>${esc(x.why || "")}${x.source ? ` · ${esc(x.source)}` : ""}</td>
-          <td>${btn}</td>
-        </tr>`;
+        return renderHistoryRow({
+          time: new Date(x.ts * 1000).toLocaleString("zh-CN").slice(5, 16),
+          field: x.field,
+          change: `${x.from} → ${typeof x.to === "object" ? JSON.stringify(x.to) : x.to}`,
+          why: (x.why || "") + (x.source ? ` · ${x.source}` : "")
+        }, btn);
       }).join("")}</tbody></table>`
     : `<div class="sub">近 7 天 AI 没有主动改过人格。做梦微调 traits 会先在漂移账本累积，过门限才会真正改动。</div>`;
 }
@@ -1868,7 +1914,7 @@ function renderDshPlugins(){
     return;
   }
   box.innerHTML = shown.map(p => `<article class="mem">
-      <div class="mem-body" style="width:100%">
+      <div class="mem-body w100">
         <div class="mem-top">
           <span class="badge cortex">${esc(p.name)}</span>
           <span class="badge">v${esc(p.version)}</span>
@@ -1892,7 +1938,7 @@ function kgCard(k){
        <button class="iconbtn" title="编辑" data-kgedit="${esc(k.id)}">✎</button>
        <button class="iconbtn" title="删除" data-kgdel="${esc(k.id)}">✕</button>`;
   return `<article class="mem">
-    <div class="mem-body" style="width:100%">
+    <div class="mem-body w100">
       <div class="mem-top">
         <span class="badge cortex">${esc(k.topic || "未分类")}</span>
         <span class="badge">v${esc(k.version || 1)}</span>
@@ -1944,7 +1990,7 @@ function renderNotes(rows){
   if (!rows && type) list = list.filter(n => n.type === type);
   const label = {journal: "日记", log: "日志", growth: "复盘"};
   $("note-list").innerHTML = list.length ? list.map(n => `<article class="mem">
-      <div class="mem-body" style="width:100%">
+      <div class="mem-body w100">
         <div class="mem-top">
           <span class="badge hippo">${esc(label[n.type] || n.type)}</span>
           <span class="date">${esc(n.date)}</span>
@@ -1964,28 +2010,65 @@ function renderNotes(rows){
 
 function renderSkills(out){
   if (!S.ws) return;
-  const rows = (out && out.rows) || S.ws.skills || [];
-  $("skill-list").innerHTML = rows.length ? rows.map(s => `<article class="mem">
-      <div class="mem-body" style="width:100%">
+  // 技能卡片共用模板：本地技能 / 扫描到的技能结构一致，只差徽章与操作按钮
+  const skillCard = (s, badges, acts) => `<article class="mem">
+      <div class="mem-body w100">
         <div class="mem-top">
-          <span class="badge cortex">${esc(s.name)}</span>
-          <span class="badge">v${esc(s.version)}</span>
-          <span class="badge">${s.lines} 行</span>
-          ${s.agents ? '<span class="badge">AGENTS.md</span>' : ""}
-          ${s.installed && s.outdated ? '<span class="badge" style="background:#c47f17;color:#fff">有更新</span>' : ""}
-          <span class="date">${s.installed ? (s.outdated ? "已安装（有更新）" : "已安装到全局") : "未安装"}</span>
+          ${badges}
+          <span class="date ellip">${esc(s.path || "")}</span>
         </div>
-        <p>${esc(s.description)}</p>
+        <p>${esc(s.description || "")}</p>
       </div>
-      <div class="acts">
-        <button class="iconbtn" title="查看" data-skshow="${esc(s.name)}">◎</button>
+      <div class="acts">${acts}</div>
+    </article>`;
+  // 技能根目录卡片（跨宿主发现 + 手动添加）
+  const roots = S.ws.skill_roots || [];
+  const rootBox = $("skill-root-list");
+  if (rootBox) {
+    rootBox.innerHTML = roots.length ? roots.map(r => `<div class="mem" style="padding:8px 12px">
+      <div class="mem-body w100">
+        <div class="row" style="gap:8px;align-items:center">
+          <span class="badge ${r.custom ? "archive" : "hippo"}">${esc(r.label)}</span>
+          <code class="sub ellip" style="flex:1">${esc(r.path)}</code>
+          ${r.exists
+            ? `<span class="badge" style="background:rgba(95,168,160,.12);color:#9fd2cb">${r.count} 个技能</span>`
+            : `<span class="badge" style="background:rgba(201,107,95,.12);color:#dda49b">目录不存在</span>`}
+          ${r.custom ? `<button class="iconbtn" title="移除此自定义目录" data-rootrm="${esc(r.path)}" style="margin-left:auto">✕</button>` : ""}
+        </div>
+      </div>
+    </div>`).join("")
+      : `<div class="sub">未发现任何技能目录。</div>`;
+  }
+  // 跨宿主扫描到的技能（只读，可直接用/借用；灵枢本体自身除外）
+  const scan = (S.ws.skill_scan || []).filter(s => !s.self);
+  const scanBox = $("skill-scan-list");
+  if (scanBox) {
+    scanBox.innerHTML = scan.length ? scan.map(s => {
+      const sig = JSON.stringify([s.name, s.root || ""]);
+      return skillCard(s,
+        `<span class="badge hippo">${esc(s.name)}</span>
+          ${s.version ? `<span class="badge">v${esc(s.version)}</span>` : ""}
+          <span class="badge">${esc(s.source || "")}</span>`,
+        `<button class="iconbtn" title="查看内容" data-skshow="${esc(s.name)}">◎</button>
+          <button class="iconbtn" title="照做使用（读出来执行）" data-skuse="${esc(sig)}">▶</button>
+          <button class="iconbtn" title="借用：复制一份变成自己的技能，可自由修改" data-skborrow="${esc(sig)}">⇙</button>`);
+    }).join("")
+      : `<div class="sub">其他宿主目录里暂未发现可复用的技能。</div>`;
+  }
+  const rows = (out && out.rows) || S.ws.skills || [];
+  $("skill-list").innerHTML = rows.length ? rows.map(s => skillCard(s,
+      `<span class="badge cortex">${esc(s.name)}</span>
+        <span class="badge">v${esc(s.version)}</span>
+        <span class="badge">${s.lines} 行</span>
+        ${s.agents ? '<span class="badge">AGENTS.md</span>' : ""}
+        ${s.installed && s.outdated ? '<span class="badge" style="background:#c47f17;color:#fff">有更新</span>' : ""}
+        <span class="badge">${s.installed ? (s.outdated ? "已安装（有更新）" : "已安装到全局") : "未安装"}</span>`,
+      `<button class="iconbtn" title="查看" data-skshow="${esc(s.name)}">◎</button>
         <button class="iconbtn" title="编辑" data-skedit="${esc(s.name)}">✎</button>
         ${s.installed
           ? `<button class="iconbtn pin" title="更新到全局（镜像同步本地最新内容，记忆数据不受影响）" data-skupdate="${esc(s.name)}">↻</button>`
           : `<button class="iconbtn" title="安装到全局" data-skinstall="${esc(s.name)}">⇩</button>`}
-        <button class="iconbtn" title="删除" data-skdel="${esc(s.name)}">✕</button>
-      </div>
-    </article>`).join("")
+        <button class="iconbtn" title="删除" data-skdel="${esc(s.name)}">✕</button>`)).join("")
     : `<div class="empty">还没有自己写过技能。点「新建技能」，把一套固定的做法固化下来。</div>`;
   if (out && out.checks) {
     $("skill-check").innerHTML = `<div class="card" style="margin-bottom:12px"><h2>自检结果</h2>` +
@@ -2126,7 +2209,7 @@ async function renderMemoryList(){
     indexMemories(rows);
     S.memRows = rows;
     renderMemRows(rows);
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("加载记忆列表:", e); toast(e.message, true); }
 }
 
 // 列表 / 时间线渲染：同一批卡片，时间线模式按日期（created）分组加日期组头
@@ -2186,13 +2269,17 @@ function renderLayerBar(){
   bar.innerHTML = `<div class="layer-bar-track">${segs}</div><div class="layer-bar-legend">${legend}</div>`;
 }
 
+let _searchSeq = 0;   // 搜索竞态防护：乱序返回的旧响应直接丢弃
 async function doSearch(){
   const q = $("search").value.trim();
   clearTimeout(_memTimer);            // 取消挂起的筛选刷新，别让它覆盖搜索结果
   _memSeq++;                          // 使任何在途的旧列表请求失效
   if (!q) { renderMemoryList(); return; }
+  const seq = ++_searchSeq;
+  $("btn-search").disabled = true; $("btn-search").classList.add("loading");
   try {
     const rows = await api("/api/search?q=" + encodeURIComponent(q) + "&k=30");
+    if (seq !== _searchSeq) return;   // 已有更新的搜索在路上，这次结果作废
     indexMemories(rows.map(r => r.memory));
     $("mem-list").innerHTML = rows.length
       ? rows.map(r => {
@@ -2200,7 +2287,12 @@ async function doSearch(){
           return `<div style="margin-bottom:8px">${memCard(r.memory)}<div class="sub" style="margin:-4px 0 0 54px">回忆度 ${(Number(r.score) || 0).toFixed(2)} · 相关 ${Number(pt.relevance) || 0} / 新鲜 ${Number(pt.recency) || 0} / 重要 ${Number(pt.importance) || 0}</div></div>`;
         }).join("")
       : `<div class="empty">想不起来了。也许当时没记，也许已经淡忘。</div>`;
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    console.error("doSearch:", e);
+    if (seq === _searchSeq) toast(e.message, true);
+  } finally {
+    if (seq === _searchSeq) { $("btn-search").disabled = false; $("btn-search").classList.remove("loading"); }
+  }
 }
 
 async function loadConflicts(){
@@ -2210,7 +2302,7 @@ async function loadConflicts(){
     const data = await api("/api/conflicts?limit=50");
     const rows = data.conflicts || [];
     $("conflict-list").innerHTML = rows.length ? rows.map(c => `<div class="mem" style="margin-bottom:8px">
-      <div class="mem-body" style="width:100%">
+      <div class="mem-body w100">
         <div class="sub" style="margin-bottom:6px">${esc(c.reason)}</div>
         <p>① ${esc(c.a.text)}</p>
         <p style="opacity:.85">② ${esc(c.b.text)}</p>
@@ -2226,16 +2318,26 @@ function openInject(){
   $("inject-meta").textContent = "";
 }
 
+let _injectSeq = 0;   // 注入预览竞态防护
 async function runInject(){
   const q = $("inject-q").value.trim();
+  const seq = ++_injectSeq;
   $("inject-out").textContent = "生成中…";
   $("inject-meta").textContent = "";
+  const btn = $("inject-run");
+  btn.disabled = true; btn.classList.add("loading");
   try {
     const data = await api("/api/inject-preview?q=" + encodeURIComponent(q));
+    if (seq !== _injectSeq) return;   // 过期响应丢弃
     const packet = data.packet || "";
     $("inject-out").textContent = packet || "（空）";
     $("inject-meta").textContent = packet ? `约 ${packet.length} 字` : "这次没有可注入的记忆";
-  } catch (e) { $("inject-out").textContent = "生成失败：" + e.message; }
+  } catch (e) {
+    console.error("runInject:", e);
+    if (seq === _injectSeq) $("inject-out").textContent = "生成失败：" + e.message;
+  } finally {
+    if (seq === _injectSeq) { btn.disabled = false; btn.classList.remove("loading"); }
+  }
 }
 
 function switchTab(tab){
@@ -2306,7 +2408,23 @@ $("sidefoot").addEventListener("click", async (e) => {
     await api("/api/mode", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({mode: next})});
     toast(`会话模式 → ${modeLabel(next)}`);
     load();
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { console.error("切换会话模式:", err); toast(err.message, true); }
+});
+
+// 长文本编辑弹窗：替代 prompt()（prompt 会把多行内容压成单行，还看不清全文）
+let _editCb = null;   // 确认时回调，参数是 textarea 当前值
+function openTextEditor(title, value, cb){
+  $("edit-title").textContent = title;
+  $("edit-text").value = value;
+  _editCb = cb;
+  $("edit-modal").classList.remove("hidden");
+  $("edit-text").focus();
+}
+$("edit-cancel").addEventListener("click", () => { $("edit-modal").classList.add("hidden"); _editCb = null; });
+$("edit-save").addEventListener("click", () => {
+  $("edit-modal").classList.add("hidden");
+  const cb = _editCb; _editCb = null;
+  if (cb) cb($("edit-text").value);
 });
 
 // 委托绑 document 级而非 #mem-list：概览页「最近写下的事」也复用 memCard
@@ -2316,8 +2434,12 @@ document.addEventListener("click", async (e) => {
   const rv = e.target.closest("[data-review]");
   if (!pin && !ed && !fg && !rv) return;
   const findMem = id => (S.memIndex && S.memIndex[id]) || (S.ov && S.ov.memories.find(x => x.id === id));
+  // 写操作按钮 loading + disabled：防止网络慢时连点造成重复提交
+  const busy = btn => { btn.disabled = true; btn.classList.add("loading"); };
+  const idle = btn => { btn.disabled = false; btn.classList.remove("loading"); };
   try {
     if (rv) {
+      busy(rv);
       await api("/api/memory/review", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: rv.dataset.id, action: rv.dataset.review})});
       toast(rv.dataset.review === "confirm" ? "已确认，这条记忆转正为事实" : "已废弃，移入淡忘区");
       load();
@@ -2325,12 +2447,14 @@ document.addEventListener("click", async (e) => {
     if (pin) {
       const m = findMem(pin.dataset.pin);
       if (!m) { toast("数据已变化，请刷新", true); return; }
+      busy(pin);
       await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: pin.dataset.pin, pinned: !m.pinned})});
       toast(m.pinned ? "已取消置顶" : "已置顶，不会淡忘");
       load();
     }
     if (fg) {
       if (!confirm("把这条记忆移入淡忘区？它会保留模糊的轮廓。")) return;
+      busy(fg);
       const r = await api("/api/forget", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: fg.dataset.forget})});
       if (r.ok) { toast("已淡忘"); load(); }
       else toast(r.error || "淡忘失败（可能已被删/不存在）", true);
@@ -2338,13 +2462,25 @@ document.addEventListener("click", async (e) => {
     if (ed) {
       const m = findMem(ed.dataset.edit);
       if (!m) { toast("数据已变化，请刷新", true); return; }
-      const text = prompt("修改记忆内容：", m.text);
-      if (text == null) return;
-      await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: m.id, text})});
-      toast("已更新");
-      load();
+      // 用 modal 编辑：多行记忆内容 prompt() 会被压成单行
+      openTextEditor("修改记忆内容", m.text, async (text) => {
+        try {
+          busy(ed);
+          await api("/api/memory", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({id: m.id, text})});
+          toast("已更新");
+          load();
+        } catch (err) { console.error("编辑记忆:", err); toast(err.message, true); }
+        finally { idle(ed); }
+      });
     }
-  } catch (err) { toast(err.message, true); }
+  } catch (err) {
+    console.error("记忆写操作:", err);
+    toast(err.message, true);
+  } finally {
+    if (rv) idle(rv);
+    if (pin) idle(pin);
+    if (fg) idle(fg);
+  }
 });
 
 $("btn-add").addEventListener("click", () => $("modal").classList.remove("hidden"));
@@ -2353,6 +2489,8 @@ $("add-imp").addEventListener("input", () => $("add-imp-v").textContent = $("add
 $("add-save").addEventListener("click", async () => {
   const text = $("add-text").value.trim();
   if (!text) { toast("写点什么", true); return; }
+  const btn = $("add-save");
+  btn.disabled = true; btn.classList.add("loading");
   try {
     await api("/api/remember", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
       text, kind: $("add-kind").value, importance: Number($("add-imp").value) / 10,
@@ -2362,7 +2500,12 @@ $("add-save").addEventListener("click", async () => {
     $("add-text").value = ""; $("add-tags").value = "";
     toast("记住了");
     load();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    console.error("写入记忆:", e);
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false; btn.classList.remove("loading");
+  }
 });
 
 $("btn-persona").addEventListener("click", async () => {
@@ -2396,7 +2539,7 @@ $("btn-persona").addEventListener("click", async () => {
     })});
     toast("人格已更新，改动记入历史" + (badLines ? `（${badLines} 行特质格式不对被忽略）` : ""));
     await load(); loadWS();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("保存人格:", e); toast(e.message, true); }
 });
 
 $("st-energy").addEventListener("input", () => $("st-energy-v").textContent = $("st-energy").value);
@@ -2409,7 +2552,7 @@ $("btn-state").addEventListener("click", async () => {
     })});
     toast("状态已保存");
     load();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("保存状态:", e); toast(e.message, true); }
 });
 
 // 回滚按钮走 document 级委托：演化历史（#history）和 AI 近期改动（#ai-changes）
@@ -2423,7 +2566,7 @@ document.addEventListener("click", async (e) => {
     await api("/api/persona/rollback", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({index: idx})});
     toast("已回滚，人格恢复到那次改动之前");
     await load(); loadWS();
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { console.error("回滚人格:", err); toast(err.message, true); }
 });
 
 const pdBtn = $("btn-persona-diff");
@@ -2441,7 +2584,7 @@ if (emoBtn) emoBtn.addEventListener("click", async () => {
     $("emo-why").value = "";
     toast("记下了这刻的心情");
     load();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("记录情绪:", e); toast(e.message, true); }
 });
 document.addEventListener("click", async (e) => {
   const d = e.target && e.target.closest && e.target.closest("[data-desire]");
@@ -2452,7 +2595,7 @@ document.addEventListener("click", async (e) => {
     })});
     toast("满足了一点" + d.dataset.desire);
     load();
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { console.error("满足欲望:", err); toast(err.message, true); }
 });
 
 // ---- 认知评价（事件 → 情绪）
@@ -2485,7 +2628,7 @@ if (btnEva) btnEva.addEventListener("click", async () => {
         </div>
       </div>`;
     await load();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("认知评价:", e); toast(e.message, true); }
 });
 
 // ---- 共情镜像
@@ -2501,7 +2644,7 @@ if (btnMirror) btnMirror.addEventListener("click", async () => {
     $("mir-out").innerHTML = esc(res.note || "共情一下") + " · " + ratLine(ra);
     $("mir-emo").value = "";
     await load();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("共情镜像:", e); toast(e.message, true); }
 });
 
 // ---- 情感设置
@@ -2521,7 +2664,7 @@ if (btnCfg) btnCfg.addEventListener("click", async () => {
     })});
     toast("情感设置已保存，记入演化历史");
     await load();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("保存情感设置:", e); toast(e.message, true); }
 });
 
 // ---- 每日例行
@@ -2531,7 +2674,7 @@ if (btnDailyP) btnDailyP.addEventListener("click", async () => {
     const r = await api("/api/daily", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({dry_run: true})});
     const res = r.result || {};
     $("daily-out").textContent = `【预览 · 不落盘】\n${res.note_body || ""}\n\n预计沉淀知识 ${res.knowledge_added ?? 0} 条 · 距上次做梦 >24h 则自动做梦（${res.dreamed ? "会做" : "不会"}）`;
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("例行预览:", e); toast(e.message, true); }
 });
 if (btnDailyR) btnDailyR.addEventListener("click", async () => {
   const btn = btnDailyR;
@@ -2545,7 +2688,7 @@ if (btnDailyR) btnDailyR.addEventListener("click", async () => {
       toast("每日例行完成：日记 + 知识沉淀" + (res.dreamed ? " + 做梦" : ""));
     }
     await load(); if (S.ws) await loadWS();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("每日例行:", e); toast(e.message, true); }
   finally {
     btn.disabled = !!(S.ov && S.ov.readonly);   // 只读下保持禁用，正常模式恢复
     btn.textContent = "执行今日例行";
@@ -2564,11 +2707,11 @@ const renderSelfReview = (r) => {
 const btnSrD = $("btn-selfreview-due"), btnSrR = $("btn-selfreview-run");
 if (btnSrD) btnSrD.addEventListener("click", async () => {
   try { renderSelfReview(await post("/api/skill/self-review", {force: false, days: Number(srDays.value || 3)})); }
-  catch (e) { toast(e.message, true); }
+  catch (e) { console.error("总结到期检查:", e); toast(e.message, true); }
 });
 if (btnSrR) btnSrR.addEventListener("click", async () => {
   try { renderSelfReview(await post("/api/skill/self-review", {force: true, days: Number(srDays.value || 3)})); await load(); }
-  catch (e) { toast(e.message, true); }
+  catch (e) { console.error("自我总结:", e); toast(e.message, true); }
 });
 
 // ---- 联想 3D
@@ -2584,7 +2727,7 @@ if (btnGa) btnGa.addEventListener("click", async () => {
     toast(`自动联想：发现 ${res.planned} 对，新连 ${res.added} 对`);
     loadGraph(Number($("graph-limit").value || 300));
     await load();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("自动联想:", e); toast(e.message, true); }
 });
 $("graph-limit").addEventListener("change", () => loadGraph(Number($("graph-limit").value || 300)));
 // 图内搜索：输入即定位（300ms 防抖），回车看下一个命中
@@ -2630,7 +2773,7 @@ $("btn-dream").addEventListener("click", async () => {
       toast("梦很安静，没有要沉淀的碎片");
     }
     S.ov = r.overview; renderOverview(); renderMemoryList();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("自动做梦:", e); toast(e.message, true); }
   finally {
     btn.disabled = !!(S.ov && S.ov.readonly);
     btn.textContent = "现在做梦";
@@ -2649,7 +2792,7 @@ $("btn-dream-ai").addEventListener("click", async () => {
       $("dream-summary").innerHTML = `<b>复制下面这段发给 AI：</b><div class="pre small" style="margin-top:6px">${esc(r.instruction)}</div>`;
       toast("剪贴板不可用，指令已显示在下方，请手动复制", true);
     }
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("获取做梦指令:", e); toast(e.message, true); }
   finally { btn.disabled = false; }
 });
 
@@ -2662,7 +2805,7 @@ $("btn-apply").addEventListener("click", async () => {
     const a = r.applied || {};
     toast(`沉淀完成：新增 ${a.memories || 0} 条，遗忘 ${a.forgotten || 0} 条` + ((a.rejected || []).length ? `，拒绝 ${a.rejected.length} 项人格修改` : ""));
     S.ov = r.overview; renderOverview(); renderMemoryList();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("应用梦境结果:", e); toast(e.message, true); }
 });
 
 $("btn-draft-save").addEventListener("click", async () => {
@@ -2674,7 +2817,7 @@ $("btn-draft-save").addEventListener("click", async () => {
     S.dreamDirty = false;
     $("draft-state").textContent = "草稿已保存";
     toast("草稿已保存，稍后回来能接着改");
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("保存梦境草稿:", e); toast(e.message, true); }
 });
 
 $("btn-draft-reset").addEventListener("click", () => {
@@ -2724,7 +2867,7 @@ async function bulkRun(action, value, confirmMsg){
     toast(`已处理 ${r.result.updated} 条`);
     await load();
     bulkUpdateCount();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("批量操作:", e); toast(e.message, true); }
 }
 $("bulk-confirm").addEventListener("click", () => bulkRun("confirm", null, null));
 $("bulk-discard").addEventListener("click", () => bulkRun("discard", null, "把选中的记忆全部移入淡忘区？"));
@@ -2754,16 +2897,26 @@ document.addEventListener("keydown", e => {
 });
 
 // ---- 会话模式判定预览
+let _modeTrySeq = 0;   // 预览竞态防护：连续快速换话题时旧响应不得覆盖新结果
 $("btn-mode-try").addEventListener("click", async () => {
   const q = $("mode-try-q").value.trim();
   const out = $("mode-try-out");
   if (!q) { out.textContent = "先输入一句话题。"; return; }
+  const seq = ++_modeTrySeq;
+  const btn = $("btn-mode-try");
+  btn.disabled = true; btn.classList.add("loading");
   try {
     const d = await api("/api/mode/explain?q=" + encodeURIComponent(q));
+    if (seq !== _modeTrySeq) return;   // 过期响应丢弃
     out.innerHTML = `会切到 <b>${esc(modeLabel(d.mode))}</b> · 置信度 ${Math.round((d.confidence || 0) * 100)}%`
       + (d.fixed ? "（当前为手动固定，auto 下才会按话题切）" : "")
       + `<br>${esc(d.reason)}`;
-  } catch (e) { out.textContent = e.message; }
+  } catch (e) {
+    console.error("btn-mode-try:", e);
+    if (seq === _modeTrySeq) out.textContent = e.message;
+  } finally {
+    if (seq === _modeTrySeq) { btn.disabled = false; btn.classList.remove("loading"); }
+  }
 });
 $("mode-try-q").addEventListener("keydown", e => { if (e.key === "Enter") $("btn-mode-try").click(); });
 
@@ -2779,18 +2932,39 @@ async function loadLogs(){
     box.innerHTML = rows.map(x => {
       const t = x.ts ? new Date(x.ts * 1000).toLocaleString("zh-CN").slice(5, 17) : "??";
       const color = x.level === "error" ? "#e66450" : (x.level === "warn" ? "var(--amber)" : "var(--muted)");
-      return `<div class="mem" style="padding:10px 14px"><div class="mem-body" style="width:100%">
+      // data-* 放 JSON.stringify 的结果会引入双引号破坏 HTML 属性，必须 esc 转义；
+      // dataset 取回时浏览器已还原为原始字符串，直接 JSON.parse 即可（不能再二次反转义）
+      const sig = [x.ts, x.kind, x.msg].map(v => v == null ? "" : String(v));
+      return `<div class="mem" style="padding:10px 14px"><div class="mem-body w100">
         <div class="row" style="gap:8px">
           <span class="badge" style="color:${color};border:1px solid ${color}">${esc(x.level || "info")}</span>
           <span class="badge">${esc(x.kind || "?")}</span>
           <span class="date">${esc(t)}</span>
+          <button class="iconbtn" title="删除这条日志" style="margin-left:8px"
+            data-logdel="${esc(JSON.stringify(sig))}">✕</button>
         </div>
         <p style="margin-top:4px">${esc(x.msg || "")}</p>
         ${x.trace ? `<pre class="pre small" style="margin-top:6px;max-height:120px;overflow:auto">${esc(x.trace)}</pre>` : ""}
       </div></div>`;
     }).join("");
-  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  } catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; console.error("loadLogs:", e); }
 }
+// 删除日志：单条精确删（按 ts/kind/msg 匹配），顶部可一键清空
+$("log-list").addEventListener("click", async e => {
+  const btn = e.target.closest("[data-logdel]");
+  if (!btn) return;
+  let sig;
+  try { sig = JSON.parse(btn.dataset.logdel); } catch (e) { console.error("logdel 签名解析失败:", e); return; }
+  try {
+    await post("/api/logs", {action: "delete", ts: Number(sig[0]) || null, kind: sig[1] || null, msg: sig[2] || null});
+    loadLogs();
+  } catch (err) { console.error("删除日志:", err); toast(err.message, true); }
+});
+$("btn-log-clear") && $("btn-log-clear").addEventListener("click", async () => {
+  if (!confirm("确定清空全部运行日志？此操作不可恢复。")) return;
+  try { await post("/api/logs", {action: "clear"}); loadLogs(); }
+  catch (err) { console.error("清空日志:", err); toast(err.message, true); }
+});
 $("btn-log-refresh").addEventListener("click", loadLogs);
 $("log-level").addEventListener("change", loadLogs);
 
@@ -2813,7 +2987,7 @@ async function runChk(){
         ? `<div class="sub" style="color:#e66450;margin-top:6px">[一致性告警] ${esc(res.reason)}</div>`
         : `<div class="sub" style="color:var(--teal);margin-top:6px">未见明显背离。</div>`);
     renderChkAlerts(r.alerts || []);
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("一致性核对:", e); toast(e.message, true); }
 }
 $("btn-chk").addEventListener("click", runChk);
 
@@ -2826,7 +3000,7 @@ $("btn-link").addEventListener("click", async () => {
     toast("已建立关联");
     $("link-info").textContent = "已连接：点上方「刷新」看星图变化。";
     loadGraph(Number($("graph-limit").value || 300));
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("建立关联:", e); toast(e.message, true); }
 });
 
 // ---- 成长子系统事件
@@ -2850,6 +3024,8 @@ $("kg-save").addEventListener("click", async () => {
     tags: split($("kg-tags").value)
   };
   if (!payload.title && !payload.body) { toast("写个标题或正文", true); return; }
+  const btn = $("kg-save");
+  btn.disabled = true; btn.classList.add("loading");
   try {
     if (S.kgEditing) {
       await post("/api/knowledge", Object.assign({action: "update", id: S.kgEditing}, payload));
@@ -2860,11 +3036,21 @@ $("kg-save").addEventListener("click", async () => {
     }
     $("kg-modal").classList.add("hidden");
     await loadWS(); load();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    console.error("保存知识:", e);
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false; btn.classList.remove("loading");
+  }
 });
 $("kg-list").addEventListener("click", async (e) => {
   const pin = e.target.closest("[data-kgpin]"), ed = e.target.closest("[data-kgedit]"), del = e.target.closest("[data-kgdel]");
   const rev = e.target.closest("[data-kgreview]"), dis = e.target.closest("[data-kgdiscard]");
+  // 写操作防重复提交：点中哪个就先禁哪个（edit 只开弹窗不请求，不用禁）
+  const hit = pin || del || rev || dis;
+  const busy = btn => { btn.disabled = true; btn.classList.add("loading"); };
+  const idle = btn => { btn.disabled = false; btn.classList.remove("loading"); };
+  if (hit) busy(hit);
   try {
     if (rev) {
       await post("/api/knowledge", {action: "review", id: rev.dataset.kgreview});
@@ -2904,14 +3090,15 @@ $("kg-list").addEventListener("click", async (e) => {
       toast("已删除");
       await loadWS();
     }
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { console.error("知识操作:", err); toast(err.message, true); }
+  finally { if (hit) idle(hit); }
 });
 $("kg-btn-tidy").addEventListener("click", async () => {
   try {
     const r = await post("/api/knowledge", {action: "tidy"});
     toast(`找到 ${(r.report.clusters || []).length} 组相似条目`);
     await loadWS();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("知识整理:", e); toast(e.message, true); }
 });
 $("kg-btn-apply").addEventListener("click", async () => {
   let parsed;
@@ -2923,7 +3110,7 @@ $("kg-btn-apply").addEventListener("click", async () => {
     toast(`整理完成：合并 ${a.merged} 组，更新 ${a.updated}，新建 ${a.created}，删除 ${a.deleted}`);
     $("kg-apply").value = "";
     await loadWS();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("应用知识整理:", e); toast(e.message, true); }
 });
 $("kg-btn-search").addEventListener("click", async () => {
   const q = $("kg-search").value.trim();
@@ -2931,7 +3118,7 @@ $("kg-btn-search").addEventListener("click", async () => {
   try {
     const rows = await api("/api/workspace/search?scope=knowledge&q=" + encodeURIComponent(q));
     renderKnowledge(rows.map(r => r.knowledge));
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("知识搜索:", e); toast(e.message, true); }
 });
 $("kg-search").addEventListener("keydown", e => { if (e.key === "Enter") $("kg-btn-search").click(); });
 $("kg-topic").addEventListener("change", () => renderKnowledge());
@@ -2946,6 +3133,8 @@ $("note-cancel").addEventListener("click", () => $("note-modal").classList.add("
 $("note-save").addEventListener("click", async () => {
   const body = $("note-body").value.trim(), title = $("note-title").value.trim();
   if (!body && !title) { toast("写点什么", true); return; }
+  const btn = $("note-save");
+  btn.disabled = true; btn.classList.add("loading");
   try {
     const r = await post("/api/note", {
       action: "write", type: $("note-kind").value, title, body,
@@ -2954,29 +3143,44 @@ $("note-save").addEventListener("click", async () => {
     toast(r.how === "appended" ? "已追加到今天这篇" : "已写入");
     $("note-modal").classList.add("hidden");
     await loadWS();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    console.error("写笔记:", e);
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false; btn.classList.remove("loading");
+  }
 });
 $("note-type").addEventListener("change", () => renderNotes());
 $("note-list").addEventListener("click", async (e) => {
   const ed = e.target.closest("[data-nedit]"), del = e.target.closest("[data-ndel]");
+  const busy = btn => { btn.disabled = true; btn.classList.add("loading"); };
+  const idle = btn => { btn.disabled = false; btn.classList.remove("loading"); };
   try {
     if (ed) {
       const n = S.ws.notes.find(x => x.id === ed.dataset.nedit);
       if (!n) { toast("数据已变化，请刷新", true); return; }
-      const body = prompt("修改笔记正文：", n.body);
-      if (body == null) return;
-      await post("/api/note", {action: "update", id: n.id, body});
-      toast("已更新");
-      await loadWS();
+      // 用 modal 编辑：笔记正文常是多行，prompt() 会压成单行
+      openTextEditor("修改笔记正文", n.body, async (body) => {
+        try {
+          busy(ed);
+          await post("/api/note", {action: "update", id: n.id, body});
+          toast("已更新");
+          await loadWS();
+        } catch (err) { console.error("编辑笔记:", err); toast(err.message, true); }
+        finally { idle(ed); }
+      });
     }
     if (del) {
       if (!confirm("删除这篇笔记？")) return;
-      const r = await post("/api/note", {action: "delete", id: del.dataset.ndel});
-      if (!r.ok) { toast(r.error || "删除失败（可能已被删/不存在）", true); return; }
-      toast("已删除");
-      await loadWS();
+      busy(del);
+      try {
+        const r = await post("/api/note", {action: "delete", id: del.dataset.ndel});
+        if (!r.ok) { toast(r.error || "删除失败（可能已被删/不存在）", true); return; }
+        toast("已删除");
+        await loadWS();
+      } finally { idle(del); }
     }
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { console.error("笔记操作:", err); toast(err.message, true); }
 });
 $("note-btn-search").addEventListener("click", async () => {
   const q = $("note-search").value.trim();
@@ -2984,7 +3188,7 @@ $("note-btn-search").addEventListener("click", async () => {
   try {
     const rows = await api("/api/workspace/search?scope=notes&q=" + encodeURIComponent(q));
     renderNotes(rows.map(r => r.note));
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("笔记搜索:", e); toast(e.message, true); }
 });
 $("note-search").addEventListener("keydown", e => { if (e.key === "Enter") $("note-btn-search").click(); });
 
@@ -2999,25 +3203,47 @@ $("skill-btn-add").addEventListener("click", () => {
 $("skill-cancel").addEventListener("click", () => $("skill-modal").classList.add("hidden"));
 $("skill-save").addEventListener("click", async () => {
   const name = $("skill-name").value.trim();
+  const editing = !!S.skillEditing;
   const payload = {name, description: $("skill-desc").value.trim(), body: $("skill-body").value};
+  const btn = $("skill-save");
+  btn.disabled = true; btn.classList.add("loading");
   try {
-    if (S.skillEditing) await post("/api/skill", Object.assign({action: "edit"}, payload));
+    if (editing) await post("/api/skill", Object.assign({action: "edit"}, payload));
     else await post("/api/skill", Object.assign({action: "new"}, payload));
     $("skill-modal").classList.add("hidden");
-    toast(S.skillEditing ? "技能已更新" : "技能已创建");
+    toast(editing ? "技能已更新" : "技能已创建");
     await loadWS();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    console.error("保存技能:", e);
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false; btn.classList.remove("loading");
+    // 编辑流程把 name 禁了（技能名不可改），保存/取消后必须恢复，否则下次新建没法填名字
+    $("skill-name").disabled = false;
+  }
 });
 $("skill-btn-check").addEventListener("click", async () => {
+  const btn = $("skill-btn-check");
+  btn.disabled = true; btn.classList.add("loading");
   try {
     const r = await post("/api/skill", {action: "check"});
     renderSkills({rows: S.ws.skills, checks: r.checks});
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    console.error("技能自检:", e);
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false; btn.classList.remove("loading");
+  }
 });
 $("skill-list").addEventListener("click", async (e) => {
   const show = e.target.closest("[data-skshow]"), ed = e.target.closest("[data-skedit]");
   const ins = e.target.closest("[data-skinstall]"), del = e.target.closest("[data-skdel]");
   const upd = e.target.closest("[data-skupdate]");
+  // 写操作防重复提交：show/edit 只读不请求写接口，也可接受；ins/upd/del 是真正的写操作
+  const hit = show || ins || del || upd;
+  const busy = btn => { btn.disabled = true; btn.classList.add("loading"); };
+  const idle = btn => { btn.disabled = false; btn.classList.remove("loading"); };
+  if (hit) busy(hit);
   try {
     if (show) {
       const r = await post("/api/skill", {action: "show", name: show.dataset.skshow});
@@ -3045,7 +3271,7 @@ $("skill-list").addEventListener("click", async (e) => {
           return;
         }
         toast(st === "already" ? "已是最新，无需更新" : "已更新到全局技能目录");
-      } catch (err) { toast(err.message || "更新失败", true); return; }
+      } catch (err) { console.error("技能更新:", err); toast(err.message || "更新失败", true); return; }
       await loadWS();
     }
     if (ins) {
@@ -3078,16 +3304,63 @@ $("skill-list").addEventListener("click", async (e) => {
       toast("已删除");
       await loadWS();
     }
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { console.error("技能操作:", err); toast(err.message, true); }
+  finally { if (hit) idle(hit); }
 });
 
-// 成长 + 初识
+// ---- 技能根目录：手动添加 / 移除 / 重新扫描 + 跨宿主技能使用/借用
+$("skill-root-add").addEventListener("click", async () => {
+  const inp = $("skill-root-input");
+  const path = inp.value.trim();
+  if (!path) { toast("先填一个技能目录路径", true); return; }
+  try {
+    const r = await post("/api/skill", {action: "root_add", path});
+    inp.value = "";
+    toast(r.result && r.result.added === false ? "该目录已在列表里" : "已添加");
+    renderSkills();
+  } catch (e) { console.error("添加技能目录:", e); toast(e.message, true); }
+});
+$("skill-root-rescan").addEventListener("click", async () => {
+  try {
+    const r = await post("/api/skill", {action: "scan"});
+    if (r.workspace) { S.ws = r.workspace; renderSkills(); }
+    toast("扫描完成，共 " + (r.skills || []).length + " 个技能");
+  } catch (e) { console.error("技能扫描:", e); toast(e.message, true); }
+});
+$("skill-root-list").addEventListener("click", async e => {
+  const btn = e.target.closest("[data-rootrm]");
+  if (!btn) return;
+  if (!confirm("移除这个自定义技能目录？目录本身不会被删除。")) return;
+  try {
+    await post("/api/skill", {action: "root_rm", path: btn.dataset.rootrm});
+    renderSkills();
+  } catch (err) { console.error("移除技能目录:", err); toast(err.message, true); }
+});
+$("skill-scan-list").addEventListener("click", async e => {
+  const use = e.target.closest("[data-skuse]"), borrow = e.target.closest("[data-skborrow]");
+  let name, root;
+  try { [name, root] = JSON.parse((use || borrow).dataset.skuse || (borrow || use).dataset.skborrow); }
+  catch { return; }
+  try {
+    if (use) {
+      // 只读取正文预览，用户看完自己照做；不自动写入任何目录
+      const r = await post("/api/skill", {action: "use", name, root});
+      $("skill-check").innerHTML = `<div class="card" style="margin-bottom:12px"><h2>${esc(r.skill.name)}（${esc(r.skill.source || "")}）</h2><div class="pre small">${esc(r.skill.body || "")}</div></div>`;
+    }
+    if (borrow) {
+      const r = await post("/api/skill", {action: "borrow", name, root});
+      if (r.skill && r.skill.path) toast("已借用为本地技能：" + r.skill.path + "，可自由修改");
+      else toast("借用失败", true);
+      renderSkills();
+    }
+  } catch (err) { console.error("技能使用/借用:", err); toast(err.message, true); }
+});
 $("btn-review").addEventListener("click", async () => {
   try {
     const r = await api("/api/growth/review?days=" + encodeURIComponent($("review-days").value || 7));
     $("review-out").value = r.material;
     toast("素材包已生成，复制给 AI 写复盘");
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("成长复盘素材:", e); toast(e.message, true); }
 });
 $("btn-evo").addEventListener("click", async () => {
   const title = $("evo-title").value.trim();
@@ -3097,7 +3370,7 @@ $("btn-evo").addEventListener("click", async () => {
     $("evo-title").value = ""; $("evo-detail").value = "";
     toast("进化已记录");
     await loadWS();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) { console.error("记录进化:", e); toast(e.message, true); }
 });
 $("onboard-box").addEventListener("click", async (e) => {
   try {
@@ -3124,7 +3397,7 @@ $("onboard-box").addEventListener("click", async (e) => {
       S.ws.onboarding.stage = "awaiting_user";
       renderOnboarding();
     }
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { console.error("onboarding:", err); toast(err.message, true); }
 });
 
 // 时钟
@@ -3148,23 +3421,39 @@ setInterval(async () => {
     S.ov = await api("/api/overview");
     if (seq !== _ovSeq) return;
     renderOverview();
-  } catch (e) { /* 后台轮询静默失败，不打扰 */ }
+    pollFailCount = 0;                      // 恢复成功：清零计数并隐藏离线横幅
+    $("net-banner").classList.remove("on");
+  } catch (e) {
+    // 连续失败 ≥3 次才提示：偶发一次超时不值得打扰用户
+    console.error("后台轮询失败:", e);
+    pollFailCount++;
+    if (pollFailCount >= 3) $("net-banner").classList.add("on");
+  }
 }, 30000);
+let pollFailCount = 0;   // 后台轮询连续失败计数（离线横幅用）
 
 load();
 
-// ---- 灵枢本体更新：开面板自动查一次 + 右上角按钮手动查
+// ---- 灵枢本体更新：检测只在面板服务启动时后台做一次（结果写缓存），
+// 这里刷新面板只读缓存点亮红点；右上角按钮手动查才重新联网检测
 let updRiskAccepted = false; // 弹窗里看过风险告知后置 true，第二次点「更新」才带 yes
 async function checkUpdate(auto){
   const btn = $("btn-self-update");
   try {
     if (!auto) { btn.disabled = true; btn.classList.add("loading"); btn.textContent = "检查中…"; }
-    // 检查更新可能要现场拉远程源（最坏 90s+），走通用 15s 超时会误报失败——单独放宽到 120s
+    // auto=开面板静默检查：只读服务启动时检测好的缓存（服务启动才真正联网检测，
+    // 浏览器刷新绝不触发联网），秒回；手动点「检查更新」才 refresh=1 重新拉远程源
     progress.indet();
-    const r = await api("/api/self-update", {signal: AbortSignal.timeout(120000)});
+    const r = await api("/api/self-update?" + (auto ? "auto=1" : "refresh=1"),
+                        {signal: AbortSignal.timeout(120000)});
     progress.done();
     if (!auto) { btn.disabled = false; btn.classList.remove("loading"); btn.textContent = "检查更新"; }
     const dot = $("upd-dot");
+    if (r.cached === false) {
+      // 服务刚启动、后台首次检测还没写完缓存：静默跳过，不红点不报错
+      dot.style.display = "none";
+      return;
+    }
     if (!r.installed) {
       if (!auto) showUpdModal("灵枢本体尚未安装", "还没装到全局技能目录。去「技能」页点 ⇩ 安装，或用命令行 skill install。", false);
       dot.style.display = "none";
@@ -3212,6 +3501,7 @@ async function checkUpdate(auto){
       }
     }
   } catch (e) {
+    console.error("检查更新:", e);
     progress.done();
     if (!auto) { btn.disabled = false; btn.classList.remove("loading"); btn.textContent = "检查更新"; toast(e.message, true); }
   }
@@ -3259,6 +3549,7 @@ $("upd-apply").addEventListener("click", async () => {
     await loadWS();
     checkUpdate(false);        // 更新完复查一次：确认显示"已是最新"而非靠猜
   } catch (e) {
+    console.error("执行更新:", e);
     toast(e.message || "更新失败", true);
   } finally {
     progress.done();

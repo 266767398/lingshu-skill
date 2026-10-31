@@ -32,7 +32,7 @@ _WRITE_ENDPOINTS = {
     "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/auto",
     "/api/dream/apply", "/api/dream/draft", "/api/memory/bulk",
     "/api/emotion", "/api/mode", "/api/link",
-    "/api/forget", "/api/daily", "/api/dream/instruction",
+    "/api/forget", "/api/daily", "/api/dream/instruction", "/api/logs",
 }
 
 # 本机随机 token：页面加载时注入，之后每个 API 请求都要带上。
@@ -267,6 +267,8 @@ def workspace() -> dict:
     safe("notes", lambda: growth.list_notes(limit=100), [])
     safe("note_stats", growth.note_stats, {})
     safe("skills", growth.list_skills, [])
+    safe("skill_roots", growth.skill_roots, [])
+    safe("skill_scan", growth.scan_skills, [])
     safe("dsh_plugins", growth.list_dsh_plugins, [])
     safe("evolution", lambda: growth.load_evolution(limit=30), [])
     safe("onboarding", brain.onboarding_state, {})
@@ -291,7 +293,7 @@ def _bad_list(data: dict, *keys) -> str | None:
 # 这些写端点里有只读 action：只读模式下按 action 放行（skill 的 list/check/show、
 # emotion 的 now/check），别把纯查询按钮也一刀切 403
 _READONLY_ACTIONS = {
-    "/api/skill": {"", "list", "check", "show"},
+    "/api/skill": {"", "list", "check", "show", "roots", "scan", "use"},
     "/api/emotion": {"", "now", "check"},
 }
 
@@ -329,19 +331,30 @@ class Handler(BaseHTTPRequestHandler):
 
     # -------------------------------------------------- helpers
     def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8"):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")  # 防止把响应当 HTML 解析
-        self.send_header("Referrer-Policy", "no-referrer")
-        # 页面有内联 <script>/<style>，明确放开；其余资源只能同源，禁止外链脚本/图片域名
-        self.send_header("Content-Security-Policy",
-                         "default-src 'self'; script-src 'unsafe-inline'; "
-                         "style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
-                         "frame-ancestors 'none'")  # 防恶意网页 iframe 嵌入面板（点击劫持）
-        self.end_headers()
-        self.wfile.write(body)
+        # 客户端刷新/关页面会立刻掐断连接，此时 send_response/write 都会抛
+        # ConnectionAbortedError(WinError 10053)/BrokenPipeError。这是常态，不是故障：
+        # 整个响应写出过程兜底吞掉并标记关闭连接，绝不打印 traceback（否则控制台被刷屏）。
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")  # 防止把响应当 HTML 解析
+            self.send_header("Referrer-Policy", "no-referrer")
+            # 页面有内联 <script>/<style>，明确放开；其余资源只能同源，禁止外链脚本/图片域名
+            self.send_header("Content-Security-Policy",
+                             "default-src 'self'; script-src 'unsafe-inline'; "
+                             "style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+                             "frame-ancestors 'none'")  # 防恶意网页 iframe 嵌入面板（点击劫持）
+            self.end_headers()
+            if body:
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, TimeoutError):
+            self.close_connection = True
+        except OSError as exc:
+            # 其余 OSError（如 10054 被对端重置）同样是客户端侧问题，静默收尾
+            self.close_connection = True
+            brain.log_event("panel", f"响应写出失败（客户端已断开）：{exc}", level="info")
 
     def _json(self, obj, code: int = 200):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
@@ -424,9 +437,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, 400)
         except Exception:
             import traceback
-            traceback.print_exc()
+            # 不再 print_exc 刷控制台：完整堆栈进运行日志（面板「日志」页可看）
             brain.log_event("panel", "GET 接口内部错误", level="error",
-                            trace=traceback.format_exc()[-400:])
+                            trace=traceback.format_exc()[-800:])
             self._json({"error": "面板内部错误，详情见运行日志"}, 500)
 
     def _route_get(self):
@@ -457,7 +470,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(overview())
             return
         if path == "/api/self-update":
-            self._json(growth.update_check("lingshu"))
+            # auto=1：面板打开时的自动检查，只读缓存、绝不联网（毫秒返回，不会卡页面）
+            # refresh=1：用户手动点「检查更新」，真拉远程源并刷新缓存
+            qs = parse_qs(url.query)
+            auto = (qs.get("auto") or ["0"])[0] in ("1", "true", "yes")
+            refresh = (qs.get("refresh") or ["0"])[0] in ("1", "true", "yes")
+            self._json(growth.update_check("lingshu", force_pull=refresh, auto=auto))
             return
         if path == "/api/workspace":
             self._json(workspace())
@@ -603,17 +621,42 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/persona/edit":
-                p = brain.edit_persona(
-                    identity=data.get("identity") or None,
-                    traits=data.get("traits") or None,
-                    drives=data.get("drives") or None,
-                    style=data.get("style") or None,
-                    values=data.get("values") or None,
-                    likes=data.get("likes") or None,
-                    dislikes=data.get("dislikes") or None,
-                    background=data.get("background") or None,
-                    why=data.get("why") or "面板编辑",
-                )
+                # 类型防御：dict 字段传字符串、list 字段传对象都会在 edit_persona 里 500，
+                # 这里先校验给 400；字符串的 likes 等按逗号拆开（容错前端/脚本的手填输入）
+                def _as_dict(key):
+                    v = data.get(key)
+                    if v in (None, "", {}, []):
+                        return None
+                    if isinstance(v, dict):
+                        return v or None
+                    raise ValueError(f"{key} 必须是对象（键值对）")
+
+                def _as_list(key):
+                    v = data.get(key)
+                    if v in (None, "", [], {}):
+                        return None
+                    if isinstance(v, list):
+                        return [str(x).strip() for x in v if str(x).strip()] or None
+                    if isinstance(v, str):
+                        parts = [s.strip() for s in v.replace("，", ",").split(",")]
+                        return [s for s in parts if s] or None
+                    raise ValueError(f"{key} 必须是列表或逗号分隔的字符串")
+
+                try:
+                    p = brain.edit_persona(
+                        identity=_as_dict("identity"),
+                        traits=_as_dict("traits"),
+                        drives=_as_dict("drives"),
+                        style=_as_list("style"),
+                        values=_as_list("values"),
+                        likes=_as_list("likes"),
+                        dislikes=_as_list("dislikes"),
+                        background=_as_list("background"),
+                        why=data.get("why") or "面板编辑",
+                    )
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, 400)
+                    return
                 self._json({"ok": True, "persona": p, "onboarding": brain.onboarding_state()})
                 return
 
@@ -967,6 +1010,31 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"ok": True, "skill": growth.read_skill(data.get("name", ""))})
                 elif act == "list":
                     self._json({"ok": True, "skills": growth.list_skills(), "workspace": workspace()})
+                elif act == "roots":
+                    self._json({"ok": True, "roots": growth.skill_roots(),
+                                "workspace": workspace()})
+                elif act == "root_add":
+                    res = growth.add_skill_root(data.get("path", ""))
+                    self._json({"ok": True, "result": res, "workspace": workspace()})
+                elif act == "root_rm":
+                    res = growth.remove_skill_root(data.get("path", ""))
+                    self._json({"ok": True, "result": res, "workspace": workspace()})
+                elif act == "scan":
+                    rows = growth.scan_skills(data.get("root") or None)
+                    self._json({"ok": True, "skills": rows, "workspace": workspace()})
+                elif act == "use":
+                    # 只读取正文给前端预览（不自动全局化），便于面板里看外部技能内容
+                    res = growth.use_skill(data.get("name", ""),
+                                           int(data.get("chars") or 6000),
+                                           root=data.get("root") or None)
+                    self._json({"ok": True, "skill": res})
+                elif act == "borrow":
+                    res = growth.borrow_skill(data.get("name", ""),
+                                              data.get("as_name", ""),
+                                              data.get("note", ""),
+                                              bool(data.get("force")),
+                                              root=data.get("root") or None)
+                    self._json({"ok": True, "skill": res, "workspace": workspace()})
                 else:
                     self._json({"error": "未知操作"}, 400)
                 return
@@ -1039,6 +1107,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "mode": mode})
                 return
 
+            if path == "/api/logs":
+                act = str(data.get("action") or "clear")
+                if act == "clear":
+                    n = brain.clear_logs()
+                    self._json({"ok": True, "cleared": n,
+                                "logs": brain.read_logs(200)})
+                    return
+                if act == "delete":
+                    n = brain.clear_logs(ts=data.get("ts"), kind=data.get("kind"),
+                                         msg=data.get("msg"))
+                    self._json({"ok": True, "deleted": n,
+                                "logs": brain.read_logs(200)})
+                    return
+                self._json({"error": "action 只能是 clear / delete"}, 400)
+                return
+
             self._json({"error": "not found"}, 404)
         except FileExistsError as exc:
             # 已有同名技能/扩展/笔记：409 冲突比 500 内部错误更符合事实，前端也能直接提示
@@ -1054,15 +1138,37 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(exc).strip("'\"")}, 400)
         except Exception:  # 含 TypeError/AttributeError 等服务端编程错误：日志留全栈，响应只给通用文案，避免回显本机路径
             import traceback
-            traceback.print_exc()
+            # 不 print_exc：堆栈进运行日志，控制台不再刷 Traceback
             brain.log_event("panel", "POST 接口内部错误", level="error",
-                            trace=traceback.format_exc()[-400:])
+                            trace=traceback.format_exc()[-800:])
             self._json({"error": "面板内部错误，详情见运行日志"}, 500)
+
+
+def _startup_update_check() -> None:
+    """服务启动时后台检测一次更新并写入缓存（失败静默，不影响面板启动）。
+
+    浏览器刷新面板只读这份缓存，绝不联网——只有重启面板服务才会真正
+    拉远程源检测最新版本。
+    """
+    def _job():
+        import traceback
+        try:
+            # auto=False 才能真正走 _update_check_live 联网检测并写缓存；
+            # auto=True 只在读缓存模式，会被 early-return 拦截
+            growth.update_check("lingshu", force_pull=True, auto=False)
+        except Exception:
+            try:
+                brain.log_event("panel", "启动时更新检测失败", level="warn",
+                                trace=traceback.format_exc()[-500:])
+            except Exception:
+                pass
+    threading.Thread(target=_job, name="startup-update-check", daemon=True).start()
 
 
 def serve(port: int = 8765, open_browser: bool = True) -> None:
     brain.ensure_home()
     brain._resolve_readonly(False)   # 面板也要探测只读：数据目录不可写时 POST 写接口返回 403
+    _startup_update_check()
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     except OSError as exc:
