@@ -74,7 +74,7 @@
   .mood-badge{
     display:inline-flex;align-items:center;gap:7px;padding:6px 14px;border-radius:999px;
     background:rgba(74,85,104,.25);border:1px solid rgba(148,163,184,.35);color:var(--text);
-    font-size:14px;font-weight:600;letter-spacing:.5px;transition:background .8s ease;
+    font-size:14px;font-weight:600;letter-spacing:.5px;
   }
   .mood-badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 9px currentColor}
   .mood-cat{font-size:11.5px;color:var(--muted);border:1px solid var(--line);padding:3px 9px;border-radius:999px}
@@ -291,7 +291,6 @@
           <div>
             <div class="name" id="p-name">—</div>
             <div class="role" id="p-role"></div>
-            <div class="sub" id="p-greet" style="margin-top:4px"></div>
             <div class="moodline">
               <span class="mood-badge" id="p-mood">平静</span>
               <span class="mood-cat" id="p-mood-cat"></span>
@@ -447,6 +446,8 @@
         <h2>AI 近期改动 · 待你过目</h2>
         <div class="sub" style="margin-bottom:8px">做梦/自我总结由 AI 发起的人格变更（手动编辑、回滚、初识回答不算）。不对就点「回滚到此」撤销。</div>
         <div id="ai-changes"></div>
+        <div style="margin-top:10px"><button class="ghost" id="btn-persona-diff" style="padding:3px 12px;font-size:12px">查看变化明细</button></div>
+        <div id="persona-diff" style="margin-top:10px"></div>
       </div>
       <div class="card" style="margin-top:14px">
         <h2>演化历史</h2>
@@ -1017,26 +1018,6 @@ function renderOverview(){
   const p = ov.persona || {}, st = ov.stats || {}, ident = p.identity || {};
   $("p-name").textContent = ident["名字"] || "还没有名字";
   $("p-role").textContent = [ident["身份"], ident["年龄感"] && ident["年龄感"] + "岁"].filter(Boolean).join(" · ");
-  // 拟人化问候：按本机时段 + 当前心情，在名字下说一句话。同一小时只换一次，
-  // 轮询每 30s 重绘也不闪（存 sessionStorage，跨刷新尽量延续）
-  const greetEl = $("p-greet");
-  if (greetEl) {
-    const h = new Date().getHours();
-    const slot = h < 5 ? "deepnight" : h < 9 ? "morning" : h < 12 ? "am" : h < 14 ? "noon" : h < 18 ? "pm" : h < 23 ? "evening" : "deepnight";
-    const name = ident["名字"] || "你";
-    const isStorm = ov.rationality && ov.rationality.storm;
-    const low = (p.state && Number(p.state.energy) < 30);
-    let txt;
-    if (isStorm) txt = `${name}现在情绪有点激动，说话前你俩都先缓一缓。`;
-    else if (slot === "deepnight") txt = low ? `这么晚还在，${name}陪你撑一会儿，但记得休息。` : `夜深了，${name}守着这些记忆，你有事随时说。`;
-    else if (slot === "morning") txt = low ? `早上好，${name}今天电量不高，慢慢来。` : `早上好，${name}把昨天的事都记得，今天也从这里接着走。`;
-    else if (slot === "noon") txt = low ? `中午了，${name}也有点乏——你也歇会儿吧。` : `中午好，${name}在的，说吧。`;
-    else if (slot === "evening") txt = low ? `傍晚了，${name}今天跑了不少事，需要静静。` : `晚上好，${name}正在整理今天记下的事。`;
-    else txt = low ? `在呢。${name}今天有点累，说重点它也跟得上。` : `在呢，${name}一直在。`;
-    // 心情着色：激动偏红、低落偏灰、平时琥珀
-    greetEl.textContent = txt;
-    greetEl.style.color = isStorm ? "var(--red)" : (low ? "var(--faint)" : "var(--amber)");
-  }
   const mood = ov.mood || {};
   const actTop = (mood.active && mood.active[0]) || null;
   const moodLabel = mood.active && mood.active.length ? mood.label : ((p.state && p.state.mood) || "平静");
@@ -1775,6 +1756,32 @@ function renderAiChanges(ov){
     : `<div class="sub">近 7 天 AI 没有主动改过人格。做梦微调 traits 会先在漂移账本累积，过门限才会真正改动。</div>`;
 }
 
+// 人格漂移 diff：最早一张快照 vs 当前人格的逐字段对比表（后端 persona_diff）。
+// 点按钮才请求（数据不多但没必要每次刷新都拉），再点一次收起。
+async function togglePersonaDiff(){
+  const box = $("persona-diff"), btn = $("btn-persona-diff");
+  if (!box || !btn) return;
+  if (box.innerHTML) { box.innerHTML = ""; btn.textContent = "查看变化明细"; return; }
+  btn.textContent = "加载中…";
+  try {
+    const d = await api("/api/persona/diff");
+    if (!d || d.empty || !(d.fields || []).length) {
+      box.innerHTML = `<div class="sub">还没有可对比的历史（拍过至少两张人格快照后，这里会展示从最早到现在的字段级变化）。</div>`;
+    } else {
+      const span = d.from && d.to ? `${esc(d.from)} → ${esc(d.to)}，间隔 ${esc(d.days)} 天` : `间隔 ${esc(d.days)} 天`;
+      box.innerHTML = `<div class="sub" style="margin-bottom:6px">${span}（瞬态心情/精力不算漂移）：</div>
+        <table class="hist"><tbody>${d.fields.map(x => `<tr>
+          <td>${esc(x.field)}</td>
+          <td>${esc(x.old)} → ${esc(x.new)}</td>
+        </tr>`).join("")}</tbody></table>`;
+    }
+    btn.textContent = "收起明细";
+  } catch (e) {
+    box.innerHTML = `<div class="sub">加载失败：${esc(e && e.message || e)}</div>`;
+    btn.textContent = "查看变化明细";
+  }
+}
+
 function dreamBlankTemplate(pend){
   return {
     task_id: pend.task_id,
@@ -2418,6 +2425,9 @@ document.addEventListener("click", async (e) => {
     await load(); loadWS();
   } catch (err) { toast(err.message, true); }
 });
+
+const pdBtn = $("btn-persona-diff");
+if (pdBtn) pdBtn.addEventListener("click", togglePersonaDiff);
 
 const emoBtn = $("btn-emo-feel");
 if (emoBtn) emoBtn.addEventListener("click", async () => {

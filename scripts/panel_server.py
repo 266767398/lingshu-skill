@@ -509,6 +509,18 @@ class Handler(BaseHTTPRequestHandler):
             q = (parse_qs(url.query).get("q") or [""])[0]
             self._json(brain.resolve_mode_detail(q))
             return
+        if path == "/api/entity":
+            # 实体档案卡：name 必须非空且别太长（塞进 URL/存储都安全），limit 用现有风格夹取
+            name = (parse_qs(url.query).get("name") or [""])[0].strip()
+            if not name or len(name) > 64:
+                self._json({"error": "参数 name 必须为 1~64 字符"}, 400)
+                return
+            limit = _int_param(url, "limit", 20, 1, 100)
+            self._json(brain.entity_profile(name, limit))
+            return
+        if path == "/api/persona/diff":
+            self._json(brain.persona_diff())
+            return
         if path == "/api/logs":
             limit = _int_param(url, "limit", 200, 1, 2000)
             level = (parse_qs(url.query).get("level") or [""])[0] or None

@@ -1424,10 +1424,38 @@ def remember(text: str, kind: str = "fact", importance: float | None = None,
         if emo_name:
             rec["emotion"] = emo_name
             rec["emotional"] = round(emo_arousal, 2)
+        # —— 记忆冲突裁决（Mem0 风格）——
+        # 与某条旧记忆中度相似（jaccard 0.55~0.86）但文本不同 = 同一件事说法变了/事实更新。
+        # 旧的不删：打上 superseded_by 指向新记忆（回忆默认跳过被取代者，仍可沿链回溯旧观念）。
+        # AI 来源的新说法先标"待审核"：防止 AI 改写结论未经用户确认就生效。
+        # 必须在锁内做：remember 走整库快照覆写，锁内读锁内写才不会互相覆盖。
+        superseded = []
+        for old in records:
+            if (old is rec or old.get("kind") != kind
+                    or old.get("layer") in ("dust", ARCHIVE_LAYER)
+                    or old.get("superseded_by")):
+                continue
+            old_text = str(old.get("text", "")).strip()
+            old_terms = terms(old_text)
+            if not old_terms or old_text == text:
+                continue
+            sim = jaccard(new_terms, old_terms)
+            if 0.55 <= sim < 0.86:
+                old["superseded_by"] = rec["id"]
+                old["updated"] = now_ts()
+                rec.setdefault("links", [])
+                if old["id"] not in rec["links"]:
+                    rec["links"].append(old["id"])
+                superseded.append(old["id"])
+        if superseded:
+            if source != "user":
+                rec["review"] = "pending"
+                rec["review_source"] = "conflict"
+            rec["superseded"] = superseded   # 给调用方展示"这次取代了哪些旧说法"
         records.append(rec)
         save_all(records)
         _remember_desire_nudge(rec, rec.get("importance"))
-        return rec, "created"
+        return rec, ("superseded" if superseded else "created")
 
 
 def _remember_desire_nudge(rec: dict, imp) -> None:
@@ -1446,6 +1474,57 @@ def _remember_desire_nudge(rec: dict, imp) -> None:
         desire_nudge(changes)
     except Exception:
         pass          # 六欲牵动是锦上添花，绝不能让记事本身失败
+
+
+def entity_profile(name: str, limit: int = 20) -> dict:
+    """实体档案卡（Zep 风格）：围绕一个人物/事物把散落的记忆聚成一张画像。
+
+    面板用：点开一个实体就能看到"什么时候第一次出现、最近一次出现、
+    一起出现过的情绪、时间线、以及最重要几条记忆拼出的一句话画像"。
+    """
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("实体名不能为空")
+    low = name.lower()
+    hits = []
+    for m in load_all() + load_archive():
+        ents = [str(e).lower() for e in (m.get("entities") or [])]
+        hay = _hay(m)
+        # 优先按 entities 精确匹配；退化到 text/tags 里包含该词也算（实体抽取没跑全的兜底）
+        if low in ents or low in hay:
+            hits.append(m)
+    if not hits:
+        return {"entity": name, "count": 0, "timeline": [], "emotions": {},
+                "summary": "（还没有关于这个实体的记忆）"}
+    createds = [int(_num(m.get("created"), 0)) for m in hits if _num(m.get("created"), 0)]
+    emotions = {}
+    for m in hits:
+        e = str(m.get("emotion") or "").strip()
+        if e:
+            emotions[e] = emotions.get(e, 0) + 1
+    ordered = sorted(hits, key=lambda m: _num(m.get("created"), 0), reverse=True)
+    timeline = [(fmt_time(int(_num(m.get("created"), 0))), str(display_text(m))[:80])
+                for m in ordered[:max(1, limit)]]
+    # 一句话画像：重要性最高的 3 条记忆拼接——实体"最被强调"的侧面
+    top = sorted(hits, key=_imp_key_safe, reverse=True)[:3]
+    summary = "；".join(str(m.get("text") or "") for m in top)[:120]
+    first = min(createds) if createds else 0
+    last = max(createds) if createds else 0
+    return {
+        "entity": name,
+        "first_seen": first, "first_seen_text": fmt_time(first),
+        "last_seen": last, "last_seen_text": fmt_time(last),
+        "count": len(hits),
+        "importance_avg": round(sum(_imp_key_safe(m) for m in hits) / len(hits), 3),
+        "emotions": emotions,
+        "timeline": timeline,
+        "summary": summary or "（这些记忆没有可用正文）",
+    }
+
+
+def _imp_key_safe(m: dict) -> float:
+    """importance 安全取值：坏类型（None/list 等）沉底为 0，不让一条坏记忆炸掉画像。"""
+    return _num(m.get("importance"), 0.0)
 
 
 def recall(query: str, k: int = 8, layers: tuple = ("cortex", "hippo"),
@@ -3367,6 +3446,56 @@ def persona_drift(days: int = 7) -> dict:
         "alert": (len([d for d in diff if d.get("section") != "drives"]) >= 3
                   or len(ai) >= 3),
     }
+
+
+def persona_diff() -> dict:
+    """人格漂移 diff 视图：最早一张快照 vs 当前人格的逐字段对比。
+
+    面板用："漂移偏大"告警只是个信号，用户真正想看的是"到底哪几个字段从什么
+    变成了什么"——这张表就是答案。快照不足两张（无历史可对比）时返回 empty。
+
+    数据源用 persona_snapshots（每次漂移检查/恢复都会留完整人格副本）而不是
+    evolution.jsonl——evolution 只有 skill/self 两种 kind，从不写 persona 行，
+    从那里取数据永远是空表。
+    """
+    # 与当前人格比才有"漂移"含义：最新一张快照往往就是上次漂移检查时拍的，
+    # 和当前几乎没差别；取最旧的一张做基准，展示的是从基准到现在的累计变化。
+    snaps = sorted(persona_snapshots(10000), key=lambda s: s.get("ts", 0))
+    if len(snaps) < 2:
+        return {"days": 0, "fields": [], "empty": True}
+    first, last = snaps[0], snaps[-1]
+
+    def _flatten(d, prefix=""):
+        out = {}
+        for k, v in (d or {}).items():
+            key = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, dict):
+                out.update(_flatten(v, key))
+            else:
+                out[key] = v
+        return out
+
+    def _show(v):
+        if isinstance(v, (dict, list)):
+            return json.dumps(v, ensure_ascii=False)
+        return "" if v is None else str(v)
+
+    def _load_snap(name):
+        try:
+            d = _slurp_json(PERSONA_SNAP_DIR / f"{name}.json")
+            # 瞬态 state（mood/energy）不进 diff：聊句心情就变，算进来全是噪音，
+            # 与 persona_drift 只盯稳定特征（identity/traits/drives）口径一致
+            return {k: v for k, v in (d.get("persona") or {}).items() if k != "state"}
+        except Exception:
+            return {}
+
+    a = _flatten(_load_snap(first["name"]))
+    b = _flatten(_load_snap(last["name"]))
+    fields = [{"field": k, "old": _show(a.get(k)), "new": _show(b.get(k)), "changed": True}
+              for k in sorted(set(a) | set(b)) if a.get(k) != b.get(k)]
+    days = int((last.get("ts", 0) - first.get("ts", 0)) // 86400)
+    return {"days": days, "fields": fields,
+            "from": first.get("label", first["name"]), "to": last.get("label", last["name"])}
 
 
 @_persona_txn
