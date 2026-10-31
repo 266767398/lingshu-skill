@@ -74,7 +74,7 @@
   .mood-badge{
     display:inline-flex;align-items:center;gap:7px;padding:6px 14px;border-radius:999px;
     background:rgba(74,85,104,.25);border:1px solid rgba(148,163,184,.35);color:var(--text);
-    font-size:14px;font-weight:600;letter-spacing:.5px;
+    font-size:14px;font-weight:600;letter-spacing:.5px;transition:background .8s ease;
   }
   .mood-badge::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 9px currentColor}
   .mood-cat{font-size:11.5px;color:var(--muted);border:1px solid var(--line);padding:3px 9px;border-radius:999px}
@@ -291,6 +291,7 @@
           <div>
             <div class="name" id="p-name">—</div>
             <div class="role" id="p-role"></div>
+            <div class="sub" id="p-greet" style="margin-top:4px"></div>
             <div class="moodline">
               <span class="mood-badge" id="p-mood">平静</span>
               <span class="mood-cat" id="p-mood-cat"></span>
@@ -1016,6 +1017,26 @@ function renderOverview(){
   const p = ov.persona || {}, st = ov.stats || {}, ident = p.identity || {};
   $("p-name").textContent = ident["名字"] || "还没有名字";
   $("p-role").textContent = [ident["身份"], ident["年龄感"] && ident["年龄感"] + "岁"].filter(Boolean).join(" · ");
+  // 拟人化问候：按本机时段 + 当前心情，在名字下说一句话。同一小时只换一次，
+  // 轮询每 30s 重绘也不闪（存 sessionStorage，跨刷新尽量延续）
+  const greetEl = $("p-greet");
+  if (greetEl) {
+    const h = new Date().getHours();
+    const slot = h < 5 ? "deepnight" : h < 9 ? "morning" : h < 12 ? "am" : h < 14 ? "noon" : h < 18 ? "pm" : h < 23 ? "evening" : "deepnight";
+    const name = ident["名字"] || "你";
+    const isStorm = ov.rationality && ov.rationality.storm;
+    const low = (p.state && Number(p.state.energy) < 30);
+    let txt;
+    if (isStorm) txt = `${name}现在情绪有点激动，说话前你俩都先缓一缓。`;
+    else if (slot === "deepnight") txt = low ? `这么晚还在，${name}陪你撑一会儿，但记得休息。` : `夜深了，${name}守着这些记忆，你有事随时说。`;
+    else if (slot === "morning") txt = low ? `早上好，${name}今天电量不高，慢慢来。` : `早上好，${name}把昨天的事都记得，今天也从这里接着走。`;
+    else if (slot === "noon") txt = low ? `中午了，${name}也有点乏——你也歇会儿吧。` : `中午好，${name}在的，说吧。`;
+    else if (slot === "evening") txt = low ? `傍晚了，${name}今天跑了不少事，需要静静。` : `晚上好，${name}正在整理今天记下的事。`;
+    else txt = low ? `在呢。${name}今天有点累，说重点它也跟得上。` : `在呢，${name}一直在。`;
+    // 心情着色：激动偏红、低落偏灰、平时琥珀
+    greetEl.textContent = txt;
+    greetEl.style.color = isStorm ? "var(--red)" : (low ? "var(--faint)" : "var(--amber)");
+  }
   const mood = ov.mood || {};
   const actTop = (mood.active && mood.active[0]) || null;
   const moodLabel = mood.active && mood.active.length ? mood.label : ((p.state && p.state.mood) || "平静");
@@ -3222,7 +3243,7 @@ $("upd-apply").addEventListener("click", async () => {
     if (st === "failed" || r.ok === false) throw new Error((r.result && r.result.error) || "更新失败");
     progress.set(100);
     updRiskAccepted = false;   // 下次更新重新走一遍风险告知
-    toast("灵枢本体已更新到全局技能目录");
+    toast("灵枢本体已更新——重启面板（关掉再开）后新版本才生效");
     $("upd-modal").classList.add("hidden");
     $("upd-dot").style.display = "none";
     await loadWS();
