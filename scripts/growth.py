@@ -1424,7 +1424,22 @@ def _atomic_replace_dir(src: Path, dst: Path) -> None:
         if not moved:
             shutil.rmtree(dst, ignore_errors=True)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    src.rename(dst)
+    # 最终 rename 也可能撞上占用（杀软/并发进程在两次检查之间重建了 dst），
+    # 重试并清掉重建的 dst；实在挪不过去就整树复制兜底，保证更新落地不报 183
+    moved = False
+    for _ in range(3):
+        try:
+            src.rename(dst)
+            moved = True
+            break
+        except OSError:
+            shutil.rmtree(dst, ignore_errors=True)
+            time.sleep(0.3)
+    if not moved:
+        # 非原子，但 rename 都过不去时的可靠兜底
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+        shutil.rmtree(src, ignore_errors=True)
     if old.exists():
         shutil.rmtree(old, ignore_errors=True)
 
