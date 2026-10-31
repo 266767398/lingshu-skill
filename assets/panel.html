@@ -2152,7 +2152,7 @@ function renderAlerts(ov){
   const rc = ov.review_counts || {};
   if (rc.memories) items.push(`<b style="color:var(--amber)">待审核记忆 ${rc.memories} 条</b>：${go("memories", "去记忆页确认/废弃")}`);
   if (rc.knowledge) items.push(`<b style="color:var(--amber)">待审核知识 ${rc.knowledge} 条</b>：${go("knowledge", "去知识页确认")}`);
-  if (rc.persona) items.push(`<b style="color:var(--amber)">AI 近期改过人格 ${rc.persona} 处</b>：${go("persona", "去人格页查看/回滚")}`);
+  if (rc.persona) items.push(`<b style="color:var(--amber)">AI 近期改过人格 ${rc.persona} 处</b>：<a href="#" data-goto="persona" data-mark-persona-viewed="1" style="color:var(--amber);margin-left:6px">去人格页查看/回滚 →</a>`);
   if (!items.length) { box.innerHTML = ""; return; }
   box.innerHTML = `<div class="card" style="margin-bottom:14px;border-color:rgba(230,100,80,.35)">
     <h2 style="color:#e66450">需要注意</h2>
@@ -2377,6 +2377,10 @@ document.addEventListener("click", (e) => {
   const a = e.target.closest("[data-goto]");
   if (!a) return;
   e.preventDefault();
+  // 人格变动通知：点进去查看就标记已读，通知从此消失
+  if (a.dataset.markPersonaViewed === "1") {
+    post("/api/persona/changes-viewed", {}).catch(err => console.error("标记人格通知已读:", err));
+  }
   switchTab(a.dataset.goto);
 });
 

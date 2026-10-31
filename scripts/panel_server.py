@@ -26,7 +26,7 @@ ASSETS = Path(__file__).resolve().parent.parent / "assets"
 _WRITE_ENDPOINTS = {
     "/api/remember", "/api/persona", "/api/persona/state", "/api/persona/restore",
     "/api/persona/edit", "/api/persona/mind", "/api/persona/interview",
-    "/api/persona/self", "/api/persona/rollback",
+    "/api/persona/self", "/api/persona/rollback", "/api/persona/changes-viewed",
     "/api/memory", "/api/memory/review", "/api/knowledge", "/api/knowledge/review",
     "/api/note", "/api/skill",
     "/api/skill/self-review", "/api/evolve", "/api/dream", "/api/dream/auto",
@@ -591,6 +591,11 @@ class Handler(BaseHTTPRequestHandler):
                 updates = data.get("updates") or {}
                 rejected = brain.update_persona(updates, why="面板编辑")
                 self._json({"ok": True, "rejected": rejected, "persona": brain.load_persona()})
+                return
+
+            if path == "/api/persona/changes-viewed":
+                # 用户点了「AI 近期改过人格」通知去查看：标记已读，通知消失
+                self._json(brain.mark_persona_changes_viewed())
                 return
 
             if path == "/api/persona/state":

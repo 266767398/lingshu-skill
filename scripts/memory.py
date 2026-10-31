@@ -86,16 +86,21 @@ def pending_memory_reviews() -> list:
 def ai_persona_changes(days: int = 7) -> list:
     """最近 N 天里由 AI（非手动）发起的人格变更，用于溯源与漂移告警。
 
+    只返回用户尚未查看过的改动（ts > persona._ai_changes_viewed_at），
+    这样用户点通知查看后通知就会消失，不会挂着烦 7 天。
     注意：做梦 traits 微调没过漂移门限也会写 history（field 带 "(漂移累积)"
     后缀、to 写"未过门限/未变"）——那些行什么都没改，不算 AI 改动，
     否则审核清单和漂移告警会被一堆"没生效的记账"撑得动不动就偏大。
     """
     p = load_persona()
     cutoff = now_ts() - days * 86400
+    viewed = float(p.get("_ai_changes_viewed_at") or 0)
     out = []
     for h in p.get("history", []):
         if float(h.get("ts", 0)) < cutoff:
             continue
+        if float(h.get("ts", 0)) <= viewed:
+            continue   # 已查看过的 AI 改动不再计入通知
         src = str(h.get("source", ""))
         why = str(h.get("why", ""))
         field = str(h.get("field", ""))
@@ -119,6 +124,16 @@ def ai_persona_changes(days: int = 7) -> list:
             continue
         out.append(h)
     return out
+
+
+def mark_persona_changes_viewed() -> dict:
+    """用户查看了 AI 人格改动通知：记下时间戳，之后这些改动不再计入通知。"""
+    if READONLY:
+        return {"ok": True}
+    p = load_persona()
+    p["_ai_changes_viewed_at"] = now_ts()
+    save_persona(p)
+    return {"ok": True}
 
 
 def set_memory_review(mid: str, status: str) -> dict:
