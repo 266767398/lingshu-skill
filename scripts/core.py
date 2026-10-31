@@ -607,24 +607,44 @@ def read_jsonl(path: Path) -> list:
     return out
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """整文件文本写入走 tmp + os.replace：直接 write_text 中途崩溃/被占用
+    会留半截文件（梦境报告、AGENTS.md 这类被宿主解析的文件半截更糟）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _tmp_path(path)
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    _replace_retry(tmp, path)
+
+
 def _replace_retry(tmp: Path, path: Path) -> None:
-    """os.replace 覆盖，遇 Windows 文件占用重试；最终失败则清掉 tmp 并抛出。"""
-    # Windows 上 os.replace 覆盖"正被别的进程打开读取"的文件会抛 PermissionError。
-    # 写方之间有锁互斥，但读方（stats/recall/面板）不加锁；短暂重试几次等读句柄释放。
-    for attempt in range(12):
+    """os.replace 覆盖，遇 Windows 文件占用按指数退避重试；最终失败则清掉 tmp 并抛出。
+
+    Windows 上 os.replace 覆盖"正被别的进程打开读取"的文件会抛 PermissionError。
+    写方之间有锁互斥，但读方（stats/recall/面板）不加锁；退避等待读句柄释放。
+    指数退避：0.05s 起步每次翻倍，封顶 0.6s，总预算约 10s——实测防病毒/索引器
+    持读句柄能超过 4s，固定 12×短间隔的重试扛不住这种长占用。
+    """
+    delay = 0.05
+    deadline = time.time() + 10.0
+    attempt = 0
+    while True:
         try:
             os.replace(tmp, path)
             return
         except PermissionError:
-            if attempt == 11:
-                log_event("io", f"写 {path.name} 失败：文件被占用，重试 12 次仍无果",
+            attempt += 1
+            if time.time() >= deadline:
+                log_event("io", f"写 {path.name} 失败：文件被占用，重试 {attempt} 次"
+                                f"（约 10s）仍无果，可能有进程长期持有读句柄",
                           level="error", path=path.name)
                 try:
                     os.unlink(tmp)
                 except OSError:
                     pass
                 raise
-            time.sleep(0.05 * (attempt + 1))
+            time.sleep(delay)
+            delay = min(delay * 2, 0.6)
 
 
 def write_jsonl(path: Path, rows: list) -> None:

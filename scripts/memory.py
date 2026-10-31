@@ -130,9 +130,12 @@ def mark_persona_changes_viewed() -> dict:
     """用户查看了 AI 人格改动通知：记下时间戳，之后这些改动不再计入通知。"""
     if READONLY:
         return {"ok": True}
-    p = load_persona()
-    p["_ai_changes_viewed_at"] = now_ts()
-    save_persona(p)
+    # 持 persona.json 写锁内"重新读再写"：load_persona() 返回的可能是旧快照，
+    # 直接拿去 save 会把并发期间其他进程写入的人格改动覆盖丢。
+    with _locked(HOME / "persona.json"):
+        p = load_persona()
+        p["_ai_changes_viewed_at"] = now_ts()
+        save_persona(p)
     return {"ok": True}
 
 
@@ -1212,7 +1215,7 @@ def capture(payload: str, tag: str = "", kind: str = "episode",
         head.append(f"标签：{tag}")
     head.append(f"字符数：{len(payload)}")
     head.append("")
-    archive.write_text("\n".join(head) + payload + "\n", encoding="utf-8")
+    write_text_atomic(archive, "\n".join(head) + payload + "\n")
 
     # 2) 逐段进海马体（--raw-only 时跳过：只留原文快照，不污染记忆库）
     if raw_only:

@@ -213,7 +213,7 @@ def write_dream_report(report: dict) -> Path:
         lines += ["", "## 淡忘的轮廓"]
         for f in report["forgotten"][:10]:
             lines.append(f"- {f['gist']}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_text_atomic(path, "\n".join(lines) + "\n")
     return path
 
 
@@ -291,6 +291,7 @@ def apply_dream(result: dict) -> dict:
             )
         records = load_all()
         by_id = {m["id"]: m for m in records if m.get("id")}
+        _old_terms_cache = {}  # id → terms：锁内缓存旧记忆分词，多条新记忆不重复算
 
         for item in result.get("memories") or []:
             if not isinstance(item, dict):
@@ -318,14 +319,23 @@ def apply_dream(result: dict) -> dict:
             # 新记忆与旧记忆高度相似但内容不同（说法变了/事实更新）时，旧的不删，
             # 打上 superseded_by 指向新的：回忆默认跳过被取代者，需要时仍可回溯
             # "我以前是怎么想的"——像人一样，观念变了但旧观念还在记忆深处。
+            # 大库时锁内 O(n²) 比对会堵死其他写进程：先用词交集粗筛出候选
+            # （jaccard ≥0.55 必有足够交集），再只对候选做精比对。
+            new_terms = terms(text)
+            _cand_threshold = len(new_terms) * 0.55
             for old in records:
                 if old is rec or old.get("layer") == "dust" or old.get("superseded_by"):
                     continue
-                old_terms = terms(str(old.get("text", "")))
+                old_terms = _old_terms_cache.get(old["id"])
+                if old_terms is None:
+                    old_terms = terms(str(old.get("text", "")))
+                    _old_terms_cache[old["id"]] = old_terms
                 if not old_terms:
                     continue
-                sim = jaccard(terms(text), old_terms)
-                if sim >= 0.55 and str(old.get("text", "")).strip() != text:
+                # 粗筛：交集元素数 < 0.55×|new| 时 jaccard 必然 < 0.55，直接跳过
+                if len(new_terms & old_terms) < _cand_threshold:
+                    continue
+                if jaccard(new_terms, old_terms) >= 0.55 and str(old.get("text", "")).strip() != text:
                     old["superseded_by"] = rec["id"]
                     rec.setdefault("links", [])
                     if old["id"] not in rec["links"]:
@@ -384,7 +394,7 @@ def apply_dream(result: dict) -> dict:
             # "梦想改什么、防线拦了什么"，而不是只看到悄悄没生效
             body += ["", "## 被防线拦下的改动"] + [f"- {x}" for x in rej]
         try:
-            path.write_text("\n".join(body) + "\n", encoding="utf-8")
+            write_text_atomic(path, "\n".join(body) + "\n")
         except OSError:
             pass   # 梦境笔记写不进去不影响记忆已落盘，别把成功报成失败
     clear_dream_draft()  # 应用成功后，网页里编辑过的那份草稿也一并清掉

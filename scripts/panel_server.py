@@ -359,6 +359,18 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code: int = 200):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
+    def _log_write_failure(self, label: str, exc: Exception, code: int) -> None:
+        """写接口的文件系统异常（占用/权限/冲突）落到运行日志，面板「日志」页可溯源。
+
+        str(exc) 含本机路径——日志里要全貌，HTTP 响应里只给通用文案。
+        日志本身绝不当崩溃源：写失败降级为 stderr，不影响错误响应的返回。
+        """
+        try:
+            brain.log_event("panel", f"POST {getattr(self, 'path', '?')} {label}",
+                            level="warn", detail=str(exc)[:300], code=code)
+        except Exception:
+            print(f"[面板] {label}: {exc}", file=sys.stderr)
+
     def _body(self):
         """读并解析 JSON 请求体。
 
@@ -1131,12 +1143,19 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
         except FileExistsError as exc:
             # 已有同名技能/扩展/笔记：409 冲突比 500 内部错误更符合事实，前端也能直接提示
-            # 系统异常的 str() 含本机路径，只回通用文案，细节进控制台日志
-            print(f"[面板] 文件已存在: {exc}", file=sys.stderr)
+            # 系统异常的 str() 含本机路径，只回通用文案，细节进运行日志（面板「日志」页可溯源）
+            self._log_write_failure("文件已存在", exc, 409)
             self._json({"error": "同名文件已存在"}, 409)
         except PermissionError as exc:
-            print(f"[面板] 文件被占用: {exc}", file=sys.stderr)
-            self._json({"error": "文件被占用或没有写入权限"}, 400)
+            # 文件被占用 / 无写权限：str() 也含路径，运行日志留全貌，响应只给通用文案
+            # —— 不落日志的话，用户只看到一条 400，谁占了文件、占的是哪个文件完全无从排查
+            self._log_write_failure("文件被占用或无写权限", exc, 400)
+            # WinError 5 的 str() 通常带"拒绝访问"——那是权限问题，重试没用；
+            # 其余多为短暂占用（读句柄/杀软扫描），提示稍后重试
+            msg = str(exc)
+            self._json({"error": "没有写入权限，请检查记忆库文件夹权限"
+                        if ("拒绝访问" in msg or "Access is denied" in msg or "denied" in msg.lower())
+                        else "文件被占用，请稍后重试"}, 400)
         except (ValueError, KeyError) as exc:
             # 业务异常 / 参数错：消息本身就是给用户看的，直接回显。
             # KeyError 的 str() 自带英文引号（"'没有这个技能'"），剥掉再给前端

@@ -1931,7 +1931,7 @@ def _upsert_agents_block(path: Path, generated: str) -> str:
     - 无标记且含用户手写：把灵枢区块插到最前面，原内容整体保留在下方。
     """
     if not path.exists():
-        path.write_text(generated, encoding="utf-8")
+        write_text_atomic(path, generated)
         return "written"
     old = path.read_text(encoding="utf-8")
     i = old.find(AGENTS_BLOCK_START)
@@ -1941,7 +1941,7 @@ def _upsert_agents_block(path: Path, generated: str) -> str:
             block = generated[generated.find(AGENTS_BLOCK_START):]
             new = old[:i] + block.rstrip("\n") + old[j + len(AGENTS_BLOCK_END):]
             if new != old:
-                path.write_text(new, encoding="utf-8")
+                write_text_atomic(path, new)
             return "updated"
         # 有 start 却没有 end（上次写到一半/用户删了标记）：补一个 end 闭合，
         # start 之后的内容原样保留到下方，绝不吞掉用户手写的东西，也不会叠出两个区块。
@@ -1952,13 +1952,13 @@ def _upsert_agents_block(path: Path, generated: str) -> str:
         parts = [p for p in (head, block, tail) if p]
         new = "\n\n".join(parts) + "\n"
         if new != old:
-            path.write_text(new, encoding="utf-8")
+            write_text_atomic(path, new)
         return "updated"
     # 旧版无标记：整份都是生成的才整体替换；否则视为含用户手写，插在最前面
     if _looks_generated(old):
-        path.write_text(generated, encoding="utf-8")
+        write_text_atomic(path, generated)
         return "updated"
-    path.write_text(generated.rstrip("\n") + "\n\n" + old.lstrip("\n"), encoding="utf-8")
+    write_text_atomic(path, generated.rstrip("\n") + "\n\n" + old.lstrip("\n"))
     return "merged"
 
 
@@ -2119,8 +2119,12 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
         raise FileExistsError(f"全局技能目录已有同名技能 {name}；确认覆盖请加 --force")
 
     generated = _agents_md(name, meta.get("description", ""), meta, from_dir)
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    # 整目录复制（跳过缓存、临时文件与源仓库的 .git 历史），保留 scripts/ assets/ 等运行时资源
+    # 整目录复制到 staging 再原子替换：直接往 dst_dir 里 copy2+unlink，中途失败
+    # （文件被占用/断电）会留下半新半旧的技能目录，技能直接不可用。
+    # staging 用同一父目录下的临时名，保证 _atomic_replace_dir 的 rename 在同一卷上。
+    staging = dst_dir.parent / (dst_dir.name + ".staging")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
     copied = set()
     for item in src_dir.rglob("*"):
         if item.is_dir() or "__pycache__" in item.parts or ".git" in item.parts:
@@ -2129,43 +2133,23 @@ def install_skill(name: str, force: bool = False, from_dir: str | None = None,
                 or item.name in (".lingshu-source", ".lingshu-sha")):
             continue
         rel = item.relative_to(src_dir)
-        target = dst_dir / rel
+        target = staging / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(item, target)
         copied.add(rel.as_posix())
-    # --force 是"以源为准"的镜像更新：源里已经删掉的文件，目标里也要清掉，
-    # 否则旧脚本/旧资源会一直留在全局副本里（新版改了名，旧文件仍被加载/扫描）。
-    removed = []
-    if force and dst_dir.exists():
-        for old in list(dst_dir.rglob("*")):
-            if old.is_dir() or "__pycache__" in old.parts:
-                continue
-            rel = old.relative_to(dst_dir).as_posix()
-            if rel in copied or rel == "AGENTS.md":
-                continue
-            try:
-                old.unlink()
-                removed.append(rel)
-            except OSError:
-                pass
-        # 顺手清掉删空后的子目录（不动 dst_dir 本身）
-        for d in sorted((x for x in dst_dir.rglob("*") if x.is_dir()), reverse=True):
-            try:
-                if d != dst_dir and not any(d.iterdir()):
-                    d.rmdir()
-            except OSError:
-                pass
-        if removed:
-            brain.log_event("skill", f"安装 {name} 时清理了 {len(removed)} 个源中已删除的文件",
-                            files=removed[:20])
-    # AGENTS.md：DSH/DeepSeek 常驻入口。
-    # 区块化维护：灵枢只写 <!-- lingshu:start/end --> 之间的规则，
-    # 用户手写部分（DSH 只读保护、全局目录指回等）更新永不覆盖。
-    agents = dst_dir / "AGENTS.md"
-    if not agents.exists():
-        agents.write_text(generated, encoding="utf-8")
-    else:
+    # AGENTS.md 先在 staging 里做好：替换动作本身一步到位，不留中间态
+    agents = staging / "AGENTS.md"
+    if (dst_dir / "AGENTS.md").exists():
         _upsert_agents_block(agents, generated)
+    else:
+        agents.write_text(generated, encoding="utf-8")
+    try:
+        _atomic_replace_dir(staging, dst_dir)
+    except OSError:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    # 原子替换天然就是"以源为准"的镜像（--force 语义）：源里删掉的文件在替换后
+    # 不会残留，dst_dir 整体就是 staging 的副本，无需再跑删除循环。
 
     reg = load_registry()
     reg.setdefault(name, {})["installed_at"] = brain.now_ts()
