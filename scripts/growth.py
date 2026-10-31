@@ -1357,6 +1357,50 @@ def _fetch_gitee_zip_source() -> Path:
             pass
 
 
+def _fetch_git_source(repo_url: str, branch: str, source: str) -> Path:
+    """用 git clone --depth 1 拉远程源（绕过 Gitee/GitHub REST API 匿名限流）。
+
+    git smart-http 协议不限流，是 API/zip 都被风控时的可靠兜底。成功返回缓存
+    目录，失败抛异常。
+    """
+    import subprocess
+    from uuid import uuid4
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("未找到 git 命令，无法用 git 协议拉取")
+    cache = _remote_cache_dir()
+    staging = cache / f"staging-git-{os.getpid()}-{uuid4().hex[:8]}"
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        # --depth 1 浅克隆最快；--single-branch 只拉目标分支
+        subprocess.run(
+            [git, "clone", "--depth", "1", "--single-branch",
+             "--branch", branch, repo_url, str(staging)],
+            check=True, capture_output=True, text=True, timeout=REMOTE_TIMEOUT)
+        if not (staging / "SKILL.md").is_file():
+            raise RuntimeError("git 克隆后找不到 SKILL.md（仓库结构不符）")
+        # 拿 HEAD SHA 写标记，供下次 SHA 快路径命中
+        try:
+            sha = subprocess.run(
+                [git, "-C", str(staging), "rev-parse", "HEAD"],
+                check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+        except Exception:
+            sha = ""
+        if sha:
+            try:
+                (staging / ".lingshu-sha").write_text(sha, encoding="utf-8")
+            except OSError:
+                pass
+        _atomic_replace_dir(staging, cache / "extracted")
+        _mark_source(cache, source)
+        return cache / "extracted"
+    except subprocess.CalledProcessError as e:
+        msg = (e.stderr or e.stdout or "").strip().splitlines()[-1] if (e.stderr or e.stdout) else str(e)
+        raise RuntimeError(f"git clone 失败：{msg}") from e
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def _atomic_replace_dir(src: Path, dst: Path) -> None:
     """把 staging 目录原子替换为正式缓存目录。
 
@@ -1497,12 +1541,16 @@ _TOKEN_HINT = "（提示：设置 GITEE_TOKEN / GITHUB_TOKEN 环境变量可绕�
 
 
 def _try_remote_chain(expected_mark: bool = True) -> str:
-    """走一遍完整拉取链路：Gitee API → Gitee zip → GitHub。
+    """走一遍完整拉取链路：Gitee API → Gitee zip → Gitee git → GitHub API → GitHub git。
 
     成功直接返回源目录（内部 return）；全部失败返回空串对应的错误汇总文本。
     expected_mark=False（整体重试轮）时不写 SHA 标记，防止把重试轮拉到的
     内容误标成另一个 commit。
+    git 协议兜底：REST API/zip 被匿名风控限流时，git smart-http 不限流，
+    是最可靠的后备方案。
     """
+    gitee_clone = "https://gitee.com/htmcwy_0/lingshu-skill.git"
+    github_clone = f"https://github.com/{GITHUB_REPO}.git"
     head_sha = _remote_head_sha(GITEE_API_BASE, GITEE_BRANCH, "gitee") if expected_mark else ""
     try:
         _fetch_tree_source(
@@ -1517,6 +1565,11 @@ def _try_remote_chain(expected_mark: bool = True) -> str:
     except Exception as e:
         err = f"Gitee 归档兜底失败：{e}{_TOKEN_HINT}"
     try:
+        _fetch_git_source(gitee_clone, GITEE_BRANCH, "gitee")
+        return ""
+    except Exception as e:
+        err = f"Gitee git 兜底失败：{e}"
+    try:
         head_sha = _remote_head_sha(GITHUB_API_BASE, GITHUB_BRANCH, "github") if expected_mark else ""
         _fetch_tree_source(
             GITHUB_API_BASE, GITHUB_BRANCH, "GitHub", "github",
@@ -1524,6 +1577,11 @@ def _try_remote_chain(expected_mark: bool = True) -> str:
         return ""
     except Exception as e:
         err += f"；GitHub 拉取失败：{e}{_TOKEN_HINT}"
+    try:
+        _fetch_git_source(github_clone, GITHUB_BRANCH, "github")
+        return ""
+    except Exception as e:
+        err += f"；GitHub git 兜底失败：{e}"
     return err
 
 
@@ -1565,11 +1623,16 @@ def _lingshu_remote_source_locked(force: bool) -> tuple[Path | None, str, str]:
         # 间歇抖动，重试常能过）。最后一次失败不再白等 2 秒。
         if attempt < 1:
             time.sleep(2.0)
+    if err == "" and (cached / "SKILL.md").is_file():
+        # 拉取成功：返回刚写入缓存的最新源
+        return cached, _cached_source(cache), ""
     # 全链路失败：如果还有一份旧缓存（哪怕已超期），宁可用旧缓存也别硬报错。
     if (cached / "SKILL.md").is_file():
         print(f"[lingshu] 远程拉取失败，复用上次缓存的旧源（可能不是最新）。{err}",
               file=sys.stderr)
-        return cached, _cached_source(cache), ""
+        # 把真实错误带回调用方：手动检查时前端能显示"为什么拉不到"（风控/限流），
+        # 而不是笼统说"远程源不可用"。
+        return cached, _cached_source(cache), err
     print(f"[lingshu] 远程拉取失败（Gitee 与 GitHub 均不可达），降级为本地副本源。{err}",
           file=sys.stderr)
     return None, "none", err
@@ -1595,7 +1658,9 @@ def _update_check_live(name: str = "lingshu", force_pull: bool = False) -> dict:
         # 面板跑在全局副本里时，"自身目录"==已装目录，自己比自己永远"一致"。
         # 此时必须拉远程源，拉不到则降级为"源即副本"（显示已最新），不崩溃。
         if src_dir.resolve() == _find_installed(_require_slug(name)).resolve():
-            remote, source, err = _lingshu_remote_source()
+            # force_pull=True（手动点「检查更新」/服务启动检测）必须强制重新拉远程源，
+            # 不能复用 10 分钟缓存——否则刚发布的新版本检测不到，一直显示已最新。
+            remote, source, err = _lingshu_remote_source(force=force_pull)
             if remote is not None:
                 src_dir = remote
                 out_src = source
@@ -1687,8 +1752,11 @@ def _update_check_live(name: str = "lingshu", force_pull: bool = False) -> dict:
         "global_path": str(installed_dir),
     }
     if stale_source:
-        out["error"] = (f"远程源不可用，缓存源版本（v{out['version']}）不比已装"
-                        f"（v{out['installed_version']}）新，已忽略这次检查，不倒退更新")
+        detail = f"远程源不可用，缓存源版本（v{out['version']}）不比已装" \
+                 f"（v{out['installed_version']}）新，已忽略这次检查，不倒退更新"
+        if err:
+            detail += f"。原因：{str(err).split('（提示：')[0].strip()}"
+        out["error"] = detail
     if out["outdated"]:
         # 硬约束：面板更新说明只给人类可读正文，绝不把文件清单兜底显示给用户。
         # 所以 changed/added/removed 不进响应（前端兜底分支随之失效），

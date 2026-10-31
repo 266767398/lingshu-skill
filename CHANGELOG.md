@@ -2,6 +2,18 @@
 
 本文件记录灵枢的版本变更。版本号跟随 `SKILL.md` 的 frontmatter 版本。
 
+## v2.27 — 更新按钮修复：强制重拉 + git 协议兜底
+
+- **手动「检查更新」真正强制重拉**：`_update_check_live` 把 `force_pull` 透传给
+  `_lingshu_remote_source(force=force_pull)`，不再复用 10 分钟缓存——刚发布的
+  新版本能立即检测到。
+- **新增 git clone 兜底链路**：Gitee/GitHub REST API 和 zip 归档被匿名风控
+  限流时，自动回退到 `git clone --depth 1`（git smart-http 不限流），拉取
+  链路变为 Gitee API → Gitee zip → Gitee git → GitHub API → GitHub git。
+- **远程失败时显示真实原因**：回退到旧缓存时把实际错误（风控/限流）带回前端，
+  不再笼统显示"远程源不可用"。
+- 修复拉取成功后仍误打印"远程拉取失败"日志的问题。
+
 ## v2.26 — 人格变动通知可消除
 
 - **人格变动通知点进去查看即消失**：`ai_persona_changes` 新增已读时间戳过滤，
